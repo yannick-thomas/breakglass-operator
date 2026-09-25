@@ -1,0 +1,15 @@
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassSession
+metadata:
+  name: incident-db-emergency
+spec:
+  subject:
+    kind: User
+    name: "yannick.thomas@cloudogu.com"
+  roleRef:
+    kind: ClusterRole
+    name: edit
+  targetNamespace: "default"
+  duration: "2m"
+  reason: "Investigating broken database connection pool (INC-1092)"
+
