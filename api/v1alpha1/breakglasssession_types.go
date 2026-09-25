@@ -25,12 +25,13 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // SessionPhase defines the current lifecycle phase of a BreakGlassSession
-// +kubebuilder:validation:Enum=Pending;Active;Expired;Revoked
+// +kubebuilder:validation:Enum=Pending;Active;Denied;Expired;Revoked
 type SessionPhase string
 
 const (
 	PhasePending SessionPhase = "Pending"
 	PhaseActive  SessionPhase = "Active"
+	PhaseDenied  SessionPhase = "Denied"
 	PhaseExpired SessionPhase = "Expired"
 	PhaseRevoked SessionPhase = "Revoked"
 )
@@ -54,10 +55,12 @@ type SubjectReference struct {
 	// Name of the subject (e.g. email, username, serviceaccount name)
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
 	// Namespace of the subject (only relevant when Kind is ServiceAccount)
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`
 }
 
@@ -71,10 +74,24 @@ type RoleReference struct {
 	// Name of the Role or ClusterRole
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 }
 
 // BreakGlassSessionSpec defines the desired state of BreakGlassSession
+//
+// BreakGlassSession describes one immutable access grant.  The only permitted
+// transition is revocation; changing a role, subject, scope, duration, or
+// reason would make the audit record ambiguous and could turn an approved
+// request into a different grant.
+// +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject",message="subject is immutable"
+// +kubebuilder:validation:XValidation:rule="self.roleRef == oldSelf.roleRef",message="roleRef is immutable"
+// +kubebuilder:validation:XValidation:rule="self.targetNamespace == oldSelf.targetNamespace",message="targetNamespace is immutable"
+// +kubebuilder:validation:XValidation:rule="self.duration == oldSelf.duration",message="duration is immutable"
+// +kubebuilder:validation:XValidation:rule="self.reason == oldSelf.reason",message="reason is immutable"
+// +kubebuilder:validation:XValidation:rule="!oldSelf.revoked || self.revoked",message="revoked cannot be changed from true to false"
+// +kubebuilder:validation:XValidation:rule="self.roleRef.kind == 'ClusterRole' || (has(self.targetNamespace) && size(self.targetNamespace) > 0)",message="a Role can only be bound in a targetNamespace"
+// +kubebuilder:validation:XValidation:rule="self.subject.kind == 'ServiceAccount' ? (has(self.subject.namespace) && size(self.subject.namespace) > 0) : (!has(self.subject.namespace) || size(self.subject.namespace) == 0)",message="a ServiceAccount requires subject.namespace; User and Group subjects must not set it"
 type BreakGlassSessionSpec struct {
 	// Subject specifies who gets access
 	// +kubebuilder:validation:Required
@@ -88,6 +105,7 @@ type BreakGlassSessionSpec struct {
 	// If omitted or empty, access is granted cluster-wide via ClusterRoleBinding.
 	// If set, access is granted only within that namespace via RoleBinding.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	TargetNamespace string `json:"targetNamespace,omitempty"`
 
 	// Duration is the lifespan of this break-glass session (e.g. "30m", "1h", "2h30m").
@@ -98,6 +116,7 @@ type BreakGlassSessionSpec struct {
 	// Reason explains why this emergency access is needed (audit trail).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=5
+	// +kubebuilder:validation:MaxLength=1024
 	Reason string `json:"reason"`
 
 	// Revoked allows manual revocation before the duration expires.
@@ -107,7 +126,7 @@ type BreakGlassSessionSpec struct {
 
 // BreakGlassSessionStatus defines the observed state of BreakGlassSession.
 type BreakGlassSessionStatus struct {
-	// Phase is the current lifecycle state (Pending, Active, Expired, Revoked)
+	// Phase is the current lifecycle state (Pending, Active, Denied, Expired, Revoked)
 	// +optional
 	Phase SessionPhase `json:"phase,omitempty"`
 

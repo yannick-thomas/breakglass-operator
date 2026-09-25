@@ -73,6 +73,7 @@ spec:
               reason:
                 description: Reason explains why this emergency access is needed (audit
                   trail).
+                maxLength: 1024
                 minLength: 5
                 type: string
               revoked:
@@ -91,6 +92,7 @@ spec:
                     type: string
                   name:
                     description: Name of the Role or ClusterRole
+                    maxLength: 253
                     minLength: 1
                     type: string
                 required:
@@ -110,11 +112,13 @@ spec:
                   name:
                     description: Name of the subject (e.g. email, username, serviceaccount
                       name)
+                    maxLength: 253
                     minLength: 1
                     type: string
                   namespace:
                     description: Namespace of the subject (only relevant when Kind
                       is ServiceAccount)
+                    maxLength: 63
                     type: string
                 required:
                 - kind
@@ -125,6 +129,7 @@ spec:
                   TargetNamespace specifies the namespace where the role is bound.
                   If omitted or empty, access is granted cluster-wide via ClusterRoleBinding.
                   If set, access is granted only within that namespace via RoleBinding.
+                maxLength: 63
                 type: string
             required:
             - duration
@@ -132,6 +137,27 @@ spec:
             - roleRef
             - subject
             type: object
+            x-kubernetes-validations:
+            - message: subject is immutable
+              rule: self.subject == oldSelf.subject
+            - message: roleRef is immutable
+              rule: self.roleRef == oldSelf.roleRef
+            - message: targetNamespace is immutable
+              rule: self.targetNamespace == oldSelf.targetNamespace
+            - message: duration is immutable
+              rule: self.duration == oldSelf.duration
+            - message: reason is immutable
+              rule: self.reason == oldSelf.reason
+            - message: revoked cannot be changed from true to false
+              rule: '!oldSelf.revoked || self.revoked'
+            - message: a Role can only be bound in a targetNamespace
+              rule: self.roleRef.kind == 'ClusterRole' || (has(self.targetNamespace)
+                && size(self.targetNamespace) > 0)
+            - message: a ServiceAccount requires subject.namespace; User and Group
+                subjects must not set it
+              rule: 'self.subject.kind == ''ServiceAccount'' ? (has(self.subject.namespace)
+                && size(self.subject.namespace) > 0) : (!has(self.subject.namespace)
+                || size(self.subject.namespace) == 0)'
           status:
             description: status defines the observed state of BreakGlassSession
             properties:
@@ -206,10 +232,11 @@ spec:
                 type: string
               phase:
                 description: Phase is the current lifecycle state (Pending, Active,
-                  Expired, Revoked)
+                  Denied, Expired, Revoked)
                 enum:
                 - Pending
                 - Active
+                - Denied
                 - Expired
                 - Revoked
                 type: string

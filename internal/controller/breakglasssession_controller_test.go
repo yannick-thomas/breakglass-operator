@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -100,6 +101,22 @@ var _ = Describe("BreakGlassSession Controller", func() {
 			Expect(updatedSession.Status.Phase).To(Equal(accessv1alpha1.PhaseActive))
 			Expect(updatedSession.Status.ExpiresAt).NotTo(BeNil())
 			Expect(updatedSession.Status.BindingName).To(Equal("breakglass-test-incident-session"))
+			Expect(updatedSession.Status.Conditions).To(ContainElement(SatisfyAll(
+				HaveField("Type", Equal(AccessGrantedCondition)),
+				HaveField("Status", Equal(metav1.ConditionTrue)),
+			)))
+
+			binding := &rbacv1.RoleBinding{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      updatedSession.Status.BindingName,
+				Namespace: updatedSession.Spec.TargetNamespace,
+			}, binding)).To(Succeed())
+			Expect(binding.Labels).To(HaveKeyWithValue(SessionUIDLabelKey, string(updatedSession.UID)))
+			Expect(binding.OwnerReferences).To(HaveLen(1))
+			owner := binding.OwnerReferences[0]
+			Expect(owner.UID).To(Equal(updatedSession.UID))
+			Expect(owner.Controller).NotTo(BeNil())
+			Expect(*owner.Controller).To(BeTrue())
 		})
 	})
 })
