@@ -1,0 +1,112 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: accessprofiles.access.breakglass.io
+spec:
+  group: access.breakglass.io
+  names:
+    kind: AccessProfile
+    listKind: AccessProfileList
+    plural: accessprofiles
+    shortNames:
+    - ap
+    singular: accessprofile
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Pre-approved Role or ClusterRole
+      jsonPath: .spec.roleRef.name
+      name: Role
+      type: string
+    - description: Only namespace this profile can grant in
+      jsonPath: .spec.targetNamespace
+      name: Target-NS
+      type: string
+    - description: Maximum permitted session duration
+      jsonPath: .spec.maxDuration
+      name: Max-Duration
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: AccessProfile is the Schema for the accessprofiles API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of AccessProfile
+            properties:
+              maxDuration:
+                description: |-
+                  MaxDuration is the longest permitted session duration for this profile,
+                  expressed as a Go duration such as "30m" or "1h".
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              roleRef:
+                description: |-
+                  RoleRef is the pre-approved Role or ClusterRole to bind in targetNamespace.
+                  A ClusterRole is still bound with a namespaced RoleBinding; it does not make
+                  the resulting grant cluster-wide.
+                properties:
+                  kind:
+                    default: ClusterRole
+                    description: Kind of the role (ClusterRole or Role)
+                    enum:
+                    - Role
+                    - ClusterRole
+                    type: string
+                  name:
+                    description: Name of the Role or ClusterRole
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              targetNamespace:
+                description: |-
+                  TargetNamespace is the only namespace in which this profile can grant
+                  access. Cluster-wide profiles are intentionally out of scope for this API.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - maxDuration
+            - roleRef
+            - targetNamespace
+            type: object
+            x-kubernetes-validations:
+            - message: AccessProfile policy fields are immutable; create a new, versioned
+                profile instead
+              rule: self == oldSelf
+            - message: v1alpha1 AccessProfiles may reference only curated ClusterRoles
+              rule: self.roleRef.kind == 'ClusterRole'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

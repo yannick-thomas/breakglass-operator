@@ -25,15 +25,16 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // SessionPhase defines the current lifecycle phase of a BreakGlassSession
-// +kubebuilder:validation:Enum=Pending;Active;Denied;Expired;Revoked
+// +kubebuilder:validation:Enum=Pending;Active;Suspended;Denied;Expired;Revoked
 type SessionPhase string
 
 const (
-	PhasePending SessionPhase = "Pending"
-	PhaseActive  SessionPhase = "Active"
-	PhaseDenied  SessionPhase = "Denied"
-	PhaseExpired SessionPhase = "Expired"
-	PhaseRevoked SessionPhase = "Revoked"
+	PhasePending   SessionPhase = "Pending"
+	PhaseActive    SessionPhase = "Active"
+	PhaseSuspended SessionPhase = "Suspended"
+	PhaseDenied    SessionPhase = "Denied"
+	PhaseExpired   SessionPhase = "Expired"
+	PhaseRevoked   SessionPhase = "Revoked"
 )
 
 // SubjectKind defines the type of subject (User, Group, ServiceAccount)
@@ -61,7 +62,7 @@ type SubjectReference struct {
 	// Namespace of the subject (only relevant when Kind is ServiceAccount)
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
-	Namespace string `json:"namespace,omitempty"`
+	Namespace string `json:"namespace"`
 }
 
 // RoleReference specifies the Role or ClusterRole being granted
@@ -78,35 +79,44 @@ type RoleReference struct {
 	Name string `json:"name"`
 }
 
-// BreakGlassSessionSpec defines the desired state of BreakGlassSession
+// BreakGlassSessionSpec defines an immutable self-service JIT request.
 //
-// BreakGlassSession describes one immutable access grant.  The only permitted
-// transition is revocation; changing a role, subject, scope, duration, or
-// reason would make the audit record ambiguous and could turn an approved
-// request into a different grant.
+// The request intentionally contains no role or target namespace. Those
+// privileged choices belong to the administrator-owned AccessProfile. The
+// admission webhook writes subject and accessProfileUID from the authenticated
+// API request and the controller verifies the resulting profile snapshot.
+// The only permitted client transition is early revocation.
+//
+// This is an intentionally breaking v1alpha1 API change from the original
+// free-form roleRef/targetNamespace model. Existing grants should be allowed
+// to expire or be revoked before upgrading.
+// +kubebuilder:validation:XValidation:rule="self.accessProfile == oldSelf.accessProfile",message="accessProfile is immutable"
+// +kubebuilder:validation:XValidation:rule="self.accessProfileUID == oldSelf.accessProfileUID",message="accessProfileUID is immutable"
 // +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject",message="subject is immutable"
-// +kubebuilder:validation:XValidation:rule="self.roleRef == oldSelf.roleRef",message="roleRef is immutable"
-// +kubebuilder:validation:XValidation:rule="self.targetNamespace == oldSelf.targetNamespace",message="targetNamespace is immutable"
 // +kubebuilder:validation:XValidation:rule="self.duration == oldSelf.duration",message="duration is immutable"
 // +kubebuilder:validation:XValidation:rule="self.reason == oldSelf.reason",message="reason is immutable"
 // +kubebuilder:validation:XValidation:rule="!oldSelf.revoked || self.revoked",message="revoked cannot be changed from true to false"
-// +kubebuilder:validation:XValidation:rule="self.roleRef.kind == 'ClusterRole' || (has(self.targetNamespace) && size(self.targetNamespace) > 0)",message="a Role can only be bound in a targetNamespace"
-// +kubebuilder:validation:XValidation:rule="self.subject.kind == 'ServiceAccount' ? (has(self.subject.namespace) && size(self.subject.namespace) > 0) : (!has(self.subject.namespace) || size(self.subject.namespace) == 0)",message="a ServiceAccount requires subject.namespace; User and Group subjects must not set it"
+// +kubebuilder:validation:XValidation:rule="self.subject.kind == 'User' && (!has(self.subject.namespace) || size(self.subject.namespace) == 0)",message="v1alpha1 self-service sessions may only grant the authenticated User requester"
 type BreakGlassSessionSpec struct {
-	// Subject specifies who gets access
+	// AccessProfile is the fixed, administrator-owned access policy to use.
+	// The requester requires the custom RBAC verb "use" on this named profile.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	AccessProfile string `json:"accessProfile"`
+
+	// AccessProfileUID is written by the mutating admission webhook from the
+	// selected profile's server-assigned UID. It prevents a delete/recreate of
+	// the same profile name from silently changing a pending request.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	AccessProfileUID string `json:"accessProfileUID"`
+
+	// Subject is written by the mutating admission webhook from the
+	// authenticated API requester. Client-supplied values are overwritten and
+	// v1alpha1 supports only a self-service User grant.
 	// +kubebuilder:validation:Required
 	Subject SubjectReference `json:"subject"`
-
-	// RoleRef specifies which Role or ClusterRole to bind
-	// +kubebuilder:validation:Required
-	RoleRef RoleReference `json:"roleRef"`
-
-	// TargetNamespace specifies the namespace where the role is bound.
-	// If omitted or empty, access is granted cluster-wide via ClusterRoleBinding.
-	// If set, access is granted only within that namespace via RoleBinding.
-	// +optional
-	// +kubebuilder:validation:MaxLength=63
-	TargetNamespace string `json:"targetNamespace,omitempty"`
 
 	// Duration is the lifespan of this break-glass session (e.g. "30m", "1h", "2h30m").
 	// +kubebuilder:validation:Required
@@ -124,9 +134,49 @@ type BreakGlassSessionSpec struct {
 	Revoked bool `json:"revoked,omitempty"`
 }
 
+// ResolvedAccess is the immutable, controller-recorded profile snapshot used
+// for an active grant. It leaves a durable audit record and prevents later
+// profile changes or replacement from altering the bound RBAC role or scope.
+type ResolvedAccess struct {
+	// AccessProfile is the selected policy name.
+	AccessProfile string `json:"accessProfile"`
+
+	// AccessProfileUID is the UID of the policy that was authorized and resolved.
+	AccessProfileUID string `json:"accessProfileUID"`
+
+	// RoleRef is the profile's curated ClusterRole.
+	RoleRef RoleReference `json:"roleRef"`
+
+	// TargetNamespace is the profile's fixed namespace.
+	TargetNamespace string `json:"targetNamespace"`
+}
+
+// BindingReference is the immutable, server-assigned identity of the
+// RoleBinding created for a session. The controller uses its UID as the
+// authoritative ownership proof after activation: a different object with the
+// same name must never be repaired, adopted, or deleted.
+type BindingReference struct {
+	// Kind is RoleBinding. ClusterRoleBinding is deliberately not supported by
+	// the AccessProfile-based v1alpha1 API.
+	// +kubebuilder:validation:Enum=RoleBinding
+	Kind string `json:"kind"`
+
+	// Name is the RBAC binding name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Namespace is the fixed namespace of the profile's RoleBinding.
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+
+	// UID is the server-assigned UID of the created binding.
+	// +kubebuilder:validation:MinLength=1
+	UID string `json:"uid"`
+}
+
 // BreakGlassSessionStatus defines the observed state of BreakGlassSession.
 type BreakGlassSessionStatus struct {
-	// Phase is the current lifecycle state (Pending, Active, Denied, Expired, Revoked)
+	// Phase is the current lifecycle state (Pending, Active, Suspended, Denied, Expired, Revoked)
 	// +optional
 	Phase SessionPhase `json:"phase,omitempty"`
 
@@ -138,9 +188,20 @@ type BreakGlassSessionStatus struct {
 	// +optional
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 
-	// BindingName is the name of the created RoleBinding or ClusterRoleBinding
+	// BindingName is the name of the created RoleBinding.
 	// +optional
 	BindingName string `json:"bindingName,omitempty"`
+
+	// BindingRef is the authoritative identity of the RBAC binding created for
+	// this session. Once present, the controller only acts on an object that
+	// matches this kind, namespace, name, and UID exactly.
+	// +optional
+	BindingRef *BindingReference `json:"bindingRef,omitempty"`
+
+	// Grant is the immutable profile snapshot resolved when the session became
+	// active. A missing or mismatched profile snapshot is fail-closed.
+	// +optional
+	Grant *ResolvedAccess `json:"grant,omitempty"`
 
 	// Conditions represent the latest available observations of the session's state.
 	// +listType=map
@@ -152,9 +213,10 @@ type BreakGlassSessionStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=bgs
-// +kubebuilder:printcolumn:name="Subject",type="string",JSONPath=".spec.subject.name",description="Subject granted access"
-// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.roleRef.name",description="Role granted"
-// +kubebuilder:printcolumn:name="Target-NS",type="string",JSONPath=".spec.targetNamespace",description="Target namespace (empty = cluster-wide)"
+// +kubebuilder:printcolumn:name="Subject",type="string",JSONPath=".spec.subject.name",description="Authenticated requester granted access"
+// +kubebuilder:printcolumn:name="Profile",type="string",JSONPath=".spec.accessProfile",description="Administrator-owned access profile"
+// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.grant.roleRef.name",description="Resolved curated role"
+// +kubebuilder:printcolumn:name="Target-NS",type="string",JSONPath=".status.grant.targetNamespace",description="Resolved fixed target namespace"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Session phase"
 // +kubebuilder:printcolumn:name="Expires-At",type="string",JSONPath=".status.expiresAt",description="Session expiry timestamp"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

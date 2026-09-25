@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/access.breakglass.io_breakglasssessions.yaml
+- bases/access.breakglass.io_accessprofiles.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -3,13 +3,8 @@ kind: BreakGlassSession
 metadata:
   name: incident-db-emergency
 spec:
-  subject:
-    kind: User
-    name: "yannick.thomas@cloudogu.com"
-  roleRef:
-    kind: ClusterRole
-    name: edit
-  targetNamespace: "default"
+  # The mutating webhook records both the authenticated requester as subject
+  # and the server-assigned accessProfileUID. Do not supply either field.
+  accessProfile: production-pod-observer
   duration: "2m"
   reason: "Investigating broken database connection pool (INC-1092)"
-

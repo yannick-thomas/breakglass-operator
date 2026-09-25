@@ -17,4 +17,15 @@ resources:
   kind: BreakGlassSession
   path: github.com/yannick-thomas/breakglass-operator/api/v1alpha1
   version: v1alpha1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+  domain: breakglass.io
+  group: access
+  kind: AccessProfile
+  path: github.com/yannick-thomas/breakglass-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

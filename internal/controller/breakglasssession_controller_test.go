@@ -42,25 +42,36 @@ var _ = Describe("BreakGlassSession Controller", func() {
 		}
 
 		BeforeEach(func() {
+			profile := &accessv1alpha1.AccessProfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer"},
+				Spec: accessv1alpha1.AccessProfileSpec{
+					RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
+					TargetNamespace: "default",
+					MaxDuration:     "30m",
+				},
+			}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: profile.Name}, &accessv1alpha1.AccessProfile{})
+			if err != nil && errors.IsNotFound(err) {
+				Expect(k8sClient.Create(ctx, profile)).To(Succeed())
+			}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: profile.Name}, profile)).To(Succeed())
+
 			session := &accessv1alpha1.BreakGlassSession{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: resourceName,
 				},
 				Spec: accessv1alpha1.BreakGlassSessionSpec{
+					AccessProfile:    profile.Name,
+					AccessProfileUID: string(profile.UID),
 					Subject: accessv1alpha1.SubjectReference{
 						Kind: accessv1alpha1.SubjectKindUser,
 						Name: "dev@example.com",
 					},
-					RoleRef: accessv1alpha1.RoleReference{
-						Kind: "ClusterRole",
-						Name: "edit",
-					},
-					TargetNamespace: "default",
-					Duration:        "30m",
-					Reason:          "Debugging production outage",
+					Duration: "30m",
+					Reason:   "Debugging production outage",
 				},
 			}
-			err := k8sClient.Get(ctx, typeNamespacedName, &accessv1alpha1.BreakGlassSession{})
+			err = k8sClient.Get(ctx, typeNamespacedName, &accessv1alpha1.BreakGlassSession{})
 			if err != nil && errors.IsNotFound(err) {
 				Expect(k8sClient.Create(ctx, session)).To(Succeed())
 			}
@@ -100,7 +111,13 @@ var _ = Describe("BreakGlassSession Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updatedSession)).To(Succeed())
 			Expect(updatedSession.Status.Phase).To(Equal(accessv1alpha1.PhaseActive))
 			Expect(updatedSession.Status.ExpiresAt).NotTo(BeNil())
-			Expect(updatedSession.Status.BindingName).To(Equal("breakglass-test-incident-session"))
+			Expect(updatedSession.Status.BindingName).To(Equal(bindingNameForSession(updatedSession)))
+			Expect(updatedSession.Status.BindingRef).NotTo(BeNil())
+			Expect(updatedSession.Status.BindingRef.Kind).To(Equal("RoleBinding"))
+			Expect(updatedSession.Status.BindingRef.Name).To(Equal(updatedSession.Status.BindingName))
+			Expect(updatedSession.Status.Grant).NotTo(BeNil())
+			Expect(updatedSession.Status.Grant.TargetNamespace).To(Equal("default"))
+			Expect(updatedSession.Status.BindingRef.Namespace).To(Equal(updatedSession.Status.Grant.TargetNamespace))
 			Expect(updatedSession.Status.Conditions).To(ContainElement(SatisfyAll(
 				HaveField("Type", Equal(AccessGrantedCondition)),
 				HaveField("Status", Equal(metav1.ConditionTrue)),
@@ -109,7 +126,7 @@ var _ = Describe("BreakGlassSession Controller", func() {
 			binding := &rbacv1.RoleBinding{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name:      updatedSession.Status.BindingName,
-				Namespace: updatedSession.Spec.TargetNamespace,
+				Namespace: updatedSession.Status.Grant.TargetNamespace,
 			}, binding)).To(Succeed())
 			Expect(binding.Labels).To(HaveKeyWithValue(SessionUIDLabelKey, string(updatedSession.UID)))
 			Expect(binding.OwnerReferences).To(HaveLen(1))
@@ -117,6 +134,7 @@ var _ = Describe("BreakGlassSession Controller", func() {
 			Expect(owner.UID).To(Equal(updatedSession.UID))
 			Expect(owner.Controller).NotTo(BeNil())
 			Expect(*owner.Controller).To(BeTrue())
+			Expect(updatedSession.Status.BindingRef.UID).To(Equal(string(binding.UID)))
 		})
 	})
 })

@@ -14,10 +14,16 @@ rules:
 - apiGroups:
   - access.breakglass.io
   resources:
+  - accessprofiles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - access.breakglass.io
+  resources:
   - breakglasssessions
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -38,15 +44,26 @@ rules:
   - patch
   - update
 - apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - breakglass-pod-observer
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+- apiGroups:
   - rbac.authorization.k8s.io
   resources:
-  - clusterrolebindings
   - rolebindings
   verbs:
   - create
   - delete
   - get
   - list
-  - patch
-  - update
   - watch

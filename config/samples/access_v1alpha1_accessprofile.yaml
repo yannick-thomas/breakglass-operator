@@ -1,0 +1,15 @@
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: production-pod-observer
+spec:
+  # A ClusterRole is bound with a RoleBinding in this one namespace. It does
+  # not grant cluster-wide access.
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m

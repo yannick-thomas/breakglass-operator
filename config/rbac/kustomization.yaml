@@ -18,11 +18,8 @@ resources:
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
-# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
-# default, aiding admins in cluster management. Those roles are
-# not used by the breakglass-operator itself. You can comment the following lines
-# if you do not want those helpers be installed with your Project.
-- breakglasssession_admin_role.yaml
-- breakglasssession_editor_role.yaml
-- breakglasssession_viewer_role.yaml
-
+# Deliberately do not install Kubebuilder's generic Admin/Editor/Viewer helper
+# roles. In this operator, an AccessProfile is an authorization boundary, so
+# profile authoring and session-request RBAC must be defined explicitly by the
+# platform administrator (for example with resourceNames on the custom "use"
+# verb). Generic wildcard roles would make that policy too easy to bypass.

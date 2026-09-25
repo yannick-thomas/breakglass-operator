@@ -1,131 +1,200 @@
-# BreakGlass Operator (JIT Kubernetes Access)
+# BreakGlass Operator
 
-A lightweight, security-focused Kubernetes Operator that provides **Just-In-Time (JIT) / Break-Glass Privileged Access Management (PAM)**.
+The BreakGlass Operator provides Kubernetes-native, **namespaced**,
+time-bound emergency access. It is intended for the narrow but common gap
+between permanent production access and an incident where an on-call engineer
+needs a small, auditable permission set for a short time.
 
-Instead of granting permanent `cluster-admin` or high-privilege `edit` rights to engineers or automation accounts, the BreakGlass Operator enables temporary, time-bound, and audited privilege escalation.
+`v1alpha1` deliberately supports a conservative first production slice:
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Admin as User / SecOps
-    participant K8s as Kubernetes API
-    participant Operator as BreakGlass Controller
-    participant RBAC as RoleBinding / ClusterRoleBinding
-
-    Admin->>K8s: kubectl apply -f session.yaml (Duration: 30m, Reason: INC-404)
-    K8s-->>Operator: Reconcile Event
-    Operator->>Operator: Parse duration & set ExpiresAt
-    Operator->>RBAC: Create RoleBinding / ClusterRoleBinding
-    Operator->>K8s: Emit "AccessGranted" Event & Update Status (Phase=Active)
-    Operator->>Operator: RequeueAfter(remainingDuration)
-    Note over Operator,RBAC: Drift Detection: If RBAC is deleted, Operator recreates it immediately
-    Operator->>Operator: Timer fires (now >= ExpiresAt)
-    Operator->>RBAC: Delete RoleBinding / ClusterRoleBinding
-    Operator->>K8s: Emit "AccessExpired" Event & Update Status (Phase=Expired)
+```text
+AccessProfile (admin-owned, fixed role + namespace + maximum duration)
+        │
+        │ requester has RBAC verb: use
+        ▼
+BreakGlassSession (profile + duration + reason only)
+        │
+        ├─ admission webhook attributes the authenticated requester
+        ├─ validates profile UID, duration, and SubjectAccessReview
+        ▼
+one UID-tracked RoleBinding in the profile's fixed namespace
+        │
+        └─ revoked, expired, or suspended on integrity failure
 ```
 
----
+There is no free-form role, target namespace, or grantee in a self-service
+request. A `ClusterRole` is bound through a namespaced `RoleBinding`; this
+does **not** make the grant cluster-wide.
 
-## Key Features & Learning Concepts
+## What is protected
 
-* **Time-Based Reconciliation (`RequeueAfter`)**: Uses the controller-runtime requeue mechanism without blocking worker threads.
-* **Self-Healing & Drift Detection**: Watches both `RoleBinding` and `ClusterRoleBinding`. If an attacker or accident removes the binding while the session is active, it is recreated instantly.
-* **Safe Cleanup via Finalizers**: Ensures cluster-scoped and namespaced RBAC objects are reliably purged when a session resource is deleted.
-* **Auditability & Eventing**: Generates Kubernetes events (`AccessGranted`, `AccessExpired`, `AccessRevoked`) that can be ingested by SIEMs.
-* **Early Revocation**: Set `spec.revoked: true` on an active session to terminate access prematurely.
+* **Controlled delegation:** `AccessProfile` fixes the curated `ClusterRole`,
+  target namespace, and maximum duration. Its policy fields are immutable.
+* **Real requester identity:** the mutating webhook overwrites `spec.subject`
+  and snapshots the profile UID from Kubernetes' authenticated admission
+  request. Human self-service is the only supported subject model for now.
+* **Profile-specific authorization:** the validating webhook performs a
+  `SubjectAccessReview` for the custom verb `use` on exactly the named
+  `AccessProfile`.
+* **Fail-closed lifecycle:** the standard Kustomize deployment installs TLS
+  webhooks with `failurePolicy: Fail` and a five-second timeout. A missing,
+  replaced, or modified binding suspends the session; it is never silently
+  recreated.
+* **UID-safe cleanup:** the controller persists the server-issued RoleBinding
+  UID and uses it as a deletion precondition. A replacement object with the
+  same name is never adopted or deleted.
+* **Least-privilege sample:** `breakglass-pod-observer` permits only pod,
+  event, and pod-log observation. It intentionally excludes secrets, exec,
+  attach, port-forward, writes, and workload edits.
 
----
+Kubernetes Events and status conditions are operational signals. Durable
+forensics belong in Kubernetes audit logs and a restricted SIEM/audit sink;
+Prometheus is not an audit database. See [the security design](docs/security-design.md)
+and [operational metrics](docs/observability.md).
 
-## Security model and current boundary
+## Prerequisites and deployment
 
-This repository currently exposes `spec.roleRef`, `spec.subject`, and
-`spec.targetNamespace` directly. That is useful for exercising the controller,
-but it is **not a production authorization boundary**: the controller is the
-identity that creates the RBAC binding, so a caller allowed to create a
-`BreakGlassSession` could otherwise ask it to bind an arbitrary role to an
-arbitrary subject.
-
-The controller now rejects malformed requests, caps a session at four hours by
-default (`--max-session-duration`), makes the grant details immutable, and
-refuses to take over an existing binding with the same name. These are safety
-controls, not a replacement for request authorization.
-
-Before using the operator for privileged production access, adopt the controlled
-`AccessProfile` and admission design in [docs/security-design.md](docs/security-design.md).
-In particular, do not grant engineers direct `create` access to this version of
-the CR until requester identity and profile-use authorization are enforced.
-
----
-
-## Quickstart
-
-### 1. Run the Controller locally
-Connects to your active `kubectl` context (e.g. `docker-desktop`):
+The default deployment includes the admission webhooks and cert-manager
+resources. Install cert-manager in the cluster first, then deploy the operator:
 
 ```bash
-# Install CRDs
-make install
-
-# Run controller locally
-make run
+make deploy IMG=<your-registry>/breakglass-operator:<tag>
 ```
 
-### 2. Request a Break-Glass Session
+Do not expose `BreakGlassSession` self-service access through a CRD-only or
+`make run` installation: the admission configuration is part of the security
+boundary. The manager always registers its webhooks; the default Kustomize
+configuration mounts a cert-manager-issued serving certificate and injects its
+CA into both webhook configurations.
+
+The generated manager role has `bind` only for the sample curated role
+`breakglass-pod-observer`. When introducing another profile role, extend the
+deployment RBAC deliberately with that exact role name before deploying it.
+Do not replace this with unrestricted `bind`.
+
+The installer intentionally does **not** include generic Kubebuilder
+`Admin`/`Editor`/`Viewer` roles for either CRD. Define platform-admin and
+requester permissions explicitly; a broad profile-editor role could otherwise
+delete and recreate a profile name with a different policy.
+
+### Upgrade from the original free-form API
+
+This `v1alpha1` revision is intentionally incompatible with the original
+free-form `roleRef`/`targetNamespace` session shape. It does not infer a new
+profile for an old active grant. Before upgrading a live cluster:
+
+1. Inventory active sessions and let them expire or revoke them explicitly.
+2. Back up the existing custom resources and record the installed controller
+   image/configuration.
+3. Install the CRDs, cert-manager resources, webhook service, and webhook
+   configurations together; verify the webhooks are ready before granting
+   anyone `create` on `breakglasssessions`.
+4. Apply curated roles, profiles, and profile-scoped `use` RBAC, then run a
+   harmless namespaced request as a rollout check.
+
+Treat rollback as a tested operational procedure: do not restore a controller
+that accepts free-form sessions while its CRD or authorization boundaries have
+already been changed.
+
+## Minimal profile and request
+
+An administrator first creates a curated role and an immutable profile:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-pod-observer
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  name: production-pod-observer
+spec:
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m
+```
+
+Give an on-call group normal `create` access to `breakglasssessions` and only
+the selected profile's custom `use` permission. `resourceNames` is the key
+restriction:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-production-observer-requester
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer"]
+    verbs: ["use"]
+```
+
+The requester submits only intent; do not provide `subject` or
+`accessProfileUID` because the mutating webhook owns both fields:
 
 ```yaml
 apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
-  name: incident-db-emergency
+  generateName: incident-db-
 spec:
-  subject:
-    kind: User
-    name: "yannick.thomas@cloudogu.com"
-  roleRef:
-    kind: ClusterRole
-    name: edit
-  targetNamespace: "default"   # Omit for cluster-wide ClusterRoleBinding
-  duration: "30m"              # Valid Go duration (e.g. 15m, 1h)
-  reason: "Investigating broken database connection pool (INC-1092)"
+  accessProfile: production-pod-observer
+  duration: 20m
+  reason: "INC-1092: investigate database connection exhaustion"
 ```
 
-For a ServiceAccount subject, set `subject.namespace` explicitly. The operator
-will not infer `default` or use the target namespace on its behalf.
-
-Apply the sample:
-```bash
-kubectl apply -f config/samples/access_v1alpha1_breakglasssession.yaml
-```
-
-### 3. Check Session Status
+Inspect the lifecycle:
 
 ```bash
 kubectl get bgs
-# NAME                    SUBJECT                       ROLE   TARGET-NS   PHASE    EXPIRES-AT             AGE
-# incident-db-emergency   yannick.thomas@cloudogu.com   edit   default     Active   2026-09-25T10:45:00Z   10s
+kubectl describe bgs <session-name>
+kubectl get rolebinding -n production -l access.breakglass.io/session=<session-name>
 ```
 
-Check emitted Kubernetes events:
-```bash
-kubectl get events --field-selector involvedObject.kind=BreakGlassSession
-```
-
-### 4. Premature Revocation
-To end access before the duration expires:
+For early revocation, set the one-way field below. All access request fields
+remain immutable.
 
 ```bash
-kubectl patch bgs incident-db-emergency --type='merge' -p '{"spec":{"revoked":true}}'
+kubectl patch bgs <session-name> --type=merge -p '{"spec":{"revoked":true}}'
 ```
 
-All other grant fields are immutable. Create a new session rather than changing
-the subject, role, scope, duration, or reason of an existing request.
-
----
-
-## Testing
-
-Run unit & envtest integration tests:
+## Development and verification
 
 ```bash
-make test
+make generate manifests
+make build
+go test ./...                 # Requires local envtest processes/ports
 ```
+
+Focused unit tests cover requester attribution, profile authorization,
+UID-safe cleanup, drift suspension, TTL scheduling, and metric privacy. Some
+sandboxed environments prohibit envtest from opening loopback listeners; the
+CI/Kind pipeline should run the full webhook and lifecycle suite.
+
+## Current scope and next gates
+
+This is intentionally not a generic PAM replacement. It is most useful as a
+small, Kubernetes-native production-access primitive beside existing OIDC,
+RBAC, GitOps, audit, and incident systems.
+
+Before a broad rollout, prioritize the production install gate, curated-role
+integrity (a role name alone does not freeze its rules), alert/runbook/audit
+integration, and realistic Kind/E2E tests. The next justified workflow CRD is
+an immutable `BreakGlassRequest` for two-person approvals; ChatOps and CLI
+should build on that stable request lifecycle rather than inventing a second
+approval model. The ranked rationale is maintained in [ROADMAP.md](ROADMAP.md).

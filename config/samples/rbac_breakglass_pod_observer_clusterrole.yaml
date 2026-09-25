@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-pod-observer
+  labels:
+    app.kubernetes.io/part-of: breakglass-operator
+    access.breakglass.io/curated-role: "true"
+rules:
+  # Deliberately narrow incident-observation profile: no secrets, exec,
+  # attach, port-forward, write verbs, or workload edits.
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]

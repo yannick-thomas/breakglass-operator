@@ -17,16 +17,20 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - description: Subject granted access
+    - description: Authenticated requester granted access
       jsonPath: .spec.subject.name
       name: Subject
       type: string
-    - description: Role granted
-      jsonPath: .spec.roleRef.name
+    - description: Administrator-owned access profile
+      jsonPath: .spec.accessProfile
+      name: Profile
+      type: string
+    - description: Resolved curated role
+      jsonPath: .status.grant.roleRef.name
       name: Role
       type: string
-    - description: Target namespace (empty = cluster-wide)
-      jsonPath: .spec.targetNamespace
+    - description: Resolved fixed target namespace
+      jsonPath: .status.grant.targetNamespace
       name: Target-NS
       type: string
     - description: Session phase
@@ -65,6 +69,20 @@ spec:
           spec:
             description: spec defines the desired state of BreakGlassSession
             properties:
+              accessProfile:
+                description: |-
+                  AccessProfile is the fixed, administrator-owned access policy to use.
+                  The requester requires the custom RBAC verb "use" on this named profile.
+                maxLength: 253
+                minLength: 1
+                type: string
+              accessProfileUID:
+                description: |-
+                  AccessProfileUID is written by the mutating admission webhook from the
+                  selected profile's server-assigned UID. It prevents a delete/recreate of
+                  the same profile name from silently changing a pending request.
+                minLength: 1
+                type: string
               duration:
                 description: Duration is the lifespan of this break-glass session
                   (e.g. "30m", "1h", "2h30m").
@@ -80,27 +98,11 @@ spec:
                 description: Revoked allows manual revocation before the duration
                   expires.
                 type: boolean
-              roleRef:
-                description: RoleRef specifies which Role or ClusterRole to bind
-                properties:
-                  kind:
-                    default: ClusterRole
-                    description: Kind of the role (ClusterRole or Role)
-                    enum:
-                    - Role
-                    - ClusterRole
-                    type: string
-                  name:
-                    description: Name of the Role or ClusterRole
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                required:
-                - kind
-                - name
-                type: object
               subject:
-                description: Subject specifies who gets access
+                description: |-
+                  Subject is written by the mutating admission webhook from the
+                  authenticated API requester. Client-supplied values are overwritten and
+                  v1alpha1 supports only a self-service User grant.
                 properties:
                   kind:
                     description: Kind of the subject (User, Group, ServiceAccount)
@@ -124,47 +126,68 @@ spec:
                 - kind
                 - name
                 type: object
-              targetNamespace:
-                description: |-
-                  TargetNamespace specifies the namespace where the role is bound.
-                  If omitted or empty, access is granted cluster-wide via ClusterRoleBinding.
-                  If set, access is granted only within that namespace via RoleBinding.
-                maxLength: 63
-                type: string
             required:
+            - accessProfile
+            - accessProfileUID
             - duration
             - reason
-            - roleRef
             - subject
             type: object
             x-kubernetes-validations:
+            - message: accessProfile is immutable
+              rule: self.accessProfile == oldSelf.accessProfile
+            - message: accessProfileUID is immutable
+              rule: self.accessProfileUID == oldSelf.accessProfileUID
             - message: subject is immutable
               rule: self.subject == oldSelf.subject
-            - message: roleRef is immutable
-              rule: self.roleRef == oldSelf.roleRef
-            - message: targetNamespace is immutable
-              rule: self.targetNamespace == oldSelf.targetNamespace
             - message: duration is immutable
               rule: self.duration == oldSelf.duration
             - message: reason is immutable
               rule: self.reason == oldSelf.reason
             - message: revoked cannot be changed from true to false
               rule: '!oldSelf.revoked || self.revoked'
-            - message: a Role can only be bound in a targetNamespace
-              rule: self.roleRef.kind == 'ClusterRole' || (has(self.targetNamespace)
-                && size(self.targetNamespace) > 0)
-            - message: a ServiceAccount requires subject.namespace; User and Group
-                subjects must not set it
-              rule: 'self.subject.kind == ''ServiceAccount'' ? (has(self.subject.namespace)
-                && size(self.subject.namespace) > 0) : (!has(self.subject.namespace)
-                || size(self.subject.namespace) == 0)'
+            - message: v1alpha1 self-service sessions may only grant the authenticated
+                User requester
+              rule: self.subject.kind == 'User' && (!has(self.subject.namespace) ||
+                size(self.subject.namespace) == 0)
           status:
             description: status defines the observed state of BreakGlassSession
             properties:
               bindingName:
-                description: BindingName is the name of the created RoleBinding or
-                  ClusterRoleBinding
+                description: BindingName is the name of the created RoleBinding.
                 type: string
+              bindingRef:
+                description: |-
+                  BindingRef is the authoritative identity of the RBAC binding created for
+                  this session. Once present, the controller only acts on an object that
+                  matches this kind, namespace, name, and UID exactly.
+                properties:
+                  kind:
+                    description: |-
+                      Kind is RoleBinding. ClusterRoleBinding is deliberately not supported by
+                      the AccessProfile-based v1alpha1 API.
+                    enum:
+                    - RoleBinding
+                    type: string
+                  name:
+                    description: Name is the RBAC binding name.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace is the fixed namespace of the profile's
+                      RoleBinding.
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the server-assigned UID of the created binding.
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                - namespace
+                - uid
+                type: object
               conditions:
                 description: Conditions represent the latest available observations
                   of the session's state.
@@ -230,12 +253,53 @@ spec:
                 description: ExpiresAt is the calculated expiration time
                 format: date-time
                 type: string
+              grant:
+                description: |-
+                  Grant is the immutable profile snapshot resolved when the session became
+                  active. A missing or mismatched profile snapshot is fail-closed.
+                properties:
+                  accessProfile:
+                    description: AccessProfile is the selected policy name.
+                    type: string
+                  accessProfileUID:
+                    description: AccessProfileUID is the UID of the policy that was
+                      authorized and resolved.
+                    type: string
+                  roleRef:
+                    description: RoleRef is the profile's curated ClusterRole.
+                    properties:
+                      kind:
+                        default: ClusterRole
+                        description: Kind of the role (ClusterRole or Role)
+                        enum:
+                        - Role
+                        - ClusterRole
+                        type: string
+                      name:
+                        description: Name of the Role or ClusterRole
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - kind
+                    - name
+                    type: object
+                  targetNamespace:
+                    description: TargetNamespace is the profile's fixed namespace.
+                    type: string
+                required:
+                - accessProfile
+                - accessProfileUID
+                - roleRef
+                - targetNamespace
+                type: object
               phase:
                 description: Phase is the current lifecycle state (Pending, Active,
-                  Denied, Expired, Revoked)
+                  Suspended, Denied, Expired, Revoked)
                 enum:
                 - Pending
                 - Active
+                - Suspended
                 - Denied
                 - Expired
                 - Revoked

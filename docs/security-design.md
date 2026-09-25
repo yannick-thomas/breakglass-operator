@@ -1,105 +1,121 @@
 # Production JIT access design
 
-## Decision
+## Decision implemented in `v1alpha1`
 
-Replace free-form `roleRef`, `targetNamespace`, and requester-supplied
-`subject` with an administrator-controlled `AccessProfile` and an admission
-webhook before treating this operator as a production PAM control.
+The original learning API accepted `roleRef`, `targetNamespace`, and
+`subject` directly in a `BreakGlassSession`. That shape is not safe for
+self-service: the privileged controller, rather than the requester, creates
+the RBAC binding and could become an unintended escalation proxy.
 
-The current `v1alpha1` API is retained temporarily as a controller-learning
-slice and is hardened against accidental misuse. It must not be exposed as a
-self-service privilege-escalation API.
-
-## Why a free role reference is unsafe
-
-Kubernetes prevents a user from creating a role binding for permissions they do
-not already have unless they also have the `bind` permission on the referenced
-role. The controller, rather than the session requester, creates the binding.
-Giving the controller broad binding permission and accepting arbitrary fields
-therefore moves that escalation check behind the controller and can bypass its
-intent.
-
-The same applies to `subject`: a controller cannot reliably discover the
-authenticated author of a custom resource from the stored object. A caller who
-can create a session must not be able to nominate another user or a powerful
-service account as the recipient.
-
-## Proposed v1 API
-
-`AccessProfile` is cluster-scoped and writable only by the platform-security
-administrators. Each profile has one fixed RBAC target and one fixed scope:
+The current `v1alpha1` API intentionally breaks that model. A session request
+contains only:
 
 ```yaml
-apiVersion: access.breakglass.io/v1
+spec:
+  accessProfile: production-pod-observer
+  duration: 20m
+  reason: "INC-1092: investigate database connection exhaustion"
+```
+
+The administrator-owned `AccessProfile` fixes the only role, namespace, and
+duration ceiling the request may use:
+
+```yaml
+apiVersion: access.breakglass.io/v1alpha1
 kind: AccessProfile
 metadata:
-  name: prod-namespace-debug
+  name: production-pod-observer
 spec:
   roleRef:
     kind: ClusterRole
-    name: production-debug
+    name: breakglass-pod-observer
   targetNamespace: production
-  maxDuration: 60m
+  maxDuration: 30m
 ```
 
-The request becomes deliberately small:
+Profiles are cluster-scoped because they are platform policy, but every
+`v1alpha1` grant is a **namespaced RoleBinding**. A referenced `ClusterRole`
+provides reusable rules; it does not create a ClusterRoleBinding.
+
+## Trust and authorization flow
+
+1. Kubernetes authenticates the API caller.
+2. The mutating webhook, on `CREATE` only, overwrites `spec.subject` with
+   `AdmissionRequest.userInfo.username` and records the selected profile's
+   server-assigned UID in `spec.accessProfileUID`.
+3. The validating webhook independently checks that final subject, profile UID,
+   and duration are valid. It then asks Kubernetes for a
+   `SubjectAccessReview` of `verb=use` on that exact profile name.
+4. The controller resolves the profile, verifies its UID and maximum duration,
+   snapshots role/scope into status, and creates the one RoleBinding.
+5. A later profile deletion, name reuse, policy mismatch, binding replacement,
+   binding-content drift, or missing expiry suspends the session instead of
+   recreating access.
+
+The requester needs normal `create` on `breakglasssessions` **and** an RBAC
+rule such as:
 
 ```yaml
-apiVersion: access.breakglass.io/v1
-kind: BreakGlassSession
-metadata:
-  generateName: incident-
-spec:
-  accessProfile: prod-namespace-debug
-  duration: 30m
-  reason: INC-1092: investigate database connection exhaustion
+apiGroups: ["access.breakglass.io"]
+resources: ["accessprofiles"]
+resourceNames: ["production-pod-observer"]
+verbs: ["use"]
 ```
 
-The controller resolves the profile server-side. A request cannot select a
-different role or turn a namespaced grant into a `ClusterRoleBinding`. Keep
-cluster-scoped profiles exceptional and separate from namespaced profiles.
+This design handles effective Kubernetes impersonation correctly: the API
+server passes the impersonated identity in `userInfo`, and Kubernetes audit
+logs record the corresponding impersonation chain. The operator never trusts a
+requester-supplied username.
 
-## Admission and authorization flow
+## Deployment boundary
 
-1. A mutating admission webhook records the authenticated requester's
-   `AdmissionRequest.userInfo` as the immutable recipient identity. It
-   overwrites, rather than trusts, any client-supplied identity field.
-2. A validating webhook runs after mutation, checks that the final recipient
-   matches the requester, and rejects changes to the request fields.
-3. The validating webhook performs a `SubjectAccessReview` for a custom `use`
-   verb on the named `AccessProfile`. Platform RBAC can then grant, for example,
-   `use` on `accessprofiles/prod-namespace-debug` to an on-call group without
-   granting use of other profiles.
-4. Both webhook configurations use `failurePolicy: Fail`, are served over TLS,
-   and cover `CREATE` and relevant `UPDATE` operations. The controller must not
-   be installed as a privileged production component without this policy.
+The admission webhooks are a mandatory production control, not optional
+polish. The default Kustomize deployment enables cert-manager-issued serving
+certificates, CA injection, `failurePolicy: Fail`, and a short timeout. Do not
+grant self-service session creation in a cluster where those configurations
+are absent or unhealthy.
 
-Approvals (ticket state, two-person approval, risk signals) belong between steps
-3 and 4, either in the webhook or in a separate approval object. They should
-never be inferred from a free-form reason string.
+The controller needs `create/delete/get/list/watch` on RoleBindings and
+`bind` on the curated ClusterRoles it may reference. The checked-in manager
+RBAC grants `bind` only on `breakglass-pod-observer`, the sample profile role.
+Extending the profile catalogue requires an explicit deployment RBAC change
+with exact `resourceNames`; unrestricted `bind` is not an acceptable shortcut.
 
-## RBAC deployment boundary
+For a high-assurance installation, bind the manager's RoleBinding privileges
+only in the namespaces that host profiles, using a deployment overlay. The
+generic controller role is intentionally a starting manifest, not authority to
+make arbitrary profiles work everywhere.
 
-The manager needs permission to create the RBAC binding and, in ordinary
-Kubernetes RBAC, `bind` on the referenced role. Do not solve that by giving the
-manager unrestricted `bind` while allowing free-form role names.
+## Binding integrity and expiry
 
-For namespaced profiles, run the manager with `RoleBinding` write permission in
-only the approved namespaces and `bind` limited with `resourceNames` to the
-roles used by those profiles. A separate, tightly controlled installation should
-handle the rare cluster-scoped profiles. This separates the blast radius of a
-namespaced debug grant from cluster administration.
+At activation the controller records `status.bindingRef` with kind, namespace,
+name, and the RoleBinding UID assigned by Kubernetes. That UID is authoritative
+for cleanup. The controller additionally verifies its controller owner
+reference, labels, role reference, and subject on every binding watch and at a
+bounded periodic interval.
 
-## Lifecycle and audit requirements
+If a binding is missing, replaced, or modified, the session becomes
+`Suspended`; it is not self-healed. Cleanup uses a UID precondition, so a new
+object reusing the same name remains untouched. Expiry and manual revocation
+remove the exact tracked object when it still exists.
 
-The controller establishes the expiry once and never extends it. It uses
-`RequeueAfter` as the normal timer, watches its own binding to repair deletion,
-and uses a finalizer for deletion cleanup. Binding ownership is recorded with
-both the session name and UID; this prevents a matching name from being adopted
-or deleted accidentally.
+This means a security response should alert on `Suspended` and inspect the
+associated audit logs rather than assuming a destroyed binding will reappear.
 
-Kubernetes Events are useful operational signals, but they are short-lived and
-should not carry the full incident reason. Send Kubernetes API audit logs,
-operator logs, and lifecycle status changes to the durable SIEM/audit store.
-Capture the requester, profile, approved duration, immutable reason, binding
-name, activation time, expiry, revocation actor, and outcome there.
+## Deliberate limits and next hardening
+
+* Self-service human identities only. Group, ServiceAccount, delegated-grantee,
+  token, and workload access are separate designs with different forensic and
+  revocation properties.
+* The profile snapshot freezes the **role name**, not yet the rules inside a
+  mutable ClusterRole. Treat curated roles as versioned/immutable now. The next
+  security milestone adds a rule hash/UID snapshot plus watch-and-suspend on
+  curated role drift.
+* There is no approval workflow in this API. A future `BreakGlassRequest`
+  should preserve immutable requester/profile/duration/reason intent, then let
+  an independently authorized approver cause a session to be created.
+* Events and Prometheus metrics are operational data. Kubernetes audit logs
+  and a durable restricted sink remain the source of forensic truth.
+
+See [ROADMAP.md](../ROADMAP.md) for the rollout sequence and
+[operational metrics](observability.md) for alerting guidance.

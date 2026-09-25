@@ -38,6 +38,8 @@ import (
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 	"github.com/yannick-thomas/breakglass-operator/internal/controller"
+	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
+	webhookv1alpha1 "github.com/yannick-thomas/breakglass-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -188,11 +190,21 @@ func main() {
 
 	if err := (&controller.BreakGlassSessionReconciler{
 		Client:             mgr.GetClient(),
+		APIReader:          mgr.GetAPIReader(),
 		Scheme:             mgr.GetScheme(),
 		Recorder:           mgr.GetEventRecorderFor("breakglass-controller"),
 		MaxSessionDuration: maxSessionDuration,
+		Metrics:            breakglassmetrics.DefaultRecorder,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "breakglasssession")
+		os.Exit(1)
+	}
+	if _, err := breakglassmetrics.RegisterSessionStateCollector(mgr.GetClient(), controller.SessionScope); err != nil {
+		setupLog.Error(err, "Failed to register BreakGlass session metrics")
+		os.Exit(1)
+	}
+	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
