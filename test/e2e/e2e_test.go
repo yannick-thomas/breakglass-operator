@@ -436,7 +436,7 @@ subjects:
 
 		It("should attribute, grant, and expire a namespaced self-service session", func() {
 			By("rejecting a creator without named AccessProfile use permission")
-			_, err := applyManifestAs(e2eDeniedCreatorUser, `
+			_, err := createManifestAs(e2eDeniedCreatorUser, `
 apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
@@ -447,6 +447,9 @@ spec:
   reason: "E2E verification that create alone cannot grant a profile"
 `)
 			Expect(err).To(HaveOccurred(), "Admission must reject a request without profile use permission")
+			cmd := exec.Command("kubectl", "get", "breakglasssession", "e2e-profile-use-denied")
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "Denied request must not persist a BreakGlassSession")
 
 			By("submitting a request without a client-controlled subject or profile UID")
 			_, err = applyManifestAs(e2eRequesterUser, `
@@ -477,7 +480,7 @@ spec:
 			}).Should(Succeed())
 
 			By("verifying that exactly the namespaced RoleBinding exists")
-			cmd := exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
+			cmd = exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -556,6 +559,12 @@ func applyManifest(manifest string) (string, error) {
 
 func applyManifestAs(user, manifest string) (string, error) {
 	cmd := exec.Command("kubectl", "--as="+user, "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	return utils.Run(cmd)
+}
+
+func createManifestAs(user, manifest string) (string, error) {
+	cmd := exec.Command("kubectl", "--as="+user, "create", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	return utils.Run(cmd)
 }
