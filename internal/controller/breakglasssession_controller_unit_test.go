@@ -26,9 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
@@ -93,6 +95,34 @@ func TestValidateSession(t *testing.T) {
 				t.Fatalf("validateSession() error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestInitialReconcileRequeuesAfterAddingFinalizer(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Status = accessv1alpha1.BreakGlassSessionStatus{}
+	reconciler := &BreakGlassSessionReconciler{
+		Client: newTestClient(scheme, session),
+		Scheme: scheme,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)})
+	if err != nil {
+		t.Fatalf("initial Reconcile() error = %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("initial Reconcile() result = %#v, want an explicit requeue after finalizer update", result)
+	}
+
+	updated := &accessv1alpha1.BreakGlassSession{}
+	if err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(session), updated); err != nil {
+		t.Fatalf("get session after initial Reconcile(): %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, BreakGlassFinalizer) {
+		t.Fatalf("session finalizers = %#v, want %q", updated.Finalizers, BreakGlassFinalizer)
 	}
 }
 
