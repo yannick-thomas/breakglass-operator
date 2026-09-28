@@ -145,7 +145,8 @@ spec:
             - message: reason is immutable
               rule: self.reason == oldSelf.reason
             - message: revoked cannot be changed from true to false
-              rule: '!oldSelf.revoked || self.revoked'
+              rule: '!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked)
+                && self.revoked)'
             - message: v1alpha1 self-service sessions may only grant the authenticated
                 User requester
               rule: self.subject.kind == 'User' && (!has(self.subject.namespace) ||
