@@ -158,6 +158,8 @@ subjects:
 		By("cleaning up breakglass e2e policy")
 		cmd := exec.Command("kubectl", "delete", "breakglasssession", e2eSessionName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eRequesterRoleBinding, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eDeniedCreatorBinding, "--ignore-not-found")

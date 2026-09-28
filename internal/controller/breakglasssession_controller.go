@@ -964,8 +964,13 @@ func bindingReferenceFromObject(obj client.Object) (*accessv1alpha1.BindingRefer
 
 func expectedSubject(session *accessv1alpha1.BreakGlassSession) rbacv1.Subject {
 	return rbacv1.Subject{
-		Kind: string(session.Spec.Subject.Kind),
-		Name: session.Spec.Subject.Name,
+		// Kubernetes defaults a User subject's API group to
+		// rbac.authorization.k8s.io when it persists a RoleBinding. Record the
+		// canonical value here as well, so integrity checks do not mistake that
+		// server-side defaulting for subject drift.
+		APIGroup: rbacv1.GroupName,
+		Kind:     string(session.Spec.Subject.Kind),
+		Name:     session.Spec.Subject.Name,
 	}
 }
 

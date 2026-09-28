@@ -314,6 +314,9 @@ func TestEnsureBindingLabelsAndDeletesOnlyItsOwnBinding(t *testing.T) {
 	if len(binding.OwnerReferences) != 1 || binding.OwnerReferences[0].UID != session.UID {
 		t.Fatalf("created binding owner references = %#v, want session UID %s", binding.OwnerReferences, session.UID)
 	}
+	if len(binding.Subjects) != 1 || binding.Subjects[0].APIGroup != rbacv1.GroupName {
+		t.Fatalf("created binding subjects = %#v, want canonical User API group %q", binding.Subjects, rbacv1.GroupName)
+	}
 	if session.Status.BindingRef == nil || session.Status.BindingRef.UID != string(binding.UID) {
 		t.Fatalf("session bindingRef = %#v, want server UID %q", session.Status.BindingRef, binding.UID)
 	}
