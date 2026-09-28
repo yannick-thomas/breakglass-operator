@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,6 +45,18 @@ const metricsServiceName = "breakglass-operator-controller-manager-metrics-servi
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "breakglass-operator-metrics-binding"
+
+const (
+	targetNamespace           = "production"
+	e2eDeniedCreatorRole      = "breakglass-e2e-denied-creator"
+	e2eDeniedCreatorBinding   = "breakglass-e2e-denied-creator-binding"
+	e2eDeniedCreatorUser      = "e2e-denied-creator"
+	e2eRequesterRole          = "breakglass-e2e-requester"
+	e2eRequesterRoleBinding   = "breakglass-e2e-requester-binding"
+	e2eRequesterUser          = "e2e-requester"
+	e2eSessionName            = "e2e-short-lived-session"
+	productionObserverProfile = "production-pod-observer"
+)
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -72,13 +85,92 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		By("creating the target namespace and curated profile")
+		cmd = exec.Command("kubectl", "create", "namespace", targetNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create target namespace")
+		for _, path := range []string{
+			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
+			"config/samples/access_v1alpha1_accessprofile.yaml",
+		} {
+			cmd = exec.Command("kubectl", "apply", "-f", path)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply curated access policy")
+		}
+
+		By("granting explicit test identities the least privilege required for the flow")
+		_, err = applyManifest(`
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-e2e-requester
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: breakglass-e2e-requester-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-e2e-requester
+subjects:
+  - kind: User
+    name: e2e-requester
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-e2e-denied-creator
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: breakglass-e2e-denied-creator-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-e2e-denied-creator
+subjects:
+  - kind: User
+    name: e2e-denied-creator
+    apiGroup: rbac.authorization.k8s.io
+`)
+		Expect(err).NotTo(HaveOccurred(), "Failed to grant e2e requester policy")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
 	// and deleting the namespace.
 	AfterAll(func() {
+		By("cleaning up breakglass e2e policy")
+		cmd := exec.Command("kubectl", "delete", "breakglasssession", e2eSessionName, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eRequesterRoleBinding, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eDeniedCreatorBinding, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "clusterrole", e2eRequesterRole, e2eDeniedCreatorRole, "breakglass-pod-observer", "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "accessprofile", productionObserverProfile, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
+		cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -342,6 +434,65 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyCAInjection).Should(Succeed())
 		})
 
+		It("should attribute, grant, and expire a namespaced self-service session", func() {
+			By("rejecting a creator without named AccessProfile use permission")
+			_, err := applyManifestAs(e2eDeniedCreatorUser, `
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassSession
+metadata:
+  name: e2e-profile-use-denied
+spec:
+  accessProfile: production-pod-observer
+  duration: "10s"
+  reason: "E2E verification that create alone cannot grant a profile"
+`)
+			Expect(err).To(HaveOccurred(), "Admission must reject a request without profile use permission")
+
+			By("submitting a request without a client-controlled subject or profile UID")
+			_, err = applyManifestAs(e2eRequesterUser, `
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassSession
+metadata:
+  name: e2e-short-lived-session
+spec:
+  accessProfile: production-pod-observer
+  duration: "10s"
+  reason: "E2E verification of a short-lived namespaced emergency grant"
+`)
+			Expect(err).NotTo(HaveOccurred(), "BreakGlassSession request should pass admission")
+
+			var bindingName string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "--as="+e2eRequesterUser, "get", "breakglasssession", e2eSessionName,
+					"-o", "jsonpath={.status.phase},{.spec.subject.kind},{.spec.subject.name},{.status.bindingRef.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts := strings.Split(output, ",")
+				g.Expect(parts).To(HaveLen(4))
+				g.Expect(parts[0]).To(Equal("Active"))
+				g.Expect(parts[1]).To(Equal("User"))
+				g.Expect(parts[2]).NotTo(BeEmpty())
+				g.Expect(parts[3]).NotTo(BeEmpty())
+				bindingName = parts[3]
+			}).Should(Succeed())
+
+			By("verifying that exactly the namespaced RoleBinding exists")
+			cmd := exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for TTL cleanup to revoke the binding")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "breakglasssession", e2eSessionName, "-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Expired"))
+				cmd = exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
+				_, err = utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}).Should(Succeed())
+		})
+
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
 		// TODO: Customize the e2e test suite with scenarios specific to your project.
@@ -395,6 +546,18 @@ func serviceAccountToken() (string, error) {
 	Eventually(verifyTokenCreation).Should(Succeed())
 
 	return out, err
+}
+
+func applyManifest(manifest string) (string, error) {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	return utils.Run(cmd)
+}
+
+func applyManifestAs(user, manifest string) (string, error) {
+	cmd := exec.Command("kubectl", "--as="+user, "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	return utils.Run(cmd)
 }
 
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
