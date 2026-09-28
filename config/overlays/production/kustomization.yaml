@@ -1,0 +1,39 @@
+# Production availability overlay for the secure default installation.
+#
+# This overlay intentionally inherits config/default so the admission webhooks,
+# cert-manager serving certificate, CA injection, and HTTPS metrics service stay
+# part of the deployed security boundary.
+resources:
+  - ../../default
+  - pod_disruption_budget.yaml
+
+patches:
+  - target:
+      kind: Deployment
+      labelSelector: control-plane=controller-manager
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                control-plane: controller-manager
+                app.kubernetes.io/name: breakglass-operator
+      - op: add
+        path: /spec/template/spec/affinity
+        value:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      control-plane: controller-manager
+                      app.kubernetes.io/name: breakglass-operator

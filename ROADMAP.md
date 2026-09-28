@@ -96,7 +96,7 @@ flowchart TD
 * [x] **Requester-Attribution & Profil-UID**: Der Mutating Webhook überschreibt den Empfänger aus dem authentifizierten API-User und snapshottet die serverseitige Profil-UID. ServiceAccounts sind im Self-Service-Slice absichtlich ausgeschlossen.
 * [x] **Profil-`use`-Autorisierung**: Der Validating Webhook führt einen `SubjectAccessReview` für `use` auf dem konkret benannten Profil aus und prüft Profil-UID sowie maximale Dauer erneut.
 * [x] **Datensparsame Betriebsmetriken**: Lifecycle, Binding-Drift, Cleanup-Lag, aktive/überfällige Sessions sowie Admission-Allow/Deny/Error sind mit festen Enum-Labels instrumentiert; Identitäten, Rollen, Namespaces, Tickets und Gründe erscheinen nicht als Labels.
-* [ ] **Produktions-Installations-Gate**: Die sichere Kustomize-Basis ist vorhanden, aber HA/PDB, Installations-Checks, Upgrade-/Rollback-Proben sowie echte Kind/E2E-Tests müssen noch beweisen, dass kein privilegierter Manager ohne erreichbare Fail-Closed-Webhooks produktiv betrieben wird.
+* [~] **Produktions-Installations-Gate**: Das Production-Overlay liefert jetzt zwei Manager-Replikas, Leader Election, Host-Spreading und einen PDB; [Installations-, Upgrade- und Recovery-Schritte](docs/production-operations.md) sind dokumentiert. Offen bleiben ein reproduzierbarer Kind-Ausfalltest, die Supply-Chain-Gates sowie die clusterkonkrete, CA-validierte Metrics-/NetworkPolicy-Integration.
 
 #### Priorität 0: kontrollierte Delegation statt Blacklist
 * **`AccessProfile` als serverseitige Policy**:

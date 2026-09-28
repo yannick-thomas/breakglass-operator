@@ -61,6 +61,19 @@ resources. Install cert-manager in the cluster first, then deploy the operator:
 make deploy IMG=<your-registry>/breakglass-operator:<tag>
 ```
 
+For a multi-node production cluster, use the production availability overlay
+instead. It retains the same secure default and adds two controller replicas,
+leader election, hostname spreading, and a PodDisruptionBudget:
+
+```bash
+kubectl apply -k config/overlays/production
+```
+
+See [production operations](docs/production-operations.md) for readiness,
+upgrade, recovery, and metrics-boundary checks. The overlay intentionally
+requires two schedulable nodes; use a separately reviewed development overlay
+for a single-node environment.
+
 Do not expose `BreakGlassSession` self-service access through a CRD-only or
 `make run` installation: the admission configuration is part of the security
 boundary. The manager always registers its webhooks; the default Kustomize
