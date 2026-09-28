@@ -51,11 +51,29 @@ type AccessProfileSpec struct {
 	MaxDuration string `json:"maxDuration"`
 }
 
+// AccessProfileStatus reports whether the policy can be activated by this
+// manager. It is controller-owned; a Ready condition does not make the policy
+// an authorization decision for a particular requester.
+type AccessProfileStatus struct {
+	// ObservedGeneration is the most recent generation evaluated by the
+	// AccessProfile controller.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions describe whether the role, duration, and manager namespace
+	// scope make this profile usable.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=ap
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.roleRef.name",description="Pre-approved Role or ClusterRole"
 // +kubebuilder:printcolumn:name="Target-NS",type="string",JSONPath=".spec.targetNamespace",description="Only namespace this profile can grant in"
 // +kubebuilder:printcolumn:name="Max-Duration",type="string",JSONPath=".spec.maxDuration",description="Maximum permitted session duration"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Whether the manager can activate this profile"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // AccessProfile is the Schema for the accessprofiles API
@@ -69,6 +87,10 @@ type AccessProfile struct {
 	// spec defines the desired state of AccessProfile
 	// +required
 	Spec AccessProfileSpec `json:"spec"`
+
+	// status reports controller-observed readiness for this profile.
+	// +optional
+	Status AccessProfileStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

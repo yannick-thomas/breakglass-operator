@@ -30,6 +30,9 @@ does **not** make the grant cluster-wide.
 
 * **Controlled delegation:** `AccessProfile` fixes the curated `ClusterRole`,
   target namespace, and maximum duration. Its policy fields are immutable.
+  The controller reports a `Ready` condition before an incident, including
+  invalid durations, missing curated roles, and namespaces outside the
+  manager's configured scope.
 * **Real requester identity:** the mutating webhook overwrites `spec.subject`
   and snapshots the profile UID from Kubernetes' authenticated admission
   request. Human self-service is the only supported subject model for now.
@@ -185,10 +188,20 @@ spec:
 Inspect the lifecycle:
 
 ```bash
+kubectl get accessprofiles
+kubectl describe accessprofile production-pod-observer
 kubectl get bgs
 kubectl describe bgs <session-name>
 kubectl get rolebinding -n production -l access.breakglass.io/session=<session-name>
 ```
+
+An `AccessProfile` must report `Ready=True` before it can be relied on during
+an incident. `Ready=False` explains the platform configuration problem; fix it
+by creating the referenced curated role, choosing a positive `maxDuration`, or
+including the profile's namespace in the manager's
+`--allowed-target-namespaces` configuration. `Ready` is a deployment preflight,
+not an authorization grant: requesters still need the profile-specific `use`
+permission described above.
 
 For early revocation, set the one-way field below. All access request fields
 remain immutable.

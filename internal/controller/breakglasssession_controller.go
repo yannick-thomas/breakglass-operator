@@ -37,10 +37,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
@@ -79,6 +81,11 @@ const (
 	bindingNamePrefix     = "breakglass-"
 	bindingUIDHashLength  = 12
 	maxKubernetesNameSize = 253
+
+	// accessProfileField indexes sessions by their immutable profile reference.
+	// It keeps profile-policy changes proportional to the affected sessions,
+	// rather than scanning every BreakGlassSession in the cluster.
+	accessProfileField = ".spec.accessProfile"
 )
 
 // BreakGlassSessionReconciler reconciles a BreakGlassSession object
@@ -1225,6 +1232,10 @@ func bindingSessionHint(obj client.Object) (string, types.UID) {
 // SetupWithManager sets up the controller with the Session, its fixed
 // AccessProfile, and the namespaced RoleBindings it creates.
 func (r *BreakGlassSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex); err != nil {
+		return fmt.Errorf("index BreakGlassSessions by AccessProfile: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&accessv1alpha1.BreakGlassSession{}).
 		Watches(
@@ -1234,9 +1245,21 @@ func (r *BreakGlassSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&accessv1alpha1.AccessProfile{},
 			handler.EnqueueRequestsFromMapFunc(r.findSessionsForAccessProfile),
+			// Profile status is advisory and must not affect a grant. Reconcile
+			// sessions only when policy changes; create and delete events remain
+			// enabled so a newly available or deleted policy is handled promptly.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		Named("breakglasssession").
 		Complete(r)
+}
+
+func accessProfileNameIndex(obj client.Object) []string {
+	session, ok := obj.(*accessv1alpha1.BreakGlassSession)
+	if !ok || session.Spec.AccessProfile == "" {
+		return nil
+	}
+	return []string{session.Spec.AccessProfile}
 }
 
 func (r *BreakGlassSessionReconciler) findSessionsForAccessProfile(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -1246,15 +1269,12 @@ func (r *BreakGlassSessionReconciler) findSessionsForAccessProfile(ctx context.C
 	}
 
 	sessions := &accessv1alpha1.BreakGlassSessionList{}
-	if err := r.List(ctx, sessions); err != nil {
+	if err := r.List(ctx, sessions, client.MatchingFields{accessProfileField: profile.Name}); err != nil {
 		return nil
 	}
 	requests := make([]ctrl.Request, 0)
 	for i := range sessions.Items {
-		session := &sessions.Items[i]
-		if session.Spec.AccessProfile == profile.Name {
-			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)})
-		}
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&sessions.Items[i])})
 	}
 	return requests
 }

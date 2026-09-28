@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
@@ -603,6 +605,47 @@ func TestRecordBindingDriftPreservesStableReasons(t *testing.T) {
 	}
 }
 
+func TestFindSessionsForAccessProfileUsesProfileFieldIndex(t *testing.T) {
+	t.Parallel()
+
+	sessionForProfile := testSession()
+	sessionForProfile.Name = "profile-match"
+	sessionForProfile.UID = types.UID("profile-match-uid")
+	otherSession := testSession()
+	otherSession.Name = "profile-mismatch"
+	otherSession.UID = types.UID("profile-mismatch-uid")
+	otherSession.Spec.AccessProfile = "staging-pod-observer"
+
+	reconciler := &BreakGlassSessionReconciler{
+		Client: newTestClient(testScheme(t), sessionForProfile, otherSession),
+	}
+	profile := &accessv1alpha1.AccessProfile{ObjectMeta: metav1.ObjectMeta{Name: sessionForProfile.Spec.AccessProfile}}
+
+	requests := reconciler.findSessionsForAccessProfile(context.Background(), profile)
+	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(sessionForProfile) {
+		t.Fatalf("findSessionsForAccessProfile() = %#v, want only %s", requests, client.ObjectKeyFromObject(sessionForProfile))
+	}
+}
+
+func TestAccessProfileWatchPredicateSkipsStatusOnlyUpdates(t *testing.T) {
+	t.Parallel()
+
+	profile := &accessv1alpha1.AccessProfile{ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", Generation: 1}}
+	profilePredicate := predicate.GenerationChangedPredicate{}
+	if profilePredicate.Update(event.UpdateEvent{ObjectOld: profile, ObjectNew: profile.DeepCopy()}) {
+		t.Fatal("GenerationChangedPredicate accepted a status-only AccessProfile update")
+	}
+
+	policyUpdate := profile.DeepCopy()
+	policyUpdate.Generation = 2
+	if !profilePredicate.Update(event.UpdateEvent{ObjectOld: profile, ObjectNew: policyUpdate}) {
+		t.Fatal("GenerationChangedPredicate rejected an AccessProfile policy update")
+	}
+	if !profilePredicate.Delete(event.DeleteEvent{Object: profile}) {
+		t.Fatal("GenerationChangedPredicate rejected an AccessProfile deletion")
+	}
+}
+
 func activationPolicyObjects() (*accessv1alpha1.AccessProfile, *rbacv1.ClusterRole) {
 	role := &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer", UID: types.UID("role-uid")},
@@ -676,7 +719,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Client {
 	raw := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}).
+		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}).
+		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
+		WithIndex(&accessv1alpha1.AccessProfile{}, accessProfileClusterRoleField, accessProfileClusterRoleIndex).
 		WithObjects(objects...).
 		Build()
 	return interceptor.NewClient(raw, interceptor.Funcs{

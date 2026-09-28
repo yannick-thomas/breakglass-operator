@@ -22,6 +22,15 @@ rules:
 - apiGroups:
   - access.breakglass.io
   resources:
+  - accessprofiles/status
+  - breakglasssessions/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - access.breakglass.io
+  resources:
   - breakglasssessions
   verbs:
   - get
@@ -36,19 +45,17 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - access.breakglass.io
-  resources:
-  - breakglasssessions/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
   - authorization.k8s.io
   resources:
   - subjectaccessreviews
   verbs:
   - create
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - get
 - apiGroups:
   - rbac.authorization.k8s.io
   resourceNames:

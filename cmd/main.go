@@ -221,6 +221,15 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "breakglasssession")
 		os.Exit(1)
 	}
+	if err := (&controller.AccessProfileReconciler{
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Scheme:                  mgr.GetScheme(),
+		AllowedTargetNamespaces: allowedTargetNamespaces,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "accessprofile")
+		os.Exit(1)
+	}
 	if _, err := breakglassmetrics.RegisterSessionStateCollector(mgr.GetClient(), controller.SessionScope); err != nil {
 		setupLog.Error(err, "Failed to register BreakGlass session metrics")
 		os.Exit(1)
