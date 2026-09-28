@@ -113,7 +113,7 @@ func TestInitialReconcileRequeuesAfterAddingFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial Reconcile() error = %v", err)
 	}
-	if !result.Requeue {
+	if result.RequeueAfter <= 0 {
 		t.Fatalf("initial Reconcile() result = %#v, want an explicit requeue after finalizer update", result)
 	}
 
@@ -123,6 +123,101 @@ func TestInitialReconcileRequeuesAfterAddingFinalizer(t *testing.T) {
 	}
 	if !controllerutil.ContainsFinalizer(updated, BreakGlassFinalizer) {
 		t.Fatalf("session finalizers = %#v, want %q", updated.Finalizers, BreakGlassFinalizer)
+	}
+}
+
+func TestReconcileExpiresPersistedSessionAfterControllerRestart(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	profile, role := activationPolicyObjects()
+	testClient := newTestClient(scheme, session, profile, role)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}
+
+	// Activate the session, then discard this reconciler instance. The next
+	// reconcile must use only the persisted status and still revoke access.
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("add finalizer Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("activate Reconcile() error = %v", err)
+	}
+
+	active := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, active); err != nil {
+		t.Fatalf("get active session: %v", err)
+	}
+	if active.Status.Phase != accessv1alpha1.PhaseActive || active.Status.BindingRef == nil {
+		t.Fatalf("activated session status = %#v, want active session with binding reference", active.Status)
+	}
+	bindingName := active.Status.BindingRef.Name
+	expiredAt := metav1.NewTime(time.Now().Add(-time.Second))
+	active.Status.ExpiresAt = &expiredAt
+	if err := testClient.Status().Update(context.Background(), active); err != nil {
+		t.Fatalf("persist elapsed expiry: %v", err)
+	}
+
+	restartedReconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+	if _, err := restartedReconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("post-restart expiry Reconcile() error = %v", err)
+	}
+
+	expired := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, expired); err != nil {
+		t.Fatalf("get expired session: %v", err)
+	}
+	if expired.Status.Phase != accessv1alpha1.PhaseExpired {
+		t.Fatalf("session phase = %q, want %q", expired.Status.Phase, accessv1alpha1.PhaseExpired)
+	}
+	binding := &rbacv1.RoleBinding{}
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: bindingName, Namespace: "default"}, binding); err == nil {
+		t.Fatal("expired session left its RoleBinding behind after controller restart")
+	}
+}
+
+func TestReconcileDeniesBindingNameCollisionWithoutChangingExistingBinding(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Finalizers = []string{BreakGlassFinalizer}
+	profile, role := activationPolicyObjects()
+	existing := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bindingNameForSession(session),
+			Namespace: "default",
+			UID:       types.UID("unrelated-binding-uid"),
+		},
+		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "unrelated-role"},
+		Subjects: []rbacv1.Subject{{Kind: rbacv1.UserKind, Name: "unrelated@example.com", APIGroup: rbacv1.GroupName}},
+	}
+	testClient := newTestClient(scheme, session, profile, role, existing)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}); err != nil {
+		t.Fatalf("collision Reconcile() error = %v", err)
+	}
+
+	updated := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), client.ObjectKeyFromObject(session), updated); err != nil {
+		t.Fatalf("get denied session: %v", err)
+	}
+	if updated.Status.Phase != accessv1alpha1.PhaseDenied {
+		t.Fatalf("session phase = %q, want %q", updated.Status.Phase, accessv1alpha1.PhaseDenied)
+	}
+	if !hasCondition(updated.Status.Conditions, BindingIntegrityCondition, metav1.ConditionFalse, "BindingCollision") {
+		t.Fatalf("session conditions = %#v, want BindingCollision integrity condition", updated.Status.Conditions)
+	}
+
+	got := &rbacv1.RoleBinding{}
+	key := client.ObjectKeyFromObject(existing)
+	if err := testClient.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("get pre-existing binding: %v", err)
+	}
+	if got.UID != existing.UID || got.RoleRef != existing.RoleRef || len(got.Subjects) != 1 || got.Subjects[0].Name != "unrelated@example.com" {
+		t.Fatalf("existing RoleBinding was modified during collision handling: %#v", got)
 	}
 }
 
@@ -508,6 +603,35 @@ func TestRecordBindingDriftPreservesStableReasons(t *testing.T) {
 	}
 }
 
+func activationPolicyObjects() (*accessv1alpha1.AccessProfile, *rbacv1.ClusterRole) {
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer", UID: types.UID("role-uid")},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"get", "list", "watch"},
+		}},
+	}
+	profile := &accessv1alpha1.AccessProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", UID: types.UID("profile-uid")},
+		Spec: accessv1alpha1.AccessProfileSpec{
+			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: role.Name},
+			TargetNamespace: "default",
+			MaxDuration:     "1h",
+		},
+	}
+	return profile, role
+}
+
+func hasCondition(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason string) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType && condition.Status == status && condition.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
 func testSession() *accessv1alpha1.BreakGlassSession {
 	return &accessv1alpha1.BreakGlassSession{
 		ObjectMeta: metav1.ObjectMeta{Name: "incident", UID: types.UID("session-uid")},
@@ -550,7 +674,11 @@ func testScheme(t *testing.T) *runtime.Scheme {
 // UID allocation. Give created RBAC bindings deterministic server-style UIDs so
 // unit tests exercise the same status.bindingRef invariant as envtest.
 func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Client {
-	raw := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	raw := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}).
+		WithObjects(objects...).
+		Build()
 	return interceptor.NewClient(raw, interceptor.Funcs{
 		Create: func(ctx context.Context, next client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if obj.GetUID() == "" {

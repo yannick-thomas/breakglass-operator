@@ -163,7 +163,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// Do not depend on the metadata-only finalizer update being observed by
 		// the workqueue. A freshly accepted request must always proceed to its
 		// policy resolution and bounded activation path.
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
 	}
 
 	// 3. Handle Manual Revocation (spec.Revoked == true)
