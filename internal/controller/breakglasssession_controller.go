@@ -19,8 +19,11 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +63,9 @@ const (
 	// AccessProfileCondition records whether the immutable profile snapshot is
 	// still present and matches the administrator-controlled policy.
 	AccessProfileCondition = "AccessProfileValid"
+	// CuratedRoleCondition records whether the role rules and identity match the
+	// immutable snapshot taken before the binding was created.
+	CuratedRoleCondition = "CuratedRoleValid"
 
 	// DefaultBindingIntegrityCheckInterval bounds how long a missed RBAC watch
 	// event can leave an active session unchecked. It deliberately trades a
@@ -109,7 +115,7 @@ func (r *BreakGlassSessionReconciler) policyReader() client.Reader {
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglasssessions/finalizers,verbs=update
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=accessprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=breakglass-pod-observer,verbs=bind
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=breakglass-pod-observer,verbs=get;bind
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile coordinates the lifecycle of BreakGlassSessions. A binding's
@@ -238,6 +244,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	r.setAccessGrantedCondition(session, metav1.ConditionTrue, "AccessGranted", "Emergency access binding is active")
 	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingVerified", "The emergency access binding identity and content were verified")
 	r.setAccessProfileCondition(session, metav1.ConditionTrue, "AccessProfileVerified", "The immutable AccessProfile snapshot was verified")
+	r.setCuratedRoleCondition(session, metav1.ConditionTrue, "CuratedRoleVerified", "The curated ClusterRole identity and rules were verified")
 
 	targetDesc := fmt.Sprintf("namespace %q", grant.TargetNamespace)
 
@@ -276,6 +283,13 @@ func (r *BreakGlassSessionReconciler) reconcileActiveSession(ctx context.Context
 	}
 	if profileIssue != nil {
 		return r.suspendForProfile(ctx, session, profileIssue)
+	}
+	roleIssue, err := r.verifyCuratedRole(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if roleIssue != nil {
+		return r.suspendForCuratedRole(ctx, session, roleIssue)
 	}
 
 	// Sessions created before status.bindingRef was introduced are migrated only
@@ -497,10 +511,23 @@ func (r *BreakGlassSessionReconciler) resolveAccessGrant(ctx context.Context, se
 		return nil, 0, denyRequest(fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", profile.Name, profile.Spec.TargetNamespace))
 	}
 
+	role := &rbacv1.ClusterRole{}
+	if err := r.policyReader().Get(ctx, client.ObjectKey{Name: profile.Spec.RoleRef.Name}, role); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, 0, denyRequest(fmt.Errorf("curated ClusterRole %q does not exist", profile.Spec.RoleRef.Name))
+		}
+		return nil, 0, err
+	}
+	if role.UID == "" {
+		return nil, 0, denyRequest(fmt.Errorf("curated ClusterRole %q has no server-assigned UID", role.Name))
+	}
+
 	return &accessv1alpha1.ResolvedAccess{
 		AccessProfile:    profile.Name,
 		AccessProfileUID: string(profile.UID),
 		RoleRef:          profile.Spec.RoleRef,
+		RoleUID:          string(role.UID),
+		RoleRulesHash:    curatedRoleRulesHash(role.Rules),
 		TargetNamespace:  profile.Spec.TargetNamespace,
 	}, duration, nil
 }
@@ -569,9 +596,117 @@ func (r *BreakGlassSessionReconciler) setAccessProfileCondition(
 	})
 }
 
+func (r *BreakGlassSessionReconciler) setCuratedRoleCondition(
+	session *accessv1alpha1.BreakGlassSession,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
+	meta.SetStatusCondition(&session.Status.Conditions, metav1.Condition{
+		Type:               CuratedRoleCondition,
+		Status:             status,
+		ObservedGeneration: session.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+}
+
 type accessProfileIssue struct {
 	ConditionReason string
 	Message         string
+}
+
+type curatedRoleIssue struct {
+	ConditionReason string
+	Message         string
+}
+
+// verifyCuratedRole uses a direct API read on every active integrity check.
+// It deliberately avoids a broad ClusterRole watch/list permission: role names
+// are profile-controlled and should remain explicitly enumerated in manager RBAC.
+func (r *BreakGlassSessionReconciler) verifyCuratedRole(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*curatedRoleIssue, error) {
+	grant := session.Status.Grant
+	if grant == nil || grant.RoleRef.Kind != "ClusterRole" || grant.RoleRef.Name == "" || grant.RoleUID == "" || grant.RoleRulesHash == "" {
+		return &curatedRoleIssue{ConditionReason: "CuratedRoleSnapshotMissing", Message: "the active session has no complete curated ClusterRole integrity snapshot"}, nil
+	}
+
+	role := &rbacv1.ClusterRole{}
+	if err := r.policyReader().Get(ctx, client.ObjectKey{Name: grant.RoleRef.Name}, role); err != nil {
+		if apierrors.IsNotFound(err) {
+			return &curatedRoleIssue{ConditionReason: "CuratedRoleMissing", Message: "the curated ClusterRole no longer exists"}, nil
+		}
+		return nil, err
+	}
+	if string(role.UID) != grant.RoleUID {
+		return &curatedRoleIssue{ConditionReason: "CuratedRoleUIDMismatch", Message: "a different curated ClusterRole object now uses the recorded role name"}, nil
+	}
+	if curatedRoleRulesHash(role.Rules) != grant.RoleRulesHash {
+		return &curatedRoleIssue{ConditionReason: "CuratedRoleRulesDrift", Message: "the curated ClusterRole rules differ from the approved session snapshot"}, nil
+	}
+	return nil, nil
+}
+
+func (r *BreakGlassSessionReconciler) suspendForCuratedRole(ctx context.Context, session *accessv1alpha1.BreakGlassSession, issue *curatedRoleIssue) (ctrl.Result, error) {
+	cleanup, err := r.cleanupBindingWithResult(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if issue == nil {
+		issue = &curatedRoleIssue{ConditionReason: "CuratedRoleUnknown", Message: "the curated ClusterRole could not be verified"}
+	}
+
+	session.Status.Phase = accessv1alpha1.PhaseSuspended
+	r.setAccessGrantedCondition(session, metav1.ConditionFalse, "CuratedRoleInvalid", "Emergency access was suspended because its curated ClusterRole failed integrity verification")
+	r.setCuratedRoleCondition(session, metav1.ConditionFalse, issue.ConditionReason, issue.Message)
+	r.setCleanupIntegrityCondition(session, cleanup)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(session, corev1.EventTypeWarning, "CuratedRoleInvalid", "Emergency access suspended because its curated ClusterRole failed integrity verification: %s", issue.ConditionReason)
+	}
+	if err := r.Status().Update(ctx, session); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.recordTransition(breakglassmetrics.TransitionSuspended, session)
+	r.recordCuratedRoleDrift(issue, session)
+	return ctrl.Result{}, nil
+}
+
+func (r *BreakGlassSessionReconciler) recordCuratedRoleDrift(issue *curatedRoleIssue, session *accessv1alpha1.BreakGlassSession) {
+	if r.Metrics == nil || issue == nil {
+		return
+	}
+	var reason breakglassmetrics.CuratedRoleDriftReason
+	switch issue.ConditionReason {
+	case "CuratedRoleMissing":
+		reason = breakglassmetrics.CuratedRoleMissing
+	case "CuratedRoleUIDMismatch":
+		reason = breakglassmetrics.CuratedRoleUIDMismatch
+	case "CuratedRoleRulesDrift":
+		reason = breakglassmetrics.CuratedRoleRulesHash
+	case "CuratedRoleSnapshotMissing":
+		reason = breakglassmetrics.CuratedRoleSnapshotMissing
+	default:
+		reason = breakglassmetrics.CuratedRoleUnknown
+	}
+	r.Metrics.RecordCuratedRoleDrift(reason, SessionScope(session))
+}
+
+func curatedRoleRulesHash(rules []rbacv1.PolicyRule) string {
+	canonicalRules := make([]rbacv1.PolicyRule, len(rules))
+	for i, rule := range rules {
+		canonicalRules[i] = rule
+		sort.Strings(canonicalRules[i].APIGroups)
+		sort.Strings(canonicalRules[i].Resources)
+		sort.Strings(canonicalRules[i].ResourceNames)
+		sort.Strings(canonicalRules[i].Verbs)
+		sort.Strings(canonicalRules[i].NonResourceURLs)
+	}
+	sort.Slice(canonicalRules, func(i, j int) bool {
+		left, _ := json.Marshal(canonicalRules[i])
+		right, _ := json.Marshal(canonicalRules[j])
+		return string(left) < string(right)
+	})
+	payload, _ := json.Marshal(canonicalRules)
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
 
 // verifyAccessProfile confirms that an active grant still refers to precisely

@@ -108,8 +108,16 @@ func TestResolveAccessGrantUsesImmutableProfileSnapshot(t *testing.T) {
 			MaxDuration:     "1h",
 		},
 	}
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer", UID: types.UID("role-uid")},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"get", "list", "watch"},
+		}},
+	}
 	reconciler := &BreakGlassSessionReconciler{
-		Client:             newTestClient(scheme, profile),
+		Client:             newTestClient(scheme, profile, role),
 		MaxSessionDuration: 2 * time.Hour,
 	}
 
@@ -146,7 +154,7 @@ func TestResolveAccessGrantUsesImmutableProfileSnapshot(t *testing.T) {
 				if err != nil {
 					t.Fatalf("resolveAccessGrant() error = %v", err)
 				}
-				if grant.TargetNamespace != "default" || grant.RoleRef.Name != "breakglass-pod-observer" || duration != 30*time.Minute {
+				if grant.TargetNamespace != "default" || grant.RoleRef.Name != "breakglass-pod-observer" || grant.RoleUID != "role-uid" || grant.RoleRulesHash != curatedRoleRulesHash(role.Rules) || duration != 30*time.Minute {
 					t.Fatalf("resolveAccessGrant() = (%#v, %s), want profile snapshot", grant, duration)
 				}
 				return
@@ -155,6 +163,52 @@ func TestResolveAccessGrantUsesImmutableProfileSnapshot(t *testing.T) {
 				t.Fatalf("resolveAccessGrant() error = %v, want denied error containing %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestVerifyCuratedRoleDetectsRuleDrift(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer", UID: types.UID("role-uid")},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"pods", "secrets"},
+			Verbs:     []string{"get", "list"},
+		}},
+	}
+	session := testSession()
+	session.Status.Grant.RoleUID = "role-uid"
+	session.Status.Grant.RoleRulesHash = curatedRoleRulesHash([]rbacv1.PolicyRule{{
+		APIGroups: []string{""},
+		Resources: []string{"pods"},
+		Verbs:     []string{"get", "list"},
+	}})
+	reconciler := &BreakGlassSessionReconciler{Client: newTestClient(scheme, role)}
+
+	issue, err := reconciler.verifyCuratedRole(context.Background(), session)
+	if err != nil {
+		t.Fatalf("verifyCuratedRole() error = %v", err)
+	}
+	if issue == nil || issue.ConditionReason != "CuratedRoleRulesDrift" {
+		t.Fatalf("verifyCuratedRole() issue = %#v, want CuratedRoleRulesDrift", issue)
+	}
+}
+
+func TestCuratedRoleRulesHashIgnoresRuleAndValueOrder(t *testing.T) {
+	t.Parallel()
+
+	first := []rbacv1.PolicyRule{
+		{APIGroups: []string{"apps", ""}, Resources: []string{"deployments", "pods"}, Verbs: []string{"watch", "get"}},
+		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"list"}},
+	}
+	second := []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"", "apps"}, Resources: []string{"pods", "deployments"}, Verbs: []string{"get", "watch"}},
+	}
+	if got, want := curatedRoleRulesHash(first), curatedRoleRulesHash(second); got != want {
+		t.Fatalf("curatedRoleRulesHash() = %q, want canonical hash %q", got, want)
 	}
 }
 
@@ -439,6 +493,8 @@ func testSession() *accessv1alpha1.BreakGlassSession {
 				AccessProfile:    "production-pod-observer",
 				AccessProfileUID: "profile-uid",
 				RoleRef:          accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
+				RoleUID:          "role-uid",
+				RoleRulesHash:    curatedRoleRulesHash(nil),
 				TargetNamespace:  "default",
 			},
 		},
@@ -473,7 +529,8 @@ func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Clie
 }
 
 type recordingMetrics struct {
-	driftReasons []breakglassmetrics.BindingDriftReason
+	driftReasons      []breakglassmetrics.BindingDriftReason
+	curatedRoleDrifts []breakglassmetrics.CuratedRoleDriftReason
 }
 
 func (r *recordingMetrics) RecordTransition(breakglassmetrics.LifecycleTransition, breakglassmetrics.Scope) {
@@ -481,6 +538,10 @@ func (r *recordingMetrics) RecordTransition(breakglassmetrics.LifecycleTransitio
 
 func (r *recordingMetrics) RecordBindingDrift(reason breakglassmetrics.BindingDriftReason, _ breakglassmetrics.Scope) {
 	r.driftReasons = append(r.driftReasons, reason)
+}
+
+func (r *recordingMetrics) RecordCuratedRoleDrift(reason breakglassmetrics.CuratedRoleDriftReason, _ breakglassmetrics.Scope) {
+	r.curatedRoleDrifts = append(r.curatedRoleDrifts, reason)
 }
 
 func (r *recordingMetrics) RecordBindingOperation(breakglassmetrics.BindingOperation, breakglassmetrics.BindingOperationResult, breakglassmetrics.Scope) {

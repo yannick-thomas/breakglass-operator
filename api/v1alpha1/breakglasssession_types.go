@@ -147,6 +147,18 @@ type ResolvedAccess struct {
 	// RoleRef is the profile's curated ClusterRole.
 	RoleRef RoleReference `json:"roleRef"`
 
+	// RoleUID is the server-assigned UID of the curated ClusterRole when the
+	// grant was activated. A role recreated under the same name is not trusted.
+	// Sessions created before this field existed are suspended fail-closed during
+	// their next integrity check.
+	// +optional
+	RoleUID string `json:"roleUID,omitempty"`
+
+	// RoleRulesHash is a canonical SHA-256 digest of the curated ClusterRole's
+	// rules when the grant was activated. A changed rule set suspends the grant.
+	// +optional
+	RoleRulesHash string `json:"roleRulesHash,omitempty"`
+
 	// TargetNamespace is the profile's fixed namespace.
 	TargetNamespace string `json:"targetNamespace"`
 }

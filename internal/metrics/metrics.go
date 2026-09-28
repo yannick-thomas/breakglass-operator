@@ -82,6 +82,18 @@ const (
 	DriftUnknown          BindingDriftReason = "unknown"
 )
 
+// CuratedRoleDriftReason is a fixed vocabulary for a curated ClusterRole
+// integrity failure. It intentionally excludes role names and rule contents.
+type CuratedRoleDriftReason string
+
+const (
+	CuratedRoleMissing         CuratedRoleDriftReason = "missing"
+	CuratedRoleUIDMismatch     CuratedRoleDriftReason = "uid_mismatch"
+	CuratedRoleRulesHash       CuratedRoleDriftReason = "rules_hash"
+	CuratedRoleSnapshotMissing CuratedRoleDriftReason = "snapshot_missing"
+	CuratedRoleUnknown         CuratedRoleDriftReason = "unknown"
+)
+
 // BindingOperation identifies a privileged RBAC lifecycle action.
 type BindingOperation string
 
@@ -130,6 +142,7 @@ const (
 type LifecycleRecorder interface {
 	RecordTransition(LifecycleTransition, Scope)
 	RecordBindingDrift(BindingDriftReason, Scope)
+	RecordCuratedRoleDrift(CuratedRoleDriftReason, Scope)
 	RecordBindingOperation(BindingOperation, BindingOperationResult, Scope)
 	ObserveExpiryCleanupLag(Scope, time.Duration)
 }
@@ -146,6 +159,7 @@ type AdmissionRecorder interface {
 type Recorder struct {
 	transitions       *prometheus.CounterVec
 	bindingDrift      *prometheus.CounterVec
+	curatedRoleDrift  *prometheus.CounterVec
 	bindingOperations *prometheus.CounterVec
 	expiryCleanupLag  *prometheus.HistogramVec
 	admissionRequests *prometheus.CounterVec
@@ -177,6 +191,11 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 			Name:      "binding_drift_total",
 			Help:      "Total number of detected managed RBAC binding integrity failures.",
 		}, []string{"reason", "scope"}),
+		curatedRoleDrift: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Name:      "curated_role_drift_total",
+			Help:      "Total number of detected curated ClusterRole integrity failures.",
+		}, []string{"reason", "scope"}),
 		bindingOperations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace,
 			Name:      "binding_operations_total",
@@ -198,6 +217,7 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 	collectors := []prometheus.Collector{
 		recorder.transitions,
 		recorder.bindingDrift,
+		recorder.curatedRoleDrift,
 		recorder.bindingOperations,
 		recorder.expiryCleanupLag,
 		recorder.admissionRequests,
@@ -240,6 +260,15 @@ func (r *Recorder) RecordBindingDrift(reason BindingDriftReason, scope Scope) {
 		return
 	}
 	r.bindingDrift.WithLabelValues(string(normalizeDriftReason(reason)), string(normalizeScope(scope))).Inc()
+}
+
+// RecordCuratedRoleDrift records a curated ClusterRole identity or rule-set
+// failure after the session was suspended. Call it once per transition.
+func (r *Recorder) RecordCuratedRoleDrift(reason CuratedRoleDriftReason, scope Scope) {
+	if r == nil {
+		return
+	}
+	r.curatedRoleDrift.WithLabelValues(string(normalizeCuratedRoleDriftReason(reason)), string(normalizeScope(scope))).Inc()
 }
 
 // RecordBindingOperation records a privileged binding action. Regular
@@ -306,6 +335,15 @@ func normalizeDriftReason(reason BindingDriftReason) BindingDriftReason {
 		return reason
 	default:
 		return DriftUnknown
+	}
+}
+
+func normalizeCuratedRoleDriftReason(reason CuratedRoleDriftReason) CuratedRoleDriftReason {
+	switch reason {
+	case CuratedRoleMissing, CuratedRoleUIDMismatch, CuratedRoleRulesHash, CuratedRoleSnapshotMissing, CuratedRoleUnknown:
+		return reason
+	default:
+		return CuratedRoleUnknown
 	}
 }
 

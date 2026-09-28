@@ -42,6 +42,19 @@ var _ = Describe("BreakGlassSession Controller", func() {
 		}
 
 		BeforeEach(func() {
+			role := &rbacv1.ClusterRole{
+				ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer"},
+				Rules: []rbacv1.PolicyRule{{
+					APIGroups: []string{""},
+					Resources: []string{"pods"},
+					Verbs:     []string{"get", "list", "watch"},
+				}},
+			}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: role.Name}, &rbacv1.ClusterRole{})
+			if err != nil && errors.IsNotFound(err) {
+				Expect(k8sClient.Create(ctx, role)).To(Succeed())
+			}
+
 			profile := &accessv1alpha1.AccessProfile{
 				ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer"},
 				Spec: accessv1alpha1.AccessProfileSpec{
@@ -50,7 +63,7 @@ var _ = Describe("BreakGlassSession Controller", func() {
 					MaxDuration:     "30m",
 				},
 			}
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: profile.Name}, &accessv1alpha1.AccessProfile{})
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: profile.Name}, &accessv1alpha1.AccessProfile{})
 			if err != nil && errors.IsNotFound(err) {
 				Expect(k8sClient.Create(ctx, profile)).To(Succeed())
 			}

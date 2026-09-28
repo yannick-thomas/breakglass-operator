@@ -43,6 +43,9 @@ does **not** make the grant cluster-wide.
 * **UID-safe cleanup:** the controller persists the server-issued RoleBinding
   UID and uses it as a deletion precondition. A replacement object with the
   same name is never adopted or deleted.
+* **Curated-role integrity:** activation snapshots the referenced ClusterRole's
+  UID and canonical rules hash. A missing, replaced, or rule-drifted role
+  suspends the active session and removes only its UID-tracked RoleBinding.
 * **Least-privilege sample:** `breakglass-pod-observer` permits only pod,
   event, and pod-log observation. It intentionally excludes secrets, exec,
   attach, port-forward, writes, and workload edits.

@@ -107,10 +107,16 @@ associated audit logs rather than assuming a destroyed binding will reappear.
 * Self-service human identities only. Group, ServiceAccount, delegated-grantee,
   token, and workload access are separate designs with different forensic and
   revocation properties.
-* The profile snapshot freezes the **role name**, not yet the rules inside a
-  mutable ClusterRole. Treat curated roles as versioned/immutable now. The next
-  security milestone adds a rule hash/UID snapshot plus watch-and-suspend on
-  curated role drift.
+* The resolved grant snapshots the curated ClusterRole's UID and a canonical
+  hash of its policy rules. Every active integrity check reads that named role
+  directly from the API server; a missing/recreated role or changed rules
+  suspends the session and removes only its UID-tracked binding. The manager
+  intentionally needs `get`/`bind` only on explicitly enumerated role names,
+  rather than broad ClusterRole list/watch. Because the check shares the
+  one-minute active integrity interval, role changes are not instantaneous;
+  versioned, immutable curated roles remain the preferred operating model.
+  Sessions created before the snapshot fields existed suspend fail-closed at
+  their next active check and should be inventoried before upgrade.
 * There is no approval workflow in this API. A future `BreakGlassRequest`
   should preserve immutable requester/profile/duration/reason intent, then let
   an independently authorized approver cause a session to be created.

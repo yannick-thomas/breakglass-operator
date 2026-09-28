@@ -42,6 +42,8 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	recorder.RecordTransition(LifecycleTransition("engineer@example.com"), Scope("production-payments"))
 	recorder.RecordBindingDrift(DriftMissing, ScopeCluster)
 	recorder.RecordBindingDrift(BindingDriftReason("INC-1092"), Scope("production-payments"))
+	recorder.RecordCuratedRoleDrift(CuratedRoleRulesHash, ScopeNamespaced)
+	recorder.RecordCuratedRoleDrift(CuratedRoleDriftReason("breakglass-pod-observer"), Scope("production-payments"))
 	recorder.RecordBindingOperation(BindingOperationGrant, BindingOperationSuccess, ScopeNamespaced)
 	recorder.RecordBindingOperation(BindingOperation("breakglass-engineer@example.com"), BindingOperationResult("failed: forbidden"), Scope("production-payments"))
 	recorder.ObserveExpiryCleanupLag(ScopeNamespaced, -time.Second)
@@ -59,6 +61,14 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	assertMetricValue(t, registry, "breakglass_binding_drift_total", map[string]string{
 		"reason": string(DriftMissing),
 		"scope":  string(ScopeCluster),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_curated_role_drift_total", map[string]string{
+		"reason": string(CuratedRoleRulesHash),
+		"scope":  string(ScopeNamespaced),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_curated_role_drift_total", map[string]string{
+		"reason": string(CuratedRoleUnknown),
+		"scope":  string(ScopeUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_binding_drift_total", map[string]string{
 		"reason": string(DriftUnknown),
@@ -261,15 +271,17 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(TransitionUnknown):   true,
 		},
 		"reason": {
-			string(DriftMissing):          true,
-			string(DriftOwnership):        true,
-			string(DriftUIDMismatch):      true,
-			string(DriftRoleRef):          true,
-			string(DriftSubjects):         true,
-			string(DriftBindingReference): true,
-			string(DriftMissingExpiry):    true,
-			string(DriftIntegrityUnknown): true,
-			string(DriftUnknown):          true,
+			string(DriftMissing):               true,
+			string(DriftOwnership):             true,
+			string(DriftUIDMismatch):           true,
+			string(DriftRoleRef):               true,
+			string(DriftSubjects):              true,
+			string(DriftBindingReference):      true,
+			string(DriftMissingExpiry):         true,
+			string(DriftIntegrityUnknown):      true,
+			string(DriftUnknown):               true,
+			string(CuratedRoleRulesHash):       true,
+			string(CuratedRoleSnapshotMissing): true,
 		},
 		"operation": {
 			string(BindingOperationGrant):    true,

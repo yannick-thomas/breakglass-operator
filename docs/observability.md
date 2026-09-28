@@ -26,6 +26,8 @@ Only bounded labels are exposed:
   `drifted`, or `unknown`
 * `reason`: `missing`, `ownership`, `uid_mismatch`, `role_ref`, `subjects`,
   `binding_reference`, `missing_expiry`, `integrity_unknown`, or `unknown`
+  for binding drift; curated-role drift uses only `missing`, `uid_mismatch`,
+  `rules_hash`, `snapshot_missing`, or `unknown`.
 * binding `operation`: `grant`, `restore`, `cleanup`, or `unknown`
 * `result`: `success`, `error`, or `unknown`
 * admission `operation`: `create`, `update`, or `unknown`
@@ -40,6 +42,7 @@ Only bounded labels are exposed:
 | `breakglass_session_state_collection_success` | Whether the state collector could list sessions from the manager cache. |
 | `breakglass_session_transitions_total{transition,scope}` | Persisted lifecycle transitions. One session can produce multiple transition events over its lifecycle. |
 | `breakglass_binding_drift_total{reason,scope}` | Detected managed-binding integrity failures. |
+| `breakglass_curated_role_drift_total{reason,scope}` | Detected curated ClusterRole identity or rule-set drift. |
 | `breakglass_binding_operations_total{operation,result,scope}` | Privileged RBAC binding actions; routine no-op reconciliations are excluded. |
 | `breakglass_expiry_cleanup_lag_seconds{scope}` | Histogram of delay between expiry and successful binding cleanup. |
 | `breakglass_admission_requests_total{operation,outcome}` | Terminal webhook decisions. `denied` means policy rejection; `error` signals an admission dependency or internal failure. |
@@ -77,6 +80,7 @@ binding/profile snapshot, not from a raw profile or namespace label.
   one scrape interval; otherwise a zero session gauge cannot be trusted.
 * Critical: `increase(breakglass_binding_operations_total{operation="cleanup",result="error"}[5m]) > 0`.
 * High severity: `increase(breakglass_binding_drift_total[5m]) > 0`.
+* Critical: `increase(breakglass_curated_role_drift_total[5m]) > 0`.
 * High severity: `increase(breakglass_admission_requests_total{outcome="error"}[5m]) > 0`; this can block all new requests because the webhook is fail-closed.
 * SLO: alert if the 99th percentile of
   `breakglass_expiry_cleanup_lag_seconds` exceeds the documented expiry
