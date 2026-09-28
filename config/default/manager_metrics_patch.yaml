@@ -1,4 +1,8 @@
-# This patch adds the args to allow exposing the metrics endpoint using HTTPS
+# Dev: expose metrics via plain HTTP on :8080 (no TLS, no token auth).
+# For production, switch back to --metrics-bind-address=:8443 (HTTPS + token auth).
 - op: add
   path: /spec/template/spec/containers/0/args/0
-  value: --metrics-bind-address=:8443
+  value: --metrics-bind-address=:8080
+- op: add
+  path: /spec/template/spec/containers/0/args/1
+  value: --metrics-secure=false
