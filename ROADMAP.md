@@ -3,6 +3,11 @@
 > **Mission Statement**  
 > Der **BreakGlass Operator** transformiert Kubernetes Access Management von einem statischen, überprivilegierten Modell (*„Entwickler haben permanente Admin-Rechte für Notfälle“*) in eine kompromisslose **Zero-Trust Just-In-Time (JIT) Privileged Access Management (PAM)** Plattform für Cloud-Native Workloads.
 
+Die Produktgrenzen, Personas und die bewusst gestaffelte Weiterentwicklung
+stehen in der [Produktvision](docs/product-vision.md). Der aktuelle
+Security-Review mit den verbindlichen Release-Gates steht in
+[docs/security-review.md](docs/security-review.md).
+
 ---
 
 ## 🏛️ Die Zukunftsvision: Vom Operator zur JIT-Plattform

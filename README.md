@@ -50,7 +50,9 @@ does **not** make the grant cluster-wide.
 Kubernetes Events and status conditions are operational signals. Durable
 forensics belong in Kubernetes audit logs and a restricted SIEM/audit sink;
 Prometheus is not an audit database. See [the security design](docs/security-design.md)
-and [operational metrics](docs/observability.md).
+and [operational metrics](docs/observability.md). The reviewed production
+release gates and the longer-term product direction are documented in the
+[security review](docs/security-review.md) and [product vision](docs/product-vision.md).
 
 ## Prerequisites and deployment
 
