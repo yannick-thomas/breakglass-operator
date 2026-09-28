@@ -158,6 +158,30 @@ func TestResolveAccessGrantUsesImmutableProfileSnapshot(t *testing.T) {
 	}
 }
 
+func TestResolveAccessGrantRejectsProfileOutsideAllowedNamespaces(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	profile := &accessv1alpha1.AccessProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", UID: types.UID("profile-uid")},
+		Spec: accessv1alpha1.AccessProfileSpec{
+			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
+			TargetNamespace: "production",
+			MaxDuration:     "1h",
+		},
+	}
+	reconciler := &BreakGlassSessionReconciler{
+		Client:                  newTestClient(scheme, profile),
+		MaxSessionDuration:      2 * time.Hour,
+		AllowedTargetNamespaces: map[string]struct{}{"staging": {}},
+	}
+
+	_, _, err := reconciler.resolveAccessGrant(context.Background(), testSession())
+	if err == nil || !isRequestDenied(err) || !strings.Contains(err.Error(), "outside this manager's allowed namespace set") {
+		t.Fatalf("resolveAccessGrant() error = %v, want out-of-scope denial", err)
+	}
+}
+
 func TestEnsureBindingRefusesToAdoptNameCollision(t *testing.T) {
 	t.Parallel()
 

@@ -88,6 +88,10 @@ type BreakGlassSessionReconciler struct {
 	// Metrics is optional operational telemetry. It must never be used as an
 	// audit source or to decide whether access is granted.
 	Metrics breakglassmetrics.LifecycleRecorder
+	// AllowedTargetNamespaces optionally restricts profiles this manager may
+	// activate. An empty map preserves the development default; production
+	// overlays set this to the same namespaces granted RoleBinding RBAC.
+	AllowedTargetNamespaces map[string]struct{}
 	// IntegrityCheckInterval overrides the periodic active-binding verification
 	// interval. A non-positive value uses DefaultBindingIntegrityCheckInterval.
 	IntegrityCheckInterval time.Duration
@@ -489,6 +493,9 @@ func (r *BreakGlassSessionReconciler) resolveAccessGrant(ctx context.Context, se
 	if duration > maxDuration {
 		return nil, 0, denyRequest(fmt.Errorf("duration %s exceeds AccessProfile maximum of %s", duration, maxDuration))
 	}
+	if !r.targetNamespaceAllowed(profile.Spec.TargetNamespace) {
+		return nil, 0, denyRequest(fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", profile.Name, profile.Spec.TargetNamespace))
+	}
 
 	return &accessv1alpha1.ResolvedAccess{
 		AccessProfile:    profile.Name,
@@ -510,6 +517,14 @@ func validateAccessProfile(profile *accessv1alpha1.AccessProfile) (time.Duration
 		return 0, fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", profile.Name)
 	}
 	return maxDuration, nil
+}
+
+func (r *BreakGlassSessionReconciler) targetNamespaceAllowed(namespace string) bool {
+	if len(r.AllowedTargetNamespaces) == 0 {
+		return true
+	}
+	_, allowed := r.AllowedTargetNamespaces[namespace]
+	return allowed
 }
 
 func (r *BreakGlassSessionReconciler) setAccessGrantedCondition(
@@ -583,6 +598,9 @@ func (r *BreakGlassSessionReconciler) verifyAccessProfile(ctx context.Context, s
 	}
 	if _, err := validateAccessProfile(profile); err != nil {
 		return &accessProfileIssue{ConditionReason: "AccessProfileInvalid", Message: "the active AccessProfile no longer passes semantic validation"}, nil
+	}
+	if !r.targetNamespaceAllowed(profile.Spec.TargetNamespace) {
+		return &accessProfileIssue{ConditionReason: "AccessProfileOutOfScope", Message: "the active AccessProfile targets a namespace outside this manager's allowed namespace set"}, nil
 	}
 	if profile.Spec.RoleRef != grant.RoleRef || profile.Spec.TargetNamespace != grant.TargetNamespace {
 		return &accessProfileIssue{ConditionReason: "AccessProfilePolicyDrift", Message: "the AccessProfile policy differs from the resolved session snapshot"}, nil

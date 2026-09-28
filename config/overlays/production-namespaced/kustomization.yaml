@@ -1,0 +1,27 @@
+# High-assurance production example for a single approved target namespace.
+#
+# It starts from the HA production overlay, removes the manager's cluster-wide
+# RoleBinding CRUD rule, and grants that capability only in `production`.
+# The manager's cache and admission/controller policy are restricted by the
+# matching --allowed-target-namespaces flag below.
+resources:
+  - ../production
+  - manager-rolebindings-production.yaml
+
+patches:
+  # The RoleBinding policy rule is last in the generated manager ClusterRole.
+  # If controller-gen changes this ordering, rendering must fail review rather
+  # than silently removing a different permission.
+  - target:
+      kind: ClusterRole
+      name: breakglass-operator-manager-role
+    patch: |-
+      - op: remove
+        path: /rules/7
+  - target:
+      kind: Deployment
+      labelSelector: control-plane=controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --allowed-target-namespaces=production

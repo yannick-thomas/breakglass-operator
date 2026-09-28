@@ -76,6 +76,12 @@ upgrade, recovery, and metrics-boundary checks. The overlay intentionally
 requires two schedulable nodes; use a separately reviewed development overlay
 for a single-node environment.
 
+For a high-assurance installation with profiles that target only known
+namespaces, start from the single-namespace
+[namespaced production overlay](config/overlays/production-namespaced). It
+removes the manager's global RoleBinding CRUD and aligns its cache, admission,
+controller policy, and namespaced RBAC to the approved namespace set.
+
 Do not expose `BreakGlassSession` self-service access through a CRD-only or
 `make run` installation: the admission configuration is part of the security
 boundary. The manager always registers its webhooks; the default Kustomize

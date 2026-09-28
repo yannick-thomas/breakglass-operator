@@ -47,12 +47,13 @@ var breakglasssessionlog = logf.Log.WithName("breakglasssession-resource")
 // validating admission endpoints. GetAPIReader deliberately bypasses the
 // cache: authorization must evaluate the profile currently stored by the API
 // server, not a stale cache entry.
-func SetupBreakGlassSessionWebhookWithManager(mgr ctrl.Manager) error {
+func SetupBreakGlassSessionWebhookWithManager(mgr ctrl.Manager, allowedTargetNamespaces map[string]struct{}) error {
 	return ctrl.NewWebhookManagedBy(mgr, &accessv1alpha1.BreakGlassSession{}).
 		WithValidator(&BreakGlassSessionValidator{
-			ProfileReader: mgr.GetAPIReader(),
-			Reviewer:      KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
-			Metrics:       breakglassmetrics.DefaultRecorder,
+			ProfileReader:           mgr.GetAPIReader(),
+			Reviewer:                KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+			Metrics:                 breakglassmetrics.DefaultRecorder,
+			AllowedTargetNamespaces: allowedTargetNamespaces,
 		}).
 		WithDefaulter(&BreakGlassSessionDefaulter{
 			ProfileReader: mgr.GetAPIReader(),
@@ -166,9 +167,10 @@ func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authen
 // BreakGlassSessionValidator validates the fully-mutated session and enforces
 // the profile-specific custom RBAC verb "use" at creation time.
 type BreakGlassSessionValidator struct {
-	ProfileReader client.Reader
-	Reviewer      SubjectAccessReviewer
-	Metrics       breakglassmetrics.AdmissionRecorder
+	ProfileReader           client.Reader
+	Reviewer                SubjectAccessReviewer
+	Metrics                 breakglassmetrics.AdmissionRecorder
+	AllowedTargetNamespaces map[string]struct{}
 }
 
 // ValidateCreate rejects a request unless its persisted subject exactly equals
@@ -263,11 +265,22 @@ func (v *BreakGlassSessionValidator) loadAndValidateProfile(ctx context.Context,
 	if profile.Spec.RoleRef.Kind != "ClusterRole" || profile.Spec.RoleRef.Name == "" || profile.Spec.TargetNamespace == "" {
 		return nil, 0, fmt.Errorf("AccessProfile %q is not a valid curated namespaced policy", name)
 	}
+	if !targetNamespaceAllowed(profile.Spec.TargetNamespace, v.AllowedTargetNamespaces) {
+		return nil, 0, fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", name, profile.Spec.TargetNamespace)
+	}
 	maxDuration, err := time.ParseDuration(profile.Spec.MaxDuration)
 	if err != nil || maxDuration <= 0 {
 		return nil, 0, fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", name)
 	}
 	return profile, maxDuration, nil
+}
+
+func targetNamespaceAllowed(namespace string, allowed map[string]struct{}) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	_, found := allowed[namespace]
+	return found
 }
 
 func validateHumanRequester(user authenticationv1.UserInfo) error {

@@ -19,7 +19,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -28,8 +30,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -66,6 +70,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var allowedTargetNamespacesValue string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -88,6 +93,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&allowedTargetNamespacesValue, "allowed-target-namespaces", "",
+		"Comma-separated namespaces in which this manager may grant and watch RoleBindings. Empty permits all namespaces and is for development only.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -164,7 +171,13 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	allowedTargetNamespaces, err := parseAllowedTargetNamespaces(allowedTargetNamespacesValue)
+	if err != nil {
+		setupLog.Error(err, "Invalid allowed target namespaces")
+		os.Exit(1)
+	}
+
+	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -182,19 +195,28 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	if len(allowedTargetNamespaces) > 0 {
+		managerOptions.Cache = cache.Options{DefaultNamespaces: make(map[string]cache.Config, len(allowedTargetNamespaces))}
+		for namespace := range allowedTargetNamespaces {
+			managerOptions.Cache.DefaultNamespaces[namespace] = cache.Config{}
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions)
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
 	}
 
 	if err := (&controller.BreakGlassSessionReconciler{
-		Client:             mgr.GetClient(),
-		APIReader:          mgr.GetAPIReader(),
-		Scheme:             mgr.GetScheme(),
-		Recorder:           mgr.GetEventRecorderFor("breakglass-controller"),
-		MaxSessionDuration: maxSessionDuration,
-		Metrics:            breakglassmetrics.DefaultRecorder,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Scheme:                  mgr.GetScheme(),
+		Recorder:                mgr.GetEventRecorderFor("breakglass-controller"),
+		MaxSessionDuration:      maxSessionDuration,
+		Metrics:                 breakglassmetrics.DefaultRecorder,
+		AllowedTargetNamespaces: allowedTargetNamespaces,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "breakglasssession")
 		os.Exit(1)
@@ -203,7 +225,7 @@ func main() {
 		setupLog.Error(err, "Failed to register BreakGlass session metrics")
 		os.Exit(1)
 	}
-	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(mgr); err != nil {
+	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(mgr, allowedTargetNamespaces); err != nil {
 		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
 		os.Exit(1)
 	}
@@ -223,4 +245,22 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+func parseAllowedTargetNamespaces(value string) (map[string]struct{}, error) {
+	allowed := make(map[string]struct{})
+	if value == "" {
+		return allowed, nil
+	}
+	for _, rawNamespace := range strings.Split(value, ",") {
+		namespace := strings.TrimSpace(rawNamespace)
+		if namespace == "" {
+			return nil, fmt.Errorf("allowed-target-namespaces contains an empty namespace")
+		}
+		if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
+			return nil, fmt.Errorf("allowed-target-namespaces contains invalid namespace %q: %s", namespace, strings.Join(errs, "; "))
+		}
+		allowed[namespace] = struct{}{}
+	}
+	return allowed, nil
 }

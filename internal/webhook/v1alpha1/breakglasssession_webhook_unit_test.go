@@ -121,6 +121,21 @@ func TestValidatorRequiresAuthenticatedProfileUse(t *testing.T) {
 	}
 }
 
+func TestValidatorRejectsProfileOutsideAllowedNamespaces(t *testing.T) {
+	profile := testAccessProfile()
+	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
+	validator := &BreakGlassSessionValidator{
+		ProfileReader:           reader,
+		Reviewer:                fakeReviewer{allowed: true},
+		AllowedTargetNamespaces: map[string]struct{}{"staging": {}},
+	}
+
+	_, err := validator.ValidateCreate(requestContext("engineer@example.com"), testSessionRequest())
+	if err == nil || !strings.Contains(err.Error(), "outside this manager's allowed namespace set") {
+		t.Fatalf("ValidateCreate() error = %v, want out-of-scope denial", err)
+	}
+}
+
 func TestValidatorAllowsOnlyOneWayRevocation(t *testing.T) {
 	validator := &BreakGlassSessionValidator{}
 	oldSession := testSessionRequest()
