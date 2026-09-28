@@ -155,21 +155,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// 3. Handle Manual Revocation (spec.Revoked == true)
 	if session.Spec.Revoked {
-		if session.Status.Phase != accessv1alpha1.PhaseRevoked {
-			log.Info("Session manually revoked by administrator", "session", session.Name)
-			if err := r.cleanupBinding(ctx, session); err != nil {
-				return ctrl.Result{}, err
-			}
-			session.Status.Phase = accessv1alpha1.PhaseRevoked
-			r.setAccessGrantedCondition(session, metav1.ConditionFalse, "AccessRevoked", "Emergency access was manually revoked")
-			if r.Recorder != nil {
-				r.Recorder.Eventf(session, corev1.EventTypeWarning, "AccessRevoked", "Emergency access manually revoked by admin")
-			}
-			if err := r.Status().Update(ctx, session); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileRevocation(ctx, session)
 	}
 
 	// 4. Handle terminal phases. A suspended session is deliberately terminal:
@@ -182,22 +168,25 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// 5. Active lifecycle, including periodic binding integrity verification.
 	if session.Status.ExpiresAt != nil {
-		now := time.Now()
-		if now.After(session.Status.ExpiresAt.Time) || now.Equal(session.Status.ExpiresAt.Time) {
-			log.Info("Session duration expired, revoking RBAC access", "session", session.Name)
-			if err := r.cleanupBinding(ctx, session); err != nil {
-				return ctrl.Result{}, err
-			}
-			session.Status.Phase = accessv1alpha1.PhaseExpired
-			r.setAccessGrantedCondition(session, metav1.ConditionFalse, "AccessExpired", "Emergency access duration elapsed")
-			if r.Recorder != nil {
-				r.Recorder.Eventf(session, corev1.EventTypeWarning, "AccessExpired",
-					"Emergency access expired at %s", session.Status.ExpiresAt.Format(time.RFC3339))
-			}
-			if err := r.Status().Update(ctx, session); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+		return r.reconcileActiveSession(ctx, session)
+	}
+
+	// An Active status without an expiry cannot be safely bounded by the TTL
+	// controller. Do not grant or preserve access in that state.
+	if session.Status.Phase == accessv1alpha1.PhaseActive {
+		return r.suspendForIntegrity(ctx, session, &bindingIntegrityIssue{
+			Code:            "missing_expiry",
+			ConditionReason: "BindingExpiryMissing",
+			Message:         "active session has no recorded expiry time",
+		})
+	}
+
+	// 6. First Activation: resolve the immutable, administrator-owned profile
+	// before creating any privileged RBAC object.
+	grant, duration, err := r.resolveAccessGrant(ctx, session)
+	if err != nil {
+		if !isRequestDenied(err) {
+			return ctrl.Result{}, err
 		}
 		log.Error(err, "BreakGlassSession could not be activated", "session", session.Name)
 		session.Status.Phase = accessv1alpha1.PhaseDenied
@@ -246,15 +235,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingVerified", "The emergency access binding identity and content were verified")
 	r.setAccessProfileCondition(session, metav1.ConditionTrue, "AccessProfileVerified", "The immutable AccessProfile snapshot was verified")
 
-	// Create the RBAC RoleBinding or ClusterRoleBinding
-	if err := r.ensureBinding(ctx, session); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	targetDesc := "cluster-wide"
-	if session.Spec.TargetNamespace != "" {
-		targetDesc = fmt.Sprintf("namespace %q", session.Spec.TargetNamespace)
-	}
+	targetDesc := fmt.Sprintf("namespace %q", grant.TargetNamespace)
 
 	if r.Recorder != nil {
 		r.Recorder.Eventf(session, corev1.EventTypeNormal, "AccessGranted",
@@ -861,23 +842,25 @@ func hasManagedBindingLabels(labels map[string]string, session *accessv1alpha1.B
 	return true
 }
 
-		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, rb, func() error {
-			if rb.GetResourceVersion() != "" && !isManagedBindingForSession(rb.GetLabels(), session) {
-				return fmt.Errorf("refusing to adopt existing RoleBinding %s/%s that is not managed by this BreakGlassSession", rb.Namespace, rb.Name)
-			}
-			if rb.GetResourceVersion() != "" && !equality.Semantic.DeepEqual(rb.RoleRef, roleRef) {
-				return fmt.Errorf("refusing to change RoleBinding %s/%s roleRef", rb.Namespace, rb.Name)
-			}
-			if err := controllerutil.SetControllerReference(session, rb, r.Scheme); err != nil {
-				return err
-			}
-			rb.Labels = labels
-			rb.RoleRef = roleRef
-			rb.Subjects = []rbacv1.Subject{subject}
-			return nil
-		})
-		return err
+func hasSessionControllerOwnerReference(obj client.Object, session *accessv1alpha1.BreakGlassSession) bool {
+	for _, owner := range obj.GetOwnerReferences() {
+		if owner.APIVersion == accessv1alpha1.GroupVersion.String() &&
+			owner.Kind == "BreakGlassSession" &&
+			owner.Name == session.Name &&
+			owner.UID == session.UID &&
+			owner.Controller != nil && *owner.Controller {
+			return true
+		}
 	}
+	return false
+}
+
+// isManagedBindingForSession is intentionally stricter than an owner-reference
+// fallback: labels and owner reference corroborate the binding's managed state.
+// Once status.bindingRef exists, its UID is the authority for safe deletion.
+func isManagedBindingForSession(obj client.Object, session *accessv1alpha1.BreakGlassSession) bool {
+	return hasSessionControllerOwnerReference(obj, session) && hasManagedBindingLabels(obj.GetLabels(), session)
+}
 
 func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj client.Object) *bindingIntegrityIssue {
 	if !bindingReferenceMatchesObjectLocation(expectedBindingReference(session), obj) {
@@ -895,28 +878,19 @@ func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj clien
 		}
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, crb, func() error {
-		if crb.GetResourceVersion() != "" && !isManagedBindingForSession(crb.GetLabels(), session) {
-			return fmt.Errorf("refusing to adopt existing ClusterRoleBinding %s that is not managed by this BreakGlassSession", crb.Name)
-		}
-		if crb.GetResourceVersion() != "" && !equality.Semantic.DeepEqual(crb.RoleRef, roleRef) {
-			return fmt.Errorf("refusing to change ClusterRoleBinding %s roleRef", crb.Name)
-		}
-		if err := controllerutil.SetControllerReference(session, crb, r.Scheme); err != nil {
-			return err
-		}
-		crb.Labels = labels
-		crb.RoleRef = roleRef
-		crb.Subjects = []rbacv1.Subject{subject}
-		return nil
-	})
-	return err
-}
-
-func isManagedBindingForSession(labels map[string]string, session *accessv1alpha1.BreakGlassSession) bool {
-	return labels[ManagedByLabelKey] == ManagedByLabelValue &&
-		labels[SessionLabelKey] == session.Name &&
-		labels[SessionUIDLabelKey] == string(session.UID)
+	expectedRole := expectedRoleRef(session)
+	expectedSubjects := []rbacv1.Subject{expectedSubject(session)}
+	binding, ok := obj.(*rbacv1.RoleBinding)
+	if !ok {
+		return &bindingIntegrityIssue{Code: "binding_reference", ConditionReason: "BindingReferenceInvalid", Message: "the referenced object is not an RBAC binding"}
+	}
+	if !equality.Semantic.DeepEqual(binding.RoleRef, expectedRole) {
+		return &bindingIntegrityIssue{Code: "role_ref", ConditionReason: "BindingRoleRefDrift", Message: "the RBAC binding role reference differs from the approved session"}
+	}
+	if !equality.Semantic.DeepEqual(binding.Subjects, expectedSubjects) {
+		return &bindingIntegrityIssue{Code: "subjects", ConditionReason: "BindingSubjectsDrift", Message: "the RBAC binding subjects differ from the approved session"}
+	}
+	return nil
 }
 
 // discoverBindingReference supports one-way migration of sessions created by
