@@ -270,7 +270,12 @@ RBAC, GitOps, audit, and incident systems.
 
 Before a broad rollout, prioritize the production install gate, curated-role
 integrity (a role name alone does not freeze its rules), alert/runbook/audit
-integration, and realistic Kind/E2E tests. The next justified workflow CRD is
-an immutable `BreakGlassRequest` for two-person approvals; ChatOps and CLI
-should build on that stable request lifecycle rather than inventing a second
-approval model. The ranked rationale is maintained in [ROADMAP.md](ROADMAP.md).
+integration, and realistic Kind/E2E tests. The immutable cluster-scoped
+`BreakGlassRequest` now provides the safe first half of a two-person workflow:
+the authenticated requester, profile UID and policy boundary are captured at
+admission, then the manager records `Pending` and expires unconsumed requests
+after `--request-ttl` (15 minutes by default). It never grants access by
+itself. The next milestone adds `BreakGlassApproval` and a server-verified,
+idempotent request-to-session path; ChatOps, CLI, and a future optional WebUI
+must build on that shared workflow instead of creating a second approval
+model. The ranked rationale is maintained in [ROADMAP.md](ROADMAP.md).

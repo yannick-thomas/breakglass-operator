@@ -32,7 +32,7 @@ type BreakGlassRequestSpec struct {
 // RequestPhase is the controller-owned lifecycle of a BreakGlassRequest.
 // Values are intentionally distinct from BreakGlassSession phases: a request
 // records intent and approval, while a session records an actual RBAC grant.
-// +kubebuilder:validation:Enum=Pending;Approved;Denied;Expired;SessionCreated;Failed
+// +kubebuilder:validation:Enum=Pending;Approved;Denied;Expired;Provisioning;SessionCreated;Failed
 type RequestPhase string
 
 const (
@@ -40,6 +40,7 @@ const (
 	RequestPhaseApproved       RequestPhase = "Approved"
 	RequestPhaseDenied         RequestPhase = "Denied"
 	RequestPhaseExpired        RequestPhase = "Expired"
+	RequestPhaseProvisioning   RequestPhase = "Provisioning"
 	RequestPhaseSessionCreated RequestPhase = "SessionCreated"
 	RequestPhaseFailed         RequestPhase = "Failed"
 )

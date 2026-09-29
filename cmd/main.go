@@ -67,6 +67,7 @@ func main() {
 	var webhookPort int
 	var enableLeaderElection bool
 	var maxSessionDuration time.Duration
+	var requestTTL time.Duration
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -80,6 +81,8 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.DurationVar(&maxSessionDuration, "max-session-duration", 4*time.Hour,
 		"Maximum lifetime allowed for a BreakGlassSession. Set to 0 to disable the controller-side limit.")
+	flag.DurationVar(&requestTTL, "request-ttl", 15*time.Minute,
+		"Maximum time a BreakGlassRequest may await a decision. Must be greater than zero.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -181,6 +184,10 @@ func main() {
 		setupLog.Error(err, "Invalid allowed target namespaces")
 		os.Exit(1)
 	}
+	if requestTTL <= 0 {
+		setupLog.Error(fmt.Errorf("request-ttl must be greater than zero"), "Invalid request TTL")
+		os.Exit(1)
+	}
 
 	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
@@ -235,6 +242,14 @@ func main() {
 		AllowedTargetNamespaces: allowedTargetNamespaces,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "accessprofile")
+		os.Exit(1)
+	}
+	if err := (&controller.BreakGlassRequestReconciler{
+		Client:     mgr.GetClient(),
+		RequestTTL: requestTTL,
+		Metrics:    breakglassmetrics.DefaultRecorder,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "breakglassrequest")
 		os.Exit(1)
 	}
 	if _, err := breakglassmetrics.RegisterSessionStateCollector(mgr.GetClient(), controller.SessionScope); err != nil {

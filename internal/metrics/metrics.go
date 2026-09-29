@@ -74,6 +74,22 @@ const (
 	TransitionUnknown   LifecycleTransition = "unknown"
 )
 
+// RequestTransition is a persisted BreakGlassRequest lifecycle transition.
+// It has its own bounded vocabulary because creating a request is not the
+// same operational event as granting an RBAC session.
+type RequestTransition string
+
+const (
+	RequestTransitionPending        RequestTransition = "pending"
+	RequestTransitionApproved       RequestTransition = "approved"
+	RequestTransitionDenied         RequestTransition = "denied"
+	RequestTransitionExpired        RequestTransition = "expired"
+	RequestTransitionProvisioning   RequestTransition = "provisioning"
+	RequestTransitionSessionCreated RequestTransition = "session_created"
+	RequestTransitionFailed         RequestTransition = "failed"
+	RequestTransitionUnknown        RequestTransition = "unknown"
+)
+
 // BindingDriftReason is a fixed vocabulary for a binding-integrity failure.
 // Do not pass API errors or object identifiers as a metric label.
 type BindingDriftReason string
@@ -155,6 +171,13 @@ type LifecycleRecorder interface {
 	ObserveExpiryCleanupLag(Scope, time.Duration)
 }
 
+// RequestLifecycleRecorder records controller-persisted request lifecycle
+// transitions. It deliberately has no labels for requester, profile, reason,
+// namespace, or request ID.
+type RequestLifecycleRecorder interface {
+	RecordRequestTransition(RequestTransition)
+}
+
 // AdmissionRecorder is the small interface webhooks need to report a
 // terminal admission decision without exposing request-specific data.
 type AdmissionRecorder interface {
@@ -165,16 +188,18 @@ type AdmissionRecorder interface {
 // controller. Metrics are best-effort operational telemetry, not an audit
 // record.
 type Recorder struct {
-	transitions       *prometheus.CounterVec
-	bindingDrift      *prometheus.CounterVec
-	curatedRoleDrift  *prometheus.CounterVec
-	bindingOperations *prometheus.CounterVec
-	expiryCleanupLag  *prometheus.HistogramVec
-	admissionRequests *prometheus.CounterVec
+	transitions        *prometheus.CounterVec
+	bindingDrift       *prometheus.CounterVec
+	curatedRoleDrift   *prometheus.CounterVec
+	bindingOperations  *prometheus.CounterVec
+	expiryCleanupLag   *prometheus.HistogramVec
+	admissionRequests  *prometheus.CounterVec
+	requestTransitions *prometheus.CounterVec
 }
 
 var _ LifecycleRecorder = (*Recorder)(nil)
 var _ AdmissionRecorder = (*Recorder)(nil)
+var _ RequestLifecycleRecorder = (*Recorder)(nil)
 
 // DefaultRecorder is registered in controller-runtime's registry, which is
 // served by the manager's standard metrics endpoint.
@@ -220,6 +245,11 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 			Name:      "admission_requests_total",
 			Help:      "Total number of terminal BreakGlassSession admission decisions.",
 		}, []string{metricLabelOperation, metricLabelOutcome}),
+		requestTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Name:      "request_transitions_total",
+			Help:      "Total number of persisted BreakGlassRequest lifecycle transitions.",
+		}, []string{metricLabelTransition}),
 	}
 
 	collectors := []prometheus.Collector{
@@ -229,6 +259,7 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 		recorder.bindingOperations,
 		recorder.expiryCleanupLag,
 		recorder.admissionRequests,
+		recorder.requestTransitions,
 	}
 	for i, collector := range collectors {
 		if err := registry.Register(collector); err != nil {
@@ -319,6 +350,16 @@ func (r *Recorder) RecordAdmissionRequest(operation AdmissionOperation, outcome 
 	).Inc()
 }
 
+// RecordRequestTransition records a request lifecycle state only after its
+// status update has been persisted. The fixed vocabulary prevents sensitive
+// request data becoming a Prometheus label.
+func (r *Recorder) RecordRequestTransition(transition RequestTransition) {
+	if r == nil {
+		return
+	}
+	r.requestTransitions.WithLabelValues(string(normalizeRequestTransition(transition))).Inc()
+}
+
 func normalizeScope(scope Scope) Scope {
 	switch scope {
 	case ScopeNamespaced, ScopeCluster, ScopeUnknown:
@@ -334,6 +375,22 @@ func normalizeTransition(transition LifecycleTransition) LifecycleTransition {
 		return transition
 	default:
 		return TransitionUnknown
+	}
+}
+
+func normalizeRequestTransition(transition RequestTransition) RequestTransition {
+	switch transition {
+	case RequestTransitionPending,
+		RequestTransitionApproved,
+		RequestTransitionDenied,
+		RequestTransitionExpired,
+		RequestTransitionProvisioning,
+		RequestTransitionSessionCreated,
+		RequestTransitionFailed,
+		RequestTransitionUnknown:
+		return transition
+	default:
+		return RequestTransitionUnknown
 	}
 }
 

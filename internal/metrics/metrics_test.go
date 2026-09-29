@@ -49,6 +49,8 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	recorder.ObserveExpiryCleanupLag(ScopeNamespaced, -time.Second)
 	recorder.RecordAdmissionRequest(AdmissionOperationCreate, AdmissionOutcomeAllowed)
 	recorder.RecordAdmissionRequest(AdmissionOperation("engineer@example.com"), AdmissionOutcome("INC-1092"))
+	recorder.RecordRequestTransition(RequestTransitionPending)
+	recorder.RecordRequestTransition(RequestTransition("INC-1092"))
 
 	assertMetricValue(t, registry, "breakglass_session_transitions_total", map[string]string{
 		metricLabelTransition: string(TransitionActivated),
@@ -87,6 +89,12 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	assertMetricValue(t, registry, "breakglass_admission_requests_total", map[string]string{
 		metricLabelOperation: string(AdmissionOperationCreate),
 		metricLabelOutcome:   string(AdmissionOutcomeAllowed),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_request_transitions_total", map[string]string{
+		metricLabelTransition: string(RequestTransitionPending),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_request_transitions_total", map[string]string{
+		metricLabelTransition: string(RequestTransitionUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_admission_requests_total", map[string]string{
 		metricLabelOperation: string(AdmissionOperationUnknown),
@@ -262,13 +270,18 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(ScopeUnknown):    true,
 		},
 		metricLabelTransition: {
-			string(TransitionActivated): true,
-			string(TransitionDenied):    true,
-			string(TransitionExpired):   true,
-			string(TransitionRevoked):   true,
-			string(TransitionSuspended): true,
-			string(TransitionDrifted):   true,
-			string(TransitionUnknown):   true,
+			string(TransitionActivated):             true,
+			string(TransitionDenied):                true,
+			string(TransitionExpired):               true,
+			string(TransitionRevoked):               true,
+			string(TransitionSuspended):             true,
+			string(TransitionDrifted):               true,
+			string(TransitionUnknown):               true,
+			string(RequestTransitionPending):        true,
+			string(RequestTransitionApproved):       true,
+			string(RequestTransitionProvisioning):   true,
+			string(RequestTransitionSessionCreated): true,
+			string(RequestTransitionFailed):         true,
 		},
 		metricLabelReason: {
 			string(DriftMissing):               true,

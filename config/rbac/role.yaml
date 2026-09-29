@@ -15,6 +15,7 @@ rules:
   - access.breakglass.io
   resources:
   - accessprofiles
+  - breakglassrequests
   verbs:
   - get
   - list
@@ -23,6 +24,7 @@ rules:
   - access.breakglass.io
   resources:
   - accessprofiles/status
+  - breakglassrequests/status
   - breakglasssessions/status
   verbs:
   - get

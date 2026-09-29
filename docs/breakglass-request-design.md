@@ -52,7 +52,10 @@ boundary**, not yet the approval or grant workflow:
 * it rejects service accounts, anonymous callers, stale profiles and changes
   to a request's immutable spec;
 * it exposes a typed, controller-owned lifecycle status contract for the
-  upcoming request controller.
+  request controller;
+* it records a server-derived `Pending` deadline and moves an unconsumed
+  request to `Expired` after the manager's `--request-ttl` (15 minutes by
+  default).
 
 Creating a `BreakGlassRequest` currently **does not grant access**, does not
 create a `BreakGlassSession`, and cannot be used as a bypass around the direct

@@ -719,7 +719,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Client {
 	raw := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}).
+		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}, &accessv1alpha1.BreakGlassRequest{}).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
 		WithObjects(objects...).
 		Build()
