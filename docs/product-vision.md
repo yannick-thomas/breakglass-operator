@@ -94,8 +94,9 @@ demonstrably share approval/quorum semantics; configuration CRDs should follow
 real policy reuse, not anticipated complexity.
 
 The concrete request/approval and WebUI trust boundaries are recorded in
-[BreakGlassRequest design](breakglass-request-design.md). The WebUI remains an
-optional client of that API, never an RBAC-provisioning component.
+[BreakGlassRequest design](breakglass-request-design.md) and
+[ADR-001](adr-001-single-grant-path.md). The WebUI remains an optional client
+of that API, never an RBAC-provisioning component.
 
 ## Non-goals that keep the product useful
 

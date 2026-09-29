@@ -1,5 +1,8 @@
 # BreakGlassRequest design
 
+The normative architectural decision for this workflow is
+[ADR-001: One profile-bound path to a temporary RBAC grant](adr-001-single-grant-path.md).
+
 `BreakGlassRequest` is the next workflow API. It is deliberately not an
 alternative way to create a `RoleBinding`: it is an untrusted request that
 must become an immutable, reviewed `BreakGlassSession` only after approval.
