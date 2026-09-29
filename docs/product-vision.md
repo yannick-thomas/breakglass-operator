@@ -93,6 +93,10 @@ bounded, and auditable. A separate `ApprovalPolicy` is premature until teams
 demonstrably share approval/quorum semantics; configuration CRDs should follow
 real policy reuse, not anticipated complexity.
 
+The concrete request/approval and WebUI trust boundaries are recorded in
+[BreakGlassRequest design](breakglass-request-design.md). The WebUI remains an
+optional client of that API, never an RBAC-provisioning component.
+
 ## Non-goals that keep the product useful
 
 * A generic replacement for Kubernetes RBAC or enterprise PAM.
