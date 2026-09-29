@@ -51,6 +51,19 @@ cleanup. Repeat the request after deleting one manager Pod. A failed admission
 webhook must reject a new request rather than admitting a client-controlled
 subject or role.
 
+The repository executes this boundary in CI with a disposable, two-node Kind
+cluster:
+
+```bash
+make test-e2e-production
+```
+
+It renders the production overlay, verifies two manager Pods, certificate and
+PDB readiness, deletes one manager Pod before a real attributed request, then
+scales all managers down to prove admission fails closed before restoring the
+deployment and successfully issuing a fresh request. It does not remove or
+weaken the webhook configuration to simulate the outage.
+
 ## Upgrade and rollback
 
 1. Record the image digest, rendered manifest, current CRDs, active sessions,

@@ -70,6 +70,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= breakglass-operator-test-e2e
+PRODUCTION_KIND_CLUSTER ?= breakglass-operator-production-e2e
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -90,9 +91,28 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
+.PHONY: setup-test-e2e-production
+setup-test-e2e-production: ## Set up a two-node Kind cluster for the production e2e tests.
+	@case "$$($(KIND) get clusters)" in \
+		*"$(PRODUCTION_KIND_CLUSTER)"*) \
+			echo "Kind cluster '$(PRODUCTION_KIND_CLUSTER)' already exists. Skipping creation." ;; \
+		*) \
+			echo "Creating two-node Kind cluster '$(PRODUCTION_KIND_CLUSTER)'..."; \
+			$(KIND) create cluster --name $(PRODUCTION_KIND_CLUSTER) --config test/e2e/production/kind-config.yaml ;; \
+	esac
+
+.PHONY: test-e2e-production
+test-e2e-production: setup-test-e2e-production manifests generate fmt vet ## Run the HA production overlay e2e tests in Kind.
+	KIND=$(KIND) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) go test -tags=e2e ./test/e2e/production -v -ginkgo.v
+	$(MAKE) cleanup-test-e2e-production
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: cleanup-test-e2e-production
+cleanup-test-e2e-production: ## Tear down the Kind cluster used for production e2e tests.
+	@$(KIND) delete cluster --name $(PRODUCTION_KIND_CLUSTER)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -180,9 +200,20 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
+.PHONY: deploy-production
+deploy-production: manifests kustomize ## Deploy the HA production overlay without modifying tracked manifests.
+	@temp_dir="$$(mktemp -d)"; trap 'rm -rf "$$temp_dir"' EXIT; \
+		cp -R config "$$temp_dir/config"; \
+		cd "$$temp_dir/config/manager" && "$(KUSTOMIZE)" edit set image controller=${IMG}; \
+		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production" | "$(KUBECTL)" apply -f -
+
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
+.PHONY: undeploy-production
+undeploy-production: kustomize ## Undeploy the HA production overlay from the current cluster.
+	"$(KUSTOMIZE)" build config/overlays/production | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies
 
