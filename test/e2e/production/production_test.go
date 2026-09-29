@@ -57,7 +57,7 @@ func TestProductionE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building and loading the manager image into the two-node Kind cluster")
+	By("building and loading the manager image into Kind with two schedulable workers")
 	_, err := utils.Run(exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage)))
 	Expect(err).NotTo(HaveOccurred())
 	Expect(utils.LoadImageToKindClusterWithName(managerImage)).To(Succeed())

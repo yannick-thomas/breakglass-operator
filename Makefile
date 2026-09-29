@@ -92,12 +92,12 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: setup-test-e2e-production
-setup-test-e2e-production: ## Set up a two-node Kind cluster for the production e2e tests.
+setup-test-e2e-production: ## Set up Kind with two schedulable workers for the production e2e tests.
 	@case "$$($(KIND) get clusters)" in \
 		*"$(PRODUCTION_KIND_CLUSTER)"*) \
 			echo "Kind cluster '$(PRODUCTION_KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
-			echo "Creating two-node Kind cluster '$(PRODUCTION_KIND_CLUSTER)'..."; \
+			echo "Creating Kind cluster with two schedulable workers '$(PRODUCTION_KIND_CLUSTER)'..."; \
 			$(KIND) create cluster --name $(PRODUCTION_KIND_CLUSTER) --config test/e2e/production/kind-config.yaml ;; \
 	esac
 

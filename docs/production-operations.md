@@ -51,8 +51,8 @@ cleanup. Repeat the request after deleting one manager Pod. A failed admission
 webhook must reject a new request rather than admitting a client-controlled
 subject or role.
 
-The repository executes this boundary in CI with a disposable, two-node Kind
-cluster:
+The repository executes this boundary in CI with a disposable Kind cluster
+that has two schedulable worker nodes:
 
 ```bash
 make test-e2e-production

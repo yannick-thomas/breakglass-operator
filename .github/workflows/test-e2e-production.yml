@@ -10,7 +10,7 @@ jobs:
   test-e2e-production:
     permissions:
       contents: read
-    name: Verify HA production overlay on Kind
+    name: Verify HA production overlay on Kind workers
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
