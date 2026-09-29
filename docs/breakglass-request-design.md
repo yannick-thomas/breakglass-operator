@@ -40,6 +40,27 @@ The resulting session stores the source request UID in its status/audit
 reference. An approved request is consumed exactly once; retries remain
 idempotent and cannot create a second grant.
 
+## Current implementation boundary
+
+The current `v1alpha1` implementation provides the **safe request admission
+boundary**, not yet the approval or grant workflow:
+
+* it records only the authenticated human requester and the current
+  `AccessProfile` UID;
+* it applies the same curated-role, target-namespace, duration and `use`
+  authorization checks as a direct `BreakGlassSession`;
+* it rejects service accounts, anonymous callers, stale profiles and changes
+  to a request's immutable spec;
+* it exposes a typed, controller-owned lifecycle status contract for the
+  upcoming request controller.
+
+Creating a `BreakGlassRequest` currently **does not grant access**, does not
+create a `BreakGlassSession`, and cannot be used as a bypass around the direct
+self-service session flow. `BreakGlassApproval`, request expiry and the
+request-to-session controller are deliberately implemented together in the
+next milestone; shipping an approval-looking resource without the server-side
+`requestRef` grant boundary would be misleading and unsafe.
+
 ## Admission and RBAC
 
 * Requesters receive `create`, read-only access to their requests, and custom

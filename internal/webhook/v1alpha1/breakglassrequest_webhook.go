@@ -11,29 +11,60 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 )
 
-func SetupBreakGlassRequestWebhookWithManager(mgr ctrl.Manager) error {
+// SetupBreakGlassRequestWebhookWithManager installs the request admission
+// boundary with the same target-namespace constraint as direct sessions. A
+// request must not be able to select a profile that this manager would later
+// refuse to grant.
+func SetupBreakGlassRequestWebhookWithManager(mgr ctrl.Manager, allowedTargetNamespaces map[string]struct{}) error {
 	return ctrl.NewWebhookManagedBy(mgr, &accessv1alpha1.BreakGlassRequest{}).
-		WithDefaulter(&BreakGlassRequestDefaulter{ProfileReader: mgr.GetAPIReader()}).
-		WithValidator(&BreakGlassRequestValidator{ProfileReader: mgr.GetAPIReader(), Reviewer: KubernetesSubjectAccessReviewer{Client: mgr.GetClient()}}).
+		WithDefaulter(&BreakGlassRequestDefaulter{ProfileReader: mgr.GetAPIReader(), Metrics: breakglassmetrics.DefaultRecorder}).
+		WithValidator(&BreakGlassRequestValidator{
+			ProfileReader:           mgr.GetAPIReader(),
+			Reviewer:                KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+			Metrics:                 breakglassmetrics.DefaultRecorder,
+			AllowedTargetNamespaces: allowedTargetNamespaces,
+		}).
 		Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-access-breakglass-io-v1alpha1-breakglassrequest,mutating=true,failurePolicy=fail,sideEffects=None,groups=access.breakglass.io,resources=breakglassrequests,verbs=create,versions=v1alpha1,name=mbreakglassrequest-v1alpha1.kb.io,admissionReviewVersions=v1
-type BreakGlassRequestDefaulter struct{ ProfileReader client.Reader }
+type BreakGlassRequestDefaulter struct {
+	ProfileReader client.Reader
+	Metrics       breakglassmetrics.AdmissionRecorder
+}
 
-func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1alpha1.BreakGlassRequest) error {
+func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1alpha1.BreakGlassRequest) (err error) {
+	defer func() {
+		if err != nil {
+			recordAdmissionDecision(d.Metrics, breakglassmetrics.AdmissionOperationCreate, admissionOutcomeForError(err))
+		}
+	}()
+
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		return err
+		return &admissionInternalError{err: fmt.Errorf("read authenticated admission requester: %w", err)}
 	}
 	if err := validateHumanRequester(req.UserInfo); err != nil {
 		return err
 	}
+	if obj.Spec.AccessProfile == "" {
+		return fmt.Errorf("accessProfile is required")
+	}
+	if d.ProfileReader == nil {
+		return &admissionInternalError{err: fmt.Errorf("AccessProfile reader is not configured")}
+	}
 	p := &accessv1alpha1.AccessProfile{}
 	if err := d.ProfileReader.Get(ctx, client.ObjectKey{Name: obj.Spec.AccessProfile}, p); err != nil {
-		return fmt.Errorf("read AccessProfile: %w", err)
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("AccessProfile %q does not exist", obj.Spec.AccessProfile)
+		}
+		return apierrors.NewInternalError(fmt.Errorf("read AccessProfile for admission: %w", err))
+	}
+	if p.UID == "" {
+		return apierrors.NewInternalError(fmt.Errorf("AccessProfile %q has no server-assigned UID", p.Name))
 	}
 	obj.Spec.Requester = accessv1alpha1.SubjectReference{Kind: accessv1alpha1.SubjectKindUser, Name: req.UserInfo.Username}
 	obj.Spec.AccessProfileUID = string(p.UID)
@@ -42,14 +73,20 @@ func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1a
 
 // +kubebuilder:webhook:path=/validate-access-breakglass-io-v1alpha1-breakglassrequest,mutating=false,failurePolicy=fail,sideEffects=None,groups=access.breakglass.io,resources=breakglassrequests,verbs=create;update,versions=v1alpha1,name=vbreakglassrequest-v1alpha1.kb.io,admissionReviewVersions=v1
 type BreakGlassRequestValidator struct {
-	ProfileReader client.Reader
-	Reviewer      SubjectAccessReviewer
+	ProfileReader           client.Reader
+	Reviewer                SubjectAccessReviewer
+	Metrics                 breakglassmetrics.AdmissionRecorder
+	AllowedTargetNamespaces map[string]struct{}
 }
 
-func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *accessv1alpha1.BreakGlassRequest) (admission.Warnings, error) {
+func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *accessv1alpha1.BreakGlassRequest) (warnings admission.Warnings, err error) {
+	defer func() {
+		recordAdmissionDecision(v.Metrics, breakglassmetrics.AdmissionOperationCreate, admissionOutcomeForError(err))
+	}()
+
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		return nil, err
+		return nil, apierrors.NewInternalError(fmt.Errorf("read authenticated admission requester: %w", err))
 	}
 	if err := validateHumanRequester(req.UserInfo); err != nil {
 		return nil, err
@@ -57,11 +94,12 @@ func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *ac
 	if obj.Spec.Requester.Kind != accessv1alpha1.SubjectKindUser || obj.Spec.Requester.Name != req.UserInfo.Username {
 		return nil, fmt.Errorf("requester must be the authenticated requester")
 	}
-	p := &accessv1alpha1.AccessProfile{}
-	if err := v.ProfileReader.Get(ctx, client.ObjectKey{Name: obj.Spec.AccessProfile}, p); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("AccessProfile %q does not exist", obj.Spec.AccessProfile)
-		}
+	profileValidator := &BreakGlassSessionValidator{
+		ProfileReader:           v.ProfileReader,
+		AllowedTargetNamespaces: v.AllowedTargetNamespaces,
+	}
+	p, maxDuration, err := profileValidator.loadAndValidateProfile(ctx, obj.Spec.AccessProfile)
+	if err != nil {
 		return nil, err
 	}
 	if obj.Spec.AccessProfileUID != string(p.UID) {
@@ -71,20 +109,26 @@ func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *ac
 	if err != nil || duration <= 0 {
 		return nil, fmt.Errorf("duration must be a positive Go duration")
 	}
-	maxDuration, err := time.ParseDuration(p.Spec.MaxDuration)
-	if err != nil || maxDuration <= 0 || duration > maxDuration {
+	if duration > maxDuration {
 		return nil, fmt.Errorf("duration exceeds AccessProfile maximum")
+	}
+	if v.Reviewer == nil {
+		return nil, apierrors.NewInternalError(fmt.Errorf("SubjectAccessReview reviewer is not configured"))
 	}
 	allowed, err := v.Reviewer.CanUse(ctx, req.UserInfo, p.Name)
 	if err != nil {
-		return nil, err
+		return nil, apierrors.NewInternalError(fmt.Errorf("evaluate AccessProfile use authorization: %w", err))
 	}
 	if !allowed {
 		return nil, fmt.Errorf("requester is not authorized to use AccessProfile %q", p.Name)
 	}
 	return nil, nil
 }
-func (v *BreakGlassRequestValidator) ValidateUpdate(_ context.Context, oldObj, newObj *accessv1alpha1.BreakGlassRequest) (admission.Warnings, error) {
+func (v *BreakGlassRequestValidator) ValidateUpdate(_ context.Context, oldObj, newObj *accessv1alpha1.BreakGlassRequest) (warnings admission.Warnings, err error) {
+	defer func() {
+		recordAdmissionDecision(v.Metrics, breakglassmetrics.AdmissionOperationUpdate, admissionOutcomeForError(err))
+	}()
+
 	if oldObj.Spec != newObj.Spec {
 		return nil, fmt.Errorf("BreakGlassRequest spec is immutable")
 	}
