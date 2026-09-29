@@ -393,8 +393,8 @@ func TestEnsureBindingLabelsAndDeletesOnlyItsOwnBinding(t *testing.T) {
 	scheme := testScheme(t)
 	session := testSession()
 	bindingName := bindingNameForSession(session)
-	client := newTestClient(scheme)
-	reconciler := &BreakGlassSessionReconciler{Client: client, Scheme: scheme}
+	testClient := newTestClient(scheme)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
 
 	if err := reconciler.ensureBinding(context.Background(), session); err != nil {
 		t.Fatalf("ensureBinding() error = %v", err)
@@ -402,7 +402,7 @@ func TestEnsureBindingLabelsAndDeletesOnlyItsOwnBinding(t *testing.T) {
 
 	binding := &rbacv1.RoleBinding{}
 	key := types.NamespacedName{Name: bindingName, Namespace: "default"}
-	if err := client.Get(context.Background(), key, binding); err != nil {
+	if err := testClient.Get(context.Background(), key, binding); err != nil {
 		t.Fatalf("get created RoleBinding: %v", err)
 	}
 	if !isManagedBindingForSession(binding, session) {
@@ -421,7 +421,7 @@ func TestEnsureBindingLabelsAndDeletesOnlyItsOwnBinding(t *testing.T) {
 	if err := reconciler.cleanupBinding(context.Background(), session); err != nil {
 		t.Fatalf("cleanupBinding() error = %v", err)
 	}
-	if err := client.Get(context.Background(), key, binding); err == nil {
+	if err := testClient.Get(context.Background(), key, binding); err == nil {
 		t.Fatal("cleanupBinding() left the managed RoleBinding behind")
 	}
 }
@@ -432,8 +432,8 @@ func TestBindingLabelRemovalIsDetectedAndExactBindingIsCleanedUp(t *testing.T) {
 	scheme := testScheme(t)
 	session := testSession()
 	bindingName := bindingNameForSession(session)
-	client := newTestClient(scheme, session.DeepCopy())
-	reconciler := &BreakGlassSessionReconciler{Client: client, Scheme: scheme}
+	testClient := newTestClient(scheme, session.DeepCopy())
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
 
 	if err := reconciler.ensureBinding(context.Background(), session); err != nil {
 		t.Fatalf("ensureBinding() error = %v", err)
@@ -441,11 +441,11 @@ func TestBindingLabelRemovalIsDetectedAndExactBindingIsCleanedUp(t *testing.T) {
 
 	key := types.NamespacedName{Name: bindingName, Namespace: "default"}
 	binding := &rbacv1.RoleBinding{}
-	if err := client.Get(context.Background(), key, binding); err != nil {
+	if err := testClient.Get(context.Background(), key, binding); err != nil {
 		t.Fatalf("get created RoleBinding: %v", err)
 	}
 	binding.Labels = nil
-	if err := client.Update(context.Background(), binding); err != nil {
+	if err := testClient.Update(context.Background(), binding); err != nil {
 		t.Fatalf("remove binding labels: %v", err)
 	}
 
@@ -467,7 +467,7 @@ func TestBindingLabelRemovalIsDetectedAndExactBindingIsCleanedUp(t *testing.T) {
 	if !cleanup.Deleted || cleanup.IntegrityIssue != nil {
 		t.Fatalf("cleanup result = %#v, want exact binding deletion", cleanup)
 	}
-	if err := client.Get(context.Background(), key, binding); err == nil {
+	if err := testClient.Get(context.Background(), key, binding); err == nil {
 		t.Fatal("cleanupBindingWithResult() left the exact UID-tracked RoleBinding behind")
 	}
 }
@@ -491,8 +491,8 @@ func TestCleanupNeverDeletesAReplacementBinding(t *testing.T) {
 			UID:       types.UID("replacement-binding-uid"),
 		},
 	}
-	client := newTestClient(scheme, replacement)
-	reconciler := &BreakGlassSessionReconciler{Client: client, Scheme: scheme}
+	testClient := newTestClient(scheme, replacement)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
 
 	cleanup, err := reconciler.cleanupBindingWithResult(context.Background(), session)
 	if err != nil {
@@ -503,7 +503,7 @@ func TestCleanupNeverDeletesAReplacementBinding(t *testing.T) {
 	}
 
 	got := &rbacv1.RoleBinding{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}, got); err != nil {
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}, got); err != nil {
 		t.Fatalf("replacement binding was deleted: %v", err)
 	}
 	if got.UID != replacement.UID {
@@ -517,19 +517,19 @@ func TestVerifyBindingIntegrityDetectsSubjectDrift(t *testing.T) {
 	scheme := testScheme(t)
 	session := testSession()
 	bindingName := bindingNameForSession(session)
-	client := newTestClient(scheme)
-	reconciler := &BreakGlassSessionReconciler{Client: client, Scheme: scheme}
+	testClient := newTestClient(scheme)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
 
 	if err := reconciler.ensureBinding(context.Background(), session); err != nil {
 		t.Fatalf("ensureBinding() error = %v", err)
 	}
 	binding := &rbacv1.RoleBinding{}
 	key := types.NamespacedName{Name: bindingName, Namespace: "default"}
-	if err := client.Get(context.Background(), key, binding); err != nil {
+	if err := testClient.Get(context.Background(), key, binding); err != nil {
 		t.Fatalf("get binding: %v", err)
 	}
 	binding.Subjects = append(binding.Subjects, rbacv1.Subject{Kind: rbacv1.UserKind, Name: "unexpected@example.com"})
-	if err := client.Update(context.Background(), binding); err != nil {
+	if err := testClient.Update(context.Background(), binding); err != nil {
 		t.Fatalf("drift binding subjects: %v", err)
 	}
 

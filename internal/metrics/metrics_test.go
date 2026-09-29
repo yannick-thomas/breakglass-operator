@@ -51,46 +51,46 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	recorder.RecordAdmissionRequest(AdmissionOperation("engineer@example.com"), AdmissionOutcome("INC-1092"))
 
 	assertMetricValue(t, registry, "breakglass_session_transitions_total", map[string]string{
-		"transition": string(TransitionActivated),
-		"scope":      string(ScopeNamespaced),
+		metricLabelTransition: string(TransitionActivated),
+		metricLabelScope:      string(ScopeNamespaced),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_session_transitions_total", map[string]string{
-		"transition": string(TransitionUnknown),
-		"scope":      string(ScopeUnknown),
+		metricLabelTransition: string(TransitionUnknown),
+		metricLabelScope:      string(ScopeUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_binding_drift_total", map[string]string{
-		"reason": string(DriftMissing),
-		"scope":  string(ScopeCluster),
+		metricLabelReason: string(DriftMissing),
+		metricLabelScope:  string(ScopeCluster),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_curated_role_drift_total", map[string]string{
-		"reason": string(CuratedRoleRulesHash),
-		"scope":  string(ScopeNamespaced),
+		metricLabelReason: string(CuratedRoleRulesHash),
+		metricLabelScope:  string(ScopeNamespaced),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_curated_role_drift_total", map[string]string{
-		"reason": string(CuratedRoleUnknown),
-		"scope":  string(ScopeUnknown),
+		metricLabelReason: string(CuratedRoleUnknown),
+		metricLabelScope:  string(ScopeUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_binding_drift_total", map[string]string{
-		"reason": string(DriftUnknown),
-		"scope":  string(ScopeUnknown),
+		metricLabelReason: string(DriftUnknown),
+		metricLabelScope:  string(ScopeUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_binding_operations_total", map[string]string{
-		"operation": string(BindingOperationGrant),
-		"result":    string(BindingOperationSuccess),
-		"scope":     string(ScopeNamespaced),
+		metricLabelOperation: string(BindingOperationGrant),
+		metricLabelResult:    string(BindingOperationSuccess),
+		metricLabelScope:     string(ScopeNamespaced),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_binding_operations_total", map[string]string{
-		"operation": string(BindingOperationUnknown),
-		"result":    string(BindingOperationUnknownResult),
-		"scope":     string(ScopeUnknown),
+		metricLabelOperation: string(BindingOperationUnknown),
+		metricLabelResult:    string(BindingOperationUnknownResult),
+		metricLabelScope:     string(ScopeUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_admission_requests_total", map[string]string{
-		"operation": string(AdmissionOperationCreate),
-		"outcome":   string(AdmissionOutcomeAllowed),
+		metricLabelOperation: string(AdmissionOperationCreate),
+		metricLabelOutcome:   string(AdmissionOutcomeAllowed),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_admission_requests_total", map[string]string{
-		"operation": string(AdmissionOperationUnknown),
-		"outcome":   string(AdmissionOutcomeUnknown),
+		metricLabelOperation: string(AdmissionOperationUnknown),
+		metricLabelOutcome:   string(AdmissionOutcomeUnknown),
 	}, 1)
 
 	assertOnlyBoundedLabels(t, registry)
@@ -137,12 +137,12 @@ func TestSessionStateCollectorEmitsZeroesAndNeverLeaksSessionData(t *testing.T) 
 	registry := prometheus.NewPedanticRegistry()
 	registry.MustRegister(collector)
 
-	assertMetricValue(t, registry, "breakglass_active_sessions", map[string]string{"scope": string(ScopeNamespaced)}, 2)
-	assertMetricValue(t, registry, "breakglass_active_sessions", map[string]string{"scope": string(ScopeCluster)}, 1)
-	assertMetricValue(t, registry, "breakglass_active_sessions", map[string]string{"scope": string(ScopeUnknown)}, 2)
-	assertMetricValue(t, registry, "breakglass_sessions_past_expiry", map[string]string{"scope": string(ScopeNamespaced)}, 1)
-	assertMetricValue(t, registry, "breakglass_sessions_past_expiry", map[string]string{"scope": string(ScopeCluster)}, 0)
-	assertMetricValue(t, registry, "breakglass_sessions_past_expiry", map[string]string{"scope": string(ScopeUnknown)}, 1)
+	assertMetricValue(t, registry, "breakglass_active_sessions", map[string]string{metricLabelScope: string(ScopeNamespaced)}, 2)
+	assertMetricValue(t, registry, "breakglass_active_sessions", map[string]string{metricLabelScope: string(ScopeCluster)}, 1)
+	assertMetricValue(t, registry, "breakglass_active_sessions", map[string]string{metricLabelScope: string(ScopeUnknown)}, 2)
+	assertMetricValue(t, registry, "breakglass_sessions_past_expiry", map[string]string{metricLabelScope: string(ScopeNamespaced)}, 1)
+	assertMetricValue(t, registry, "breakglass_sessions_past_expiry", map[string]string{metricLabelScope: string(ScopeCluster)}, 0)
+	assertMetricValue(t, registry, "breakglass_sessions_past_expiry", map[string]string{metricLabelScope: string(ScopeUnknown)}, 1)
 	assertMetricValue(t, registry, "breakglass_session_state_collection_success", nil, 1)
 
 	assertOnlyBoundedLabels(t, registry)
@@ -168,7 +168,7 @@ func TestSessionStateCollectorEmitsAllZeroScopeSeriesForAnEmptyCache(t *testing.
 	registry.MustRegister(collector)
 
 	for _, scope := range []Scope{ScopeNamespaced, ScopeCluster, ScopeUnknown} {
-		labels := map[string]string{"scope": string(scope)}
+		labels := map[string]string{metricLabelScope: string(scope)}
 		assertMetricValue(t, registry, "breakglass_active_sessions", labels, 0)
 		assertMetricValue(t, registry, "breakglass_sessions_past_expiry", labels, 0)
 	}
@@ -256,12 +256,12 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 		t.Fatalf("gather metrics: %v", err)
 	}
 	allowed := map[string]map[string]bool{
-		"scope": {
+		metricLabelScope: {
 			string(ScopeNamespaced): true,
 			string(ScopeCluster):    true,
 			string(ScopeUnknown):    true,
 		},
-		"transition": {
+		metricLabelTransition: {
 			string(TransitionActivated): true,
 			string(TransitionDenied):    true,
 			string(TransitionExpired):   true,
@@ -270,7 +270,7 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(TransitionDrifted):   true,
 			string(TransitionUnknown):   true,
 		},
-		"reason": {
+		metricLabelReason: {
 			string(DriftMissing):               true,
 			string(DriftOwnership):             true,
 			string(DriftUIDMismatch):           true,
@@ -283,7 +283,7 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(CuratedRoleRulesHash):       true,
 			string(CuratedRoleSnapshotMissing): true,
 		},
-		"operation": {
+		metricLabelOperation: {
 			string(BindingOperationGrant):    true,
 			string(BindingOperationRestore):  true,
 			string(BindingOperationCleanup):  true,
@@ -291,12 +291,12 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(AdmissionOperationCreate): true,
 			string(AdmissionOperationUpdate): true,
 		},
-		"result": {
+		metricLabelResult: {
 			string(BindingOperationSuccess):       true,
 			string(BindingOperationError):         true,
 			string(BindingOperationUnknownResult): true,
 		},
-		"outcome": {
+		metricLabelOutcome: {
 			string(AdmissionOutcomeAllowed): true,
 			string(AdmissionOutcomeDenied):  true,
 			string(AdmissionOutcomeError):   true,

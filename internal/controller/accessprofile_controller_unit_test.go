@@ -29,6 +29,13 @@ import (
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 )
 
+const (
+	testReadinessProfileName = "production-pod-observer"
+	testReadinessRoleName    = "breakglass-pod-observer"
+	testReadinessNamespace   = "production"
+	testReadinessMaxDuration = "30m"
+)
+
 func TestAccessProfileReconcileReportsReadiness(t *testing.T) {
 	t.Parallel()
 
@@ -125,20 +132,20 @@ func TestAccessProfileReconcileRequeuesMissingCuratedRole(t *testing.T) {
 func testAccessProfileForReadiness() *accessv1alpha1.AccessProfile {
 	return &accessv1alpha1.AccessProfile{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "production-pod-observer",
+			Name:       testReadinessProfileName,
 			UID:        types.UID("profile-uid"),
 			Generation: 7,
 		},
 		Spec: accessv1alpha1.AccessProfileSpec{
-			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
-			TargetNamespace: "production",
-			MaxDuration:     "30m",
+			RoleRef:         accessv1alpha1.RoleReference{Kind: curatedClusterRoleKind, Name: testReadinessRoleName},
+			TargetNamespace: testReadinessNamespace,
+			MaxDuration:     testReadinessMaxDuration,
 		},
 	}
 }
 
 func testClusterRole() *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer", UID: types.UID("role-uid")},
+		ObjectMeta: metav1.ObjectMeta{Name: testReadinessRoleName, UID: types.UID("role-uid")},
 	}
 }

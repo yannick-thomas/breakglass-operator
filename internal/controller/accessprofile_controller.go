@@ -34,6 +34,8 @@ import (
 )
 
 const (
+	curatedClusterRoleKind = "ClusterRole"
+
 	// AccessProfileReadyCondition reports whether the configured manager can
 	// safely activate new sessions for a profile.
 	AccessProfileReadyCondition = "Ready"
@@ -100,7 +102,7 @@ func (r *AccessProfileReconciler) evaluateReadiness(
 	ctx context.Context,
 	profile *accessv1alpha1.AccessProfile,
 ) (metav1.ConditionStatus, string, string, error) {
-	if profile.Spec.RoleRef.Kind != "ClusterRole" || profile.Spec.RoleRef.Name == "" {
+	if profile.Spec.RoleRef.Kind != curatedClusterRoleKind || profile.Spec.RoleRef.Name == "" {
 		return metav1.ConditionFalse, "InvalidRoleReference", "The profile must reference a named curated ClusterRole", nil
 	}
 	if profile.Spec.TargetNamespace == "" {

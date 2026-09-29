@@ -21,6 +21,8 @@ import (
 	"testing"
 )
 
+const productionNamespace = "production"
+
 func TestParseAllowedTargetNamespaces(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -29,8 +31,12 @@ func TestParseAllowedTargetNamespaces(t *testing.T) {
 		wantErr string
 	}{
 		{name: "empty permits the development default", want: map[string]struct{}{}},
-		{name: "one namespace", value: "production", want: map[string]struct{}{"production": {}}},
-		{name: "multiple namespaces ignore surrounding whitespace", value: "production, staging", want: map[string]struct{}{"production": {}, "staging": {}}},
+		{name: "one namespace", value: productionNamespace, want: map[string]struct{}{productionNamespace: {}}},
+		{
+			name:  "multiple namespaces ignore surrounding whitespace",
+			value: productionNamespace + ", staging",
+			want:  map[string]struct{}{productionNamespace: {}, "staging": {}},
+		},
 		{name: "rejects empty item", value: "production,,staging", wantErr: "empty namespace"},
 		{name: "rejects invalid namespace", value: "Production", wantErr: "invalid namespace"},
 	}

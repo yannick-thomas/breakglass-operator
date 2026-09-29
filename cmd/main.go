@@ -93,8 +93,13 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.StringVar(&allowedTargetNamespacesValue, "allowed-target-namespaces", "",
-		"Comma-separated namespaces in which this manager may grant and watch RoleBindings. Empty permits all namespaces and is for development only.")
+	flag.StringVar(
+		&allowedTargetNamespacesValue,
+		"allowed-target-namespaces",
+		"",
+		"Comma-separated namespaces in which this manager may grant and watch RoleBindings. "+
+			"Empty permits all namespaces and is for development only.",
+	)
 	opts := zap.Options{
 		Development: true,
 	}
@@ -210,9 +215,11 @@ func main() {
 	}
 
 	if err := (&controller.BreakGlassSessionReconciler{
-		Client:                  mgr.GetClient(),
-		APIReader:               mgr.GetAPIReader(),
-		Scheme:                  mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		// The reconciler still accepts client-go's legacy EventRecorder interface.
+		// nolint:staticcheck // Migrate the reconciler interface before switching to manager.GetEventRecorder.
 		Recorder:                mgr.GetEventRecorderFor("breakglass-controller"),
 		MaxSessionDuration:      maxSessionDuration,
 		Metrics:                 breakglassmetrics.DefaultRecorder,
@@ -261,13 +268,17 @@ func parseAllowedTargetNamespaces(value string) (map[string]struct{}, error) {
 	if value == "" {
 		return allowed, nil
 	}
-	for _, rawNamespace := range strings.Split(value, ",") {
+	for rawNamespace := range strings.SplitSeq(value, ",") {
 		namespace := strings.TrimSpace(rawNamespace)
 		if namespace == "" {
 			return nil, fmt.Errorf("allowed-target-namespaces contains an empty namespace")
 		}
 		if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
-			return nil, fmt.Errorf("allowed-target-namespaces contains invalid namespace %q: %s", namespace, strings.Join(errs, "; "))
+			return nil, fmt.Errorf(
+				"allowed-target-namespaces contains invalid namespace %q: %s",
+				namespace,
+				strings.Join(errs, "; "),
+			)
 		}
 		allowed[namespace] = struct{}{}
 	}

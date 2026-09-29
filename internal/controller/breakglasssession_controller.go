@@ -23,7 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -86,6 +86,17 @@ const (
 	// It keeps profile-policy changes proportional to the affected sessions,
 	// rather than scanning every BreakGlassSession in the cluster.
 	accessProfileField = ".spec.accessProfile"
+
+	clusterRoleKind = "ClusterRole"
+	roleBindingKind = "RoleBinding"
+
+	bindingIssueMissing           = "missing"
+	bindingIssueUIDMismatch       = "uid_mismatch"
+	bindingIssueReference         = "binding_reference"
+	bindingReferenceInvalidReason = "BindingReferenceInvalid"
+	bindingMissingReason          = "BindingMissing"
+	bindingUIDMismatchReason      = "BindingUIDMismatch"
+	bindingMissingMessage         = "the emergency access binding no longer exists"
 )
 
 // BreakGlassSessionReconciler reconciles a BreakGlassSession object
@@ -543,7 +554,7 @@ func (r *BreakGlassSessionReconciler) resolveAccessGrant(ctx context.Context, se
 }
 
 func validateAccessProfile(profile *accessv1alpha1.AccessProfile) (time.Duration, error) {
-	if profile.Spec.RoleRef.Kind != "ClusterRole" || profile.Spec.RoleRef.Name == "" {
+	if profile.Spec.RoleRef.Kind != clusterRoleKind || profile.Spec.RoleRef.Name == "" {
 		return 0, fmt.Errorf("AccessProfile %q must reference a curated ClusterRole", profile.Name)
 	}
 	if profile.Spec.TargetNamespace == "" {
@@ -635,7 +646,7 @@ type curatedRoleIssue struct {
 // are profile-controlled and should remain explicitly enumerated in manager RBAC.
 func (r *BreakGlassSessionReconciler) verifyCuratedRole(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*curatedRoleIssue, error) {
 	grant := session.Status.Grant
-	if grant == nil || grant.RoleRef.Kind != "ClusterRole" || grant.RoleRef.Name == "" || grant.RoleUID == "" || grant.RoleRulesHash == "" {
+	if grant == nil || grant.RoleRef.Kind != clusterRoleKind || grant.RoleRef.Name == "" || grant.RoleUID == "" || grant.RoleRulesHash == "" {
 		return &curatedRoleIssue{ConditionReason: "CuratedRoleSnapshotMissing", Message: "the active session has no complete curated ClusterRole integrity snapshot"}, nil
 	}
 
@@ -703,16 +714,16 @@ func curatedRoleRulesHash(rules []rbacv1.PolicyRule) string {
 	canonicalRules := make([]rbacv1.PolicyRule, len(rules))
 	for i, rule := range rules {
 		canonicalRules[i] = rule
-		sort.Strings(canonicalRules[i].APIGroups)
-		sort.Strings(canonicalRules[i].Resources)
-		sort.Strings(canonicalRules[i].ResourceNames)
-		sort.Strings(canonicalRules[i].Verbs)
-		sort.Strings(canonicalRules[i].NonResourceURLs)
+		slices.Sort(canonicalRules[i].APIGroups)
+		slices.Sort(canonicalRules[i].Resources)
+		slices.Sort(canonicalRules[i].ResourceNames)
+		slices.Sort(canonicalRules[i].Verbs)
+		slices.Sort(canonicalRules[i].NonResourceURLs)
 	}
-	sort.Slice(canonicalRules, func(i, j int) bool {
-		left, _ := json.Marshal(canonicalRules[i])
-		right, _ := json.Marshal(canonicalRules[j])
-		return string(left) < string(right)
+	slices.SortFunc(canonicalRules, func(leftRule, rightRule rbacv1.PolicyRule) int {
+		left, _ := json.Marshal(leftRule)
+		right, _ := json.Marshal(rightRule)
+		return strings.Compare(string(left), string(right))
 	})
 	payload, _ := json.Marshal(canonicalRules)
 	digest := sha256.Sum256(payload)
@@ -821,17 +832,17 @@ func (r *BreakGlassSessionReconciler) recordBindingDrift(issue *bindingIntegrity
 	}
 	var reason breakglassmetrics.BindingDriftReason
 	switch issue.Code {
-	case "missing":
+	case bindingIssueMissing:
 		reason = breakglassmetrics.DriftMissing
 	case "ownership":
 		reason = breakglassmetrics.DriftOwnership
-	case "uid_mismatch":
+	case bindingIssueUIDMismatch:
 		reason = breakglassmetrics.DriftUIDMismatch
 	case "role_ref":
 		reason = breakglassmetrics.DriftRoleRef
 	case "subjects":
 		reason = breakglassmetrics.DriftSubjects
-	case "binding_reference":
+	case bindingIssueReference:
 		reason = breakglassmetrics.DriftBindingReference
 	case "missing_expiry":
 		reason = breakglassmetrics.DriftMissingExpiry
@@ -919,7 +930,7 @@ func expectedBindingReference(session *accessv1alpha1.BreakGlassSession) *access
 	if session.Status.Grant != nil {
 		targetNamespace = session.Status.Grant.TargetNamespace
 	}
-	return &accessv1alpha1.BindingReference{Kind: "RoleBinding", Name: bindingName, Namespace: targetNamespace}
+	return &accessv1alpha1.BindingReference{Kind: roleBindingKind, Name: bindingName, Namespace: targetNamespace}
 }
 
 func bindingNameForSession(session *accessv1alpha1.BreakGlassSession) string {
@@ -950,7 +961,7 @@ func bindingReferenceMatchesObjectLocation(ref *accessv1alpha1.BindingReference,
 		return false
 	}
 	_, isRoleBinding := obj.(*rbacv1.RoleBinding)
-	return isRoleBinding && ref.Kind == "RoleBinding"
+	return isRoleBinding && ref.Kind == roleBindingKind
 }
 
 func bindingReferenceFromObject(obj client.Object) (*accessv1alpha1.BindingReference, error) {
@@ -965,7 +976,7 @@ func bindingReferenceFromObject(obj client.Object) (*accessv1alpha1.BindingRefer
 	if _, ok := obj.(*rbacv1.RoleBinding); !ok {
 		return nil, fmt.Errorf("unsupported RBAC binding type %T", obj)
 	}
-	ref.Kind = "RoleBinding"
+	ref.Kind = roleBindingKind
 	return ref, nil
 }
 
@@ -1033,8 +1044,8 @@ func isManagedBindingForSession(obj client.Object, session *accessv1alpha1.Break
 func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj client.Object) *bindingIntegrityIssue {
 	if !bindingReferenceMatchesObjectLocation(expectedBindingReference(session), obj) {
 		return &bindingIntegrityIssue{
-			Code:            "binding_reference",
-			ConditionReason: "BindingReferenceInvalid",
+			Code:            bindingIssueReference,
+			ConditionReason: bindingReferenceInvalidReason,
 			Message:         "the RBAC binding kind, name, or namespace differs from the session record",
 		}
 	}
@@ -1050,7 +1061,7 @@ func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj clien
 	expectedSubjects := []rbacv1.Subject{expectedSubject(session)}
 	binding, ok := obj.(*rbacv1.RoleBinding)
 	if !ok {
-		return &bindingIntegrityIssue{Code: "binding_reference", ConditionReason: "BindingReferenceInvalid", Message: "the referenced object is not an RBAC binding"}
+		return &bindingIntegrityIssue{Code: bindingIssueReference, ConditionReason: bindingReferenceInvalidReason, Message: "the referenced object is not an RBAC binding"}
 	}
 	if !equality.Semantic.DeepEqual(binding.RoleRef, expectedRole) {
 		return &bindingIntegrityIssue{Code: "role_ref", ConditionReason: "BindingRoleRefDrift", Message: "the RBAC binding role reference differs from the approved session"}
@@ -1068,7 +1079,7 @@ func (r *BreakGlassSessionReconciler) discoverBindingReference(ctx context.Conte
 	obj, err := r.getBindingForReference(ctx, expected)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, &bindingIntegrityIssue{Code: "missing", ConditionReason: "BindingMissing", Message: "the emergency access binding no longer exists"}, nil
+			return nil, &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}, nil
 		}
 		return nil, nil, err
 	}
@@ -1077,7 +1088,7 @@ func (r *BreakGlassSessionReconciler) discoverBindingReference(ctx context.Conte
 	}
 	bindingRef, err := bindingReferenceFromObject(obj)
 	if err != nil {
-		return nil, &bindingIntegrityIssue{Code: "binding_reference", ConditionReason: "BindingReferenceInvalid", Message: "the emergency access binding has no server-assigned UID"}, nil
+		return nil, &bindingIntegrityIssue{Code: bindingIssueReference, ConditionReason: bindingReferenceInvalidReason, Message: "the emergency access binding has no server-assigned UID"}, nil
 	}
 	return bindingRef, nil, nil
 }
@@ -1085,18 +1096,18 @@ func (r *BreakGlassSessionReconciler) discoverBindingReference(ctx context.Conte
 func (r *BreakGlassSessionReconciler) verifyBindingIntegrity(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*bindingIntegrityIssue, error) {
 	bindingRef := session.Status.BindingRef
 	if bindingRef == nil || bindingRef.UID == "" || !bindingReferenceMatchesSession(bindingRef, session) {
-		return &bindingIntegrityIssue{Code: "binding_reference", ConditionReason: "BindingReferenceInvalid", Message: "the recorded emergency access binding identity is invalid"}, nil
+		return &bindingIntegrityIssue{Code: bindingIssueReference, ConditionReason: bindingReferenceInvalidReason, Message: "the recorded emergency access binding identity is invalid"}, nil
 	}
 
 	obj, err := r.getBindingForReference(ctx, bindingRef)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return &bindingIntegrityIssue{Code: "missing", ConditionReason: "BindingMissing", Message: "the emergency access binding no longer exists"}, nil
+			return &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}, nil
 		}
 		return nil, err
 	}
 	if string(obj.GetUID()) != bindingRef.UID {
-		return &bindingIntegrityIssue{Code: "uid_mismatch", ConditionReason: "BindingUIDMismatch", Message: "a different RBAC binding object now uses the recorded binding name"}, nil
+		return &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}, nil
 	}
 	return bindingMatchesExpected(session, obj), nil
 }
@@ -1105,7 +1116,7 @@ func (r *BreakGlassSessionReconciler) getBindingForReference(ctx context.Context
 	if ref == nil {
 		return nil, fmt.Errorf("cannot get a nil RBAC binding reference")
 	}
-	if ref.Kind != "RoleBinding" || ref.Namespace == "" {
+	if ref.Kind != roleBindingKind || ref.Namespace == "" {
 		return nil, fmt.Errorf("unsupported RBAC binding kind %q", ref.Kind)
 	}
 	rb := &rbacv1.RoleBinding{}
@@ -1137,8 +1148,8 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 		}
 		if session.Status.Grant == nil {
 			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{
-				Code:            "binding_reference",
-				ConditionReason: "BindingReferenceInvalid",
+				Code:            bindingIssueReference,
+				ConditionReason: bindingReferenceInvalidReason,
 				Message:         "active session has no secure profile snapshot or binding identity",
 			}}, nil
 		}
@@ -1157,8 +1168,8 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 
 	if bindingRef.UID == "" || !bindingReferenceMatchesSession(bindingRef, session) {
 		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{
-			Code:            "binding_reference",
-			ConditionReason: "BindingReferenceInvalid",
+			Code:            bindingIssueReference,
+			ConditionReason: bindingReferenceInvalidReason,
 			Message:         "the recorded emergency access binding identity is invalid",
 		}}, nil
 	}
@@ -1166,22 +1177,22 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 	obj, err := r.getBindingForReference(ctx, bindingRef)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: "missing", ConditionReason: "BindingMissing", Message: "the emergency access binding no longer exists"}}, nil
+			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}}, nil
 		}
 		return bindingCleanupResult{}, err
 	}
 	if string(obj.GetUID()) != bindingRef.UID {
-		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: "uid_mismatch", ConditionReason: "BindingUIDMismatch", Message: "a different RBAC binding object now uses the recorded binding name"}}, nil
+		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}}, nil
 	}
 
 	uid := types.UID(bindingRef.UID)
 	if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil {
 		if apierrors.IsNotFound(err) {
-			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: "missing", ConditionReason: "BindingMissing", Message: "the emergency access binding no longer exists"}}, nil
+			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}}, nil
 		}
 		if apierrors.IsConflict(err) {
 			r.recordBindingOperation(breakglassmetrics.BindingOperationCleanup, breakglassmetrics.BindingOperationError, session)
-			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: "uid_mismatch", ConditionReason: "BindingUIDMismatch", Message: "the emergency access binding changed before it could be deleted"}}, nil
+			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "the emergency access binding changed before it could be deleted"}}, nil
 		}
 		r.recordBindingOperation(breakglassmetrics.BindingOperationCleanup, breakglassmetrics.BindingOperationError, session)
 		return bindingCleanupResult{}, err

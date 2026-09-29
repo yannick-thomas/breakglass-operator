@@ -28,7 +28,15 @@ import (
 	controllerruntimemetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-const metricNamespace = "breakglass"
+const (
+	metricNamespace       = "breakglass"
+	metricLabelTransition = "transition"
+	metricLabelScope      = "scope"
+	metricLabelReason     = "reason"
+	metricLabelOperation  = "operation"
+	metricLabelResult     = "result"
+	metricLabelOutcome    = "outcome"
+)
 
 // Scope describes the breadth of a grant without revealing its target
 // namespace. Unknown is used when a request cannot be resolved to a scope.
@@ -185,33 +193,33 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 			Namespace: metricNamespace,
 			Name:      "session_transitions_total",
 			Help:      "Total number of BreakGlassSession lifecycle transitions.",
-		}, []string{"transition", "scope"}),
+		}, []string{metricLabelTransition, metricLabelScope}),
 		bindingDrift: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace,
 			Name:      "binding_drift_total",
 			Help:      "Total number of detected managed RBAC binding integrity failures.",
-		}, []string{"reason", "scope"}),
+		}, []string{metricLabelReason, metricLabelScope}),
 		curatedRoleDrift: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace,
 			Name:      "curated_role_drift_total",
 			Help:      "Total number of detected curated ClusterRole integrity failures.",
-		}, []string{"reason", "scope"}),
+		}, []string{metricLabelReason, metricLabelScope}),
 		bindingOperations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace,
 			Name:      "binding_operations_total",
 			Help:      "Total number of managed RBAC binding lifecycle operations.",
-		}, []string{"operation", "result", "scope"}),
+		}, []string{metricLabelOperation, metricLabelResult, metricLabelScope}),
 		expiryCleanupLag: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricNamespace,
 			Name:      "expiry_cleanup_lag_seconds",
 			Help:      "Elapsed time between a session expiry and successful binding cleanup.",
 			Buckets:   []float64{0.1, 0.5, 1, 5, 15, 30, 60, 300, 900},
-		}, []string{"scope"}),
+		}, []string{metricLabelScope}),
 		admissionRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace,
 			Name:      "admission_requests_total",
 			Help:      "Total number of terminal BreakGlassSession admission decisions.",
-		}, []string{"operation", "outcome"}),
+		}, []string{metricLabelOperation, metricLabelOutcome}),
 	}
 
 	collectors := []prometheus.Collector{

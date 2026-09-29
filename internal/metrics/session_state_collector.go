@@ -67,13 +67,13 @@ func NewSessionStateCollectorWithClock(reader client.Reader, resolveScope ScopeR
 		active: prometheus.NewDesc(
 			prometheus.BuildFQName(metricNamespace, "", "active_sessions"),
 			"Number of BreakGlassSessions whose persisted phase is Active.",
-			[]string{"scope"},
+			[]string{metricLabelScope},
 			nil,
 		),
 		pastExpiry: prometheus.NewDesc(
 			prometheus.BuildFQName(metricNamespace, "", "sessions_past_expiry"),
 			"Number of active BreakGlassSessions with missing or elapsed expiry.",
-			[]string{"scope"},
+			[]string{metricLabelScope},
 			nil,
 		),
 		collectSuccess: prometheus.NewDesc(
