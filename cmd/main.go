@@ -245,6 +245,10 @@ func main() {
 		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
 		os.Exit(1)
 	}
+	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create BreakGlassRequest webhook")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
