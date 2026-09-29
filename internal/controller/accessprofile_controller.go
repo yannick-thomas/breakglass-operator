@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 )
@@ -39,9 +38,10 @@ const (
 	// safely activate new sessions for a profile.
 	AccessProfileReadyCondition = "Ready"
 
-	// accessProfileClusterRoleField indexes profiles by the curated role whose
-	// availability determines their readiness.
-	accessProfileClusterRoleField = ".spec.roleRef.name"
+	// ProfileReadinessRetryInterval lets a profile recover when its curated role
+	// is created after the profile, without granting the manager cluster-wide
+	// list/watch permissions on ClusterRoles.
+	ProfileReadinessRetryInterval = time.Minute
 )
 
 // AccessProfileReconciler evaluates administrator-owned policies before an
@@ -87,7 +87,13 @@ func (r *AccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.setReadyCondition(profile, status, reason, message)
-	return ctrl.Result{}, r.updateStatusIfChanged(ctx, profile)
+	if err := r.updateStatusIfChanged(ctx, profile); err != nil {
+		return ctrl.Result{}, err
+	}
+	if reason == "ClusterRoleMissing" {
+		return ctrl.Result{RequeueAfter: ProfileReadinessRetryInterval}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *AccessProfileReconciler) evaluateReadiness(
@@ -129,14 +135,6 @@ func (r *AccessProfileReconciler) targetNamespaceAllowed(namespace string) bool 
 	return allowed
 }
 
-func accessProfileClusterRoleIndex(obj client.Object) []string {
-	profile, ok := obj.(*accessv1alpha1.AccessProfile)
-	if !ok || profile.Spec.RoleRef.Kind != "ClusterRole" || profile.Spec.RoleRef.Name == "" {
-		return nil
-	}
-	return []string{profile.Spec.RoleRef.Name}
-}
-
 func (r *AccessProfileReconciler) setReadyCondition(
 	profile *accessv1alpha1.AccessProfile,
 	status metav1.ConditionStatus,
@@ -164,35 +162,10 @@ func (r *AccessProfileReconciler) updateStatusIfChanged(ctx context.Context, pro
 	return r.Status().Update(ctx, stored)
 }
 
-func (r *AccessProfileReconciler) findProfilesForClusterRole(ctx context.Context, obj client.Object) []ctrl.Request {
-	role, ok := obj.(*rbacv1.ClusterRole)
-	if !ok || role.Name == "" {
-		return nil
-	}
-
-	profiles := &accessv1alpha1.AccessProfileList{}
-	if err := r.List(ctx, profiles, client.MatchingFields{accessProfileClusterRoleField: role.Name}); err != nil {
-		return nil
-	}
-	requests := make([]ctrl.Request, 0, len(profiles.Items))
-	for i := range profiles.Items {
-		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&profiles.Items[i])})
-	}
-	return requests
-}
-
 // SetupWithManager sets up the readiness controller for AccessProfiles.
 func (r *AccessProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.AccessProfile{}, accessProfileClusterRoleField, accessProfileClusterRoleIndex); err != nil {
-		return fmt.Errorf("index AccessProfiles by ClusterRole: %w", err)
-	}
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&accessv1alpha1.AccessProfile{}).
-		Watches(
-			&rbacv1.ClusterRole{},
-			handler.EnqueueRequestsFromMapFunc(r.findProfilesForClusterRole),
-		).
 		Named("accessprofile").
 		Complete(r)
 }

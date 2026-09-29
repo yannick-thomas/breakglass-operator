@@ -105,20 +105,20 @@ func TestAccessProfileReconcileReportsReadiness(t *testing.T) {
 	}
 }
 
-func TestFindProfilesForClusterRoleUsesRoleFieldIndex(t *testing.T) {
+func TestAccessProfileReconcileRequeuesMissingCuratedRole(t *testing.T) {
 	t.Parallel()
 
-	matching := testAccessProfileForReadiness()
-	other := testAccessProfileForReadiness()
-	other.Name = "staging-pod-observer"
-	other.Spec.RoleRef.Name = "breakglass-staging-observer"
+	profile := testAccessProfileForReadiness()
 	reconciler := &AccessProfileReconciler{
-		Client: newTestClient(testScheme(t), matching, other),
+		Client: newTestClient(testScheme(t), profile),
 	}
 
-	requests := reconciler.findProfilesForClusterRole(context.Background(), testClusterRole())
-	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(matching) {
-		t.Fatalf("findProfilesForClusterRole() = %#v, want only %s", requests, client.ObjectKeyFromObject(matching))
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(profile)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != ProfileReadinessRetryInterval {
+		t.Fatalf("RequeueAfter = %s, want %s", result.RequeueAfter, ProfileReadinessRetryInterval)
 	}
 }
 

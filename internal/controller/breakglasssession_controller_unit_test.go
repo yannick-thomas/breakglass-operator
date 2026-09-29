@@ -721,7 +721,6 @@ func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Clie
 		WithScheme(scheme).
 		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
-		WithIndex(&accessv1alpha1.AccessProfile{}, accessProfileClusterRoleField, accessProfileClusterRoleIndex).
 		WithObjects(objects...).
 		Build()
 	return interceptor.NewClient(raw, interceptor.Funcs{
