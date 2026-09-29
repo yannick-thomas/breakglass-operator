@@ -59,6 +59,9 @@ func validateProfile(profile string, input io.Reader) error {
 	if err := verifyWebhookSecurity(objects); err != nil {
 		return err
 	}
+	if err := verifyRequiredCRDs(objects); err != nil {
+		return err
+	}
 	if err := verifyManagerPodSecurity(objects); err != nil {
 		return err
 	}
@@ -70,6 +73,19 @@ func validateProfile(profile string, input io.Reader) error {
 	}
 	if profile == namespacedProfile {
 		return verifyNamespacedRBACBoundary(objects)
+	}
+	return nil
+}
+
+func verifyRequiredCRDs(objects []unstructured.Unstructured) error {
+	for _, name := range []string{
+		"accessprofiles.access.breakglass.io",
+		"breakglassrequests.access.breakglass.io",
+		"breakglasssessions.access.breakglass.io",
+	} {
+		if _, err := requiredObject(objects, "CustomResourceDefinition", name); err != nil {
+			return fmt.Errorf("required BreakGlass CRD missing: %w", err)
+		}
 	}
 	return nil
 }

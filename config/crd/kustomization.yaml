@@ -4,6 +4,7 @@
 resources:
 - bases/access.breakglass.io_breakglasssessions.yaml
 - bases/access.breakglass.io_accessprofiles.yaml
+- bases/access.breakglass.io_breakglassrequests.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
