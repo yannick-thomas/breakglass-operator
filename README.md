@@ -105,7 +105,8 @@ Every successful push to `main` publishes a GitHub Actions artifact named
 `breakglass-operator-install-<commit>`. It contains the fully rendered,
 single-file installers `install.yaml`, `install-production.yaml`, and
 `install-production-namespaced.yaml`. Their manager image is pinned by digest,
-so the reviewed manifest and the executed image cannot drift apart.
+so the reviewed manifest and the executed image cannot drift apart. The image
+bundle supports both `linux/amd64` and `linux/arm64` clusters.
 
 Download the artifact from the **Package Installers** workflow, select the one
 profile that matches your cluster, and apply it directly. For example:
