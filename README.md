@@ -112,12 +112,18 @@ Download the artifact from the **Package Installers** workflow, select the one
 profile that matches your cluster, and apply it directly. For example:
 
 ```bash
+# cert-manager must already be installed and ready.
+# The namespaced profile deliberately expects this approved target namespace.
+kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f install-production-namespaced.yaml
 ```
 
 The first GitHub Container Registry package may need to be made readable by
 the target cluster (or public for unauthenticated pulls) in its package
 settings. Do not apply more than one installer profile to the same cluster.
+The bundle intentionally does not install cert-manager or create an
+application namespace: both are cluster-level decisions that should remain
+under platform-team control.
 
 The installer intentionally does **not** include generic Kubebuilder
 `Admin`/`Editor`/`Viewer` roles for either CRD. Define platform-admin and

@@ -58,6 +58,14 @@ jobs:
             '- `install-production.yaml`: high-availability cluster-wide production installation.' \
             '- `install-production-namespaced.yaml`: high-assurance production installation restricted to the `production` target namespace.' \
             '' \
+            'Prerequisites:' \
+            '- cert-manager must already be installed and ready; this bundle intentionally does not install a cluster-wide cert-manager dependency.' \
+            '- The namespaced profile deliberately does not create the application namespace. Before using it, create or verify the approved `production` namespace.' \
+            '' \
+            'Preflight commands:' \
+            '`kubectl get crd certificates.cert-manager.io`' \
+            '`kubectl get namespace production`' \
+            '' \
             'Install with, for example:' \
             '`kubectl apply -f install-production-namespaced.yaml`' \
             > dist/README.md
