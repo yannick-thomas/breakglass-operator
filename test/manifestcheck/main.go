@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -96,7 +97,9 @@ func verifyWebhookSecurity(objects []unstructured.Unstructured) error {
 	if err != nil {
 		return err
 	}
-	certificate, err := requiredObjectInNamespace(objects, "Certificate", "breakglass-operator-serving-cert", managerNamespace)
+	certificate, err := requiredObjectInNamespace(
+		objects, "Certificate", "breakglass-operator-serving-cert", managerNamespace,
+	)
 	if err != nil {
 		return err
 	}
@@ -143,8 +146,12 @@ func verifyManagerPodSecurity(objects []unstructured.Unstructured) error {
 	if err != nil {
 		return err
 	}
-	runAsNonRoot, _, _ := unstructured.NestedBool(manager.Object, "spec", "template", "spec", "securityContext", "runAsNonRoot")
-	seccompType, _, _ := unstructured.NestedString(manager.Object, "spec", "template", "spec", "securityContext", "seccompProfile", "type")
+	runAsNonRoot, _, _ := unstructured.NestedBool(
+		manager.Object, "spec", "template", "spec", "securityContext", "runAsNonRoot",
+	)
+	seccompType, _, _ := unstructured.NestedString(
+		manager.Object, "spec", "template", "spec", "securityContext", "seccompProfile", "type",
+	)
 	if !runAsNonRoot || seccompType != "RuntimeDefault" {
 		return fmt.Errorf("manager pod must use runAsNonRoot and RuntimeDefault seccomp")
 	}
@@ -170,7 +177,9 @@ func verifyProductionAvailability(objects []unstructured.Unstructured) error {
 	if err != nil || !found || !hasIntValue(replicas, 2) {
 		return fmt.Errorf("manager Deployment must have exactly two replicas")
 	}
-	constraints, found, err := unstructured.NestedSlice(manager.Object, "spec", "template", "spec", "topologySpreadConstraints")
+	constraints, found, err := unstructured.NestedSlice(
+		manager.Object, "spec", "template", "spec", "topologySpreadConstraints",
+	)
 	if err != nil || !found || !hasHostnameSpreadConstraint(constraints) {
 		return fmt.Errorf("manager Deployment must spread replicas across hostnames with DoNotSchedule")
 	}
@@ -272,7 +281,9 @@ func allowedTargetNamespaceArguments(container map[string]any) int {
 		if arg == "--allowed-target-namespaces=production" {
 			count++
 		}
-		if len(arg) >= len("--allowed-target-namespaces=") && arg[:len("--allowed-target-namespaces=")] == "--allowed-target-namespaces=" && arg != "--allowed-target-namespaces=production" {
+		isAllowedTargetNamespaceArgument := len(arg) >= len("--allowed-target-namespaces=") &&
+			arg[:len("--allowed-target-namespaces=")] == "--allowed-target-namespaces="
+		if isAllowedTargetNamespaceArgument && arg != "--allowed-target-namespaces=production" {
 			return 0
 		}
 	}
@@ -280,7 +291,9 @@ func allowedTargetNamespaceArguments(container map[string]any) int {
 }
 
 func verifyManagerRoleBinding(objects []unstructured.Unstructured) error {
-	binding, err := requiredObjectInNamespace(objects, "RoleBinding", "breakglass-operator-manager-rolebindings", "production")
+	binding, err := requiredObjectInNamespace(
+		objects, "RoleBinding", "breakglass-operator-manager-rolebindings", "production",
+	)
 	if err != nil {
 		return err
 	}
@@ -294,7 +307,8 @@ func verifyManagerRoleBinding(objects []unstructured.Unstructured) error {
 		return fmt.Errorf("production manager RoleBinding must have exactly one ServiceAccount subject")
 	}
 	subject, ok := subjects[0].(map[string]any)
-	if !ok || subject["kind"] != "ServiceAccount" || subject["name"] != managerName || subject["namespace"] != managerNamespace {
+	if !ok || subject["kind"] != "ServiceAccount" ||
+		subject["name"] != managerName || subject["namespace"] != managerNamespace {
 		return fmt.Errorf("production manager RoleBinding must bind the manager ServiceAccount")
 	}
 	return nil
@@ -315,7 +329,8 @@ func roleHasNamedClusterRoleBind(role unstructured.Unstructured) bool {
 	rules, _, _ := unstructured.NestedSlice(role.Object, "rules")
 	for _, item := range rules {
 		rule, ok := item.(map[string]any)
-		if ok && containsString(rule["resources"], "clusterroles") && containsString(rule["verbs"], "bind") && len(stringValues(rule["resourceNames"])) > 0 {
+		if ok && containsString(rule["resources"], "clusterroles") &&
+			containsString(rule["verbs"], "bind") && len(stringValues(rule["resourceNames"])) > 0 {
 			return true
 		}
 	}
@@ -343,12 +358,7 @@ func nestedRules(role unstructured.Unstructured) []map[string]any {
 }
 
 func containsString(value any, expected string) bool {
-	for _, item := range stringValues(value) {
-		if item == expected {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(stringValues(value), expected)
 }
 
 func stringValues(value any) []string {
@@ -393,7 +403,10 @@ func requiredObject(objects []unstructured.Unstructured, kind, name string) (uns
 	return unstructured.Unstructured{}, fmt.Errorf("required %s %q is missing", kind, name)
 }
 
-func requiredObjectInNamespace(objects []unstructured.Unstructured, kind, name, namespace string) (unstructured.Unstructured, error) {
+func requiredObjectInNamespace(
+	objects []unstructured.Unstructured,
+	kind, name, namespace string,
+) (unstructured.Unstructured, error) {
 	object, err := requiredObject(objects, kind, name)
 	if err != nil {
 		return unstructured.Unstructured{}, err
