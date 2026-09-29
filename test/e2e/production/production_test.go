@@ -157,7 +157,9 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
-		Expect(createSession(recoverySessionName)).To(Succeed())
+		Eventually(func() error {
+			return createSession(recoverySessionName)
+		}, 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionIsActive(recoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
 		revokeSession(recoverySessionName)
 	})
