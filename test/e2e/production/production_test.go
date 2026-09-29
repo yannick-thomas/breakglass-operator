@@ -44,9 +44,11 @@ const (
 	accessProfileName    = "production-pod-observer"
 	curatedRoleName      = "breakglass-pod-observer"
 
-	haSessionName       = "production-ha-session"
-	outageSessionName   = "production-webhook-outage-session"
-	recoverySessionName = "production-recovery-session"
+	haSessionName        = "production-ha-session"
+	outageSessionName    = "production-webhook-outage-session"
+	recoverySessionName  = "production-recovery-session"
+	ruleDriftSessionName = "production-role-drift-session"
+	roleReuseSessionName = "production-role-reuse-session"
 )
 
 var installedCertManager bool
@@ -97,7 +99,9 @@ var _ = Describe("Production installation", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		for _, session := range []string{haSessionName, outageSessionName, recoverySessionName} {
+		for _, session := range []string{
+			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
+		} {
 			_, _ = utils.Run(exec.Command("kubectl", "delete", "breakglasssession", session, "--ignore-not-found"))
 		}
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding", requesterRoleBinding, "--ignore-not-found"))
@@ -153,6 +157,43 @@ var _ = Describe("Production installation", Ordered, func() {
 		Expect(createSession(recoverySessionName)).To(Succeed())
 		Eventually(sessionIsActive(recoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
 		revokeSession(recoverySessionName)
+	})
+
+	It("suspends active sessions when the curated role changes or is recreated", func() {
+		By("creating an active session with a snapshot of the curated role")
+		Expect(createSession(ruleDriftSessionName)).To(Succeed())
+		Eventually(sessionIsActive(ruleDriftSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		bindingName := sessionBindingName(ruleDriftSessionName)
+
+		By("widening the curated role after the grant was created")
+		_, err := utils.Run(exec.Command(
+			"kubectl", "patch", "clusterrole", curatedRoleName, "--type=json",
+			"-p", `[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}}]`,
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(
+			sessionIsSuspendedForCuratedRole(ruleDriftSessionName, "CuratedRoleRulesDrift"),
+			2*time.Minute,
+			time.Second,
+		).Should(Succeed())
+		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
+
+		By("restoring the curated role before creating a fresh independently snapshotted session")
+		resetCuratedRole()
+		Expect(createSession(roleReuseSessionName)).To(Succeed())
+		Eventually(sessionIsActive(roleReuseSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		bindingName = sessionBindingName(roleReuseSessionName)
+
+		By("deleting and recreating the same curated role name")
+		_, err = utils.Run(exec.Command("kubectl", "delete", "clusterrole", curatedRoleName))
+		Expect(err).NotTo(HaveOccurred())
+		resetCuratedRole()
+		Eventually(
+			sessionIsSuspendedForCuratedRole(roleReuseSessionName, "CuratedRoleUIDMismatch"),
+			2*time.Minute,
+			time.Second,
+		).Should(Succeed())
+		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
 	})
 })
 
@@ -239,6 +280,40 @@ func sessionIsActive(name string) func(Gomega) {
 		g.Expect(parts[1]).To(Equal(requesterName))
 		g.Expect(parts[2]).NotTo(BeEmpty())
 	}
+}
+
+func sessionBindingName(name string) string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.bindingRef.name}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(output).NotTo(BeEmpty())
+	return output
+}
+
+func sessionIsSuspendedForCuratedRole(name, reason string) func(Gomega) {
+	return func(g Gomega) {
+		output, err := utils.Run(exec.Command(
+			"kubectl", "get", "breakglasssession", name,
+			"-o", "jsonpath={.status.phase},{.status.conditions[?(@.type=='CuratedRoleValid')].reason}",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Suspended," + reason))
+	}
+}
+
+func bindingIsDeleted(name string) func(Gomega) {
+	return func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "rolebinding", name, "-n", targetNamespace))
+		g.Expect(err).To(HaveOccurred())
+	}
+}
+
+func resetCuratedRole() {
+	_, err := utils.Run(exec.Command(
+		"kubectl", "apply", "-f", "config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
+	))
+	Expect(err).NotTo(HaveOccurred())
 }
 
 func revokeSession(name string) {
