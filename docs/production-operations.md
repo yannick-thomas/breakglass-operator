@@ -118,3 +118,15 @@ profiles, namespaces, or incident tickets.
 Before enabling a `ServiceMonitor`, configure CA validation for the metrics
 certificate and restrict scraper reachability with a NetworkPolicy that is
 tested against the actual API-server, kubelet-probe, and monitoring topology.
+
+The optional [observability pack](../config/observability) supplies a small
+PrometheusRule set and Grafana dashboard ConfigMap. It is deliberately not
+part of the default installation because monitoring operators, dashboard
+sidecars, namespaces, CA trust, and alert-routing policy are cluster-specific.
+
+## Binding or profile integrity drift
+
+Treat a drift alert as a security event. Inspect the affected session and its
+Kubernetes audit records; do not edit the generated RoleBinding to "repair"
+it. The controller suspends the grant and removes the binding. Restore access
+only with a new session after the profile and curated role have been reviewed.

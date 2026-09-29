@@ -118,6 +118,12 @@ kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f 
 kubectl apply -f install-production-namespaced.yaml
 ```
 
+For a versioned production release, download the same digest-pinned YAML files
+and `SHA256SUMS` from the matching GitHub Release. Before applying the
+namespaced installer, run `make preflight-production-namespaced`; it verifies
+cert-manager and the deliberately pre-existing `production` namespace without
+changing the cluster.
+
 The first GitHub Container Registry package may need to be made readable by
 the target cluster (or public for unauthenticated pulls) in its package
 settings. Do not apply more than one installer profile to the same cluster.

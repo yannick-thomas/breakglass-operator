@@ -1,0 +1,42 @@
+# Optional: requires the Prometheus Operator PrometheusRule CRD.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: breakglass-operator
+  namespace: breakglass-operator-system
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+spec:
+  groups:
+    - name: breakglass-operator.security
+      rules:
+        - alert: BreakGlassSessionPastExpiry
+          expr: breakglass_sessions_past_expiry{scope="namespaced"} > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: BreakGlass access remains active after expiry
+            runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#controller-outage-expiry-and-emergency-recovery
+        - alert: BreakGlassIntegrityDrift
+          expr: increase(breakglass_binding_drift_total[5m]) > 0 or increase(breakglass_curated_role_drift_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: BreakGlass binding or curated-role integrity drift detected
+            runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#binding-or-profile-integrity-drift
+        - alert: BreakGlassAdmissionErrors
+          expr: increase(breakglass_admission_requests_total{outcome="error"}[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: BreakGlass admission errors can block emergency access
+        - alert: BreakGlassCleanupErrors
+          expr: increase(breakglass_binding_operations_total{operation="cleanup",result="error"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: BreakGlass expiry or revocation cleanup failed

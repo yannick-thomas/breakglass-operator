@@ -1,0 +1,12 @@
+# Optional: Grafana sidecar discovery convention (label may differ in your platform).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: breakglass-operator-dashboard
+  namespace: breakglass-operator-system
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: breakglass-operator
+data:
+  breakglass-operator.json: |
+    {"title":"BreakGlass Operator","schemaVersion":39,"panels":[{"type":"stat","title":"Active sessions","targets":[{"expr":"sum(breakglass_active_sessions)"}]},{"type":"stat","title":"Sessions past expiry","targets":[{"expr":"sum(breakglass_sessions_past_expiry)"}]},{"type":"timeseries","title":"Lifecycle transitions","targets":[{"expr":"sum by (transition) (rate(breakglass_session_transitions_total[5m]))"}]},{"type":"timeseries","title":"Integrity drift","targets":[{"expr":"sum(rate(breakglass_binding_drift_total[5m])) + sum(rate(breakglass_curated_role_drift_total[5m]))"}]}]}

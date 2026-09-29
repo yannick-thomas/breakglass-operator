@@ -186,6 +186,10 @@ build-installers: manifests generate kustomize ## Generate consolidated default 
 		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production" > dist/install-production.yaml; \
 		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production-namespaced" > dist/install-production-namespaced.yaml
 
+.PHONY: preflight-production-namespaced
+preflight-production-namespaced: ## Verify cert-manager and the production target namespace before installation.
+	./hack/preflight-production-namespaced.sh production
+
 ##@ Deployment
 
 ifndef ignore-not-found

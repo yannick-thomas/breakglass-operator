@@ -44,11 +44,13 @@ const (
 	accessProfileName    = "production-pod-observer"
 	curatedRoleName      = "breakglass-pod-observer"
 
-	haSessionName        = "production-ha-session"
-	outageSessionName    = "production-webhook-outage-session"
-	recoverySessionName  = "production-recovery-session"
-	ruleDriftSessionName = "production-role-drift-session"
-	roleReuseSessionName = "production-role-reuse-session"
+	haSessionName                  = "production-ha-session"
+	outageSessionName              = "production-webhook-outage-session"
+	recoverySessionName            = "production-recovery-session"
+	ruleDriftSessionName           = "production-role-drift-session"
+	roleReuseSessionName           = "production-role-reuse-session"
+	certificateRotationSessionName = "production-certificate-rotation-session"
+	expiryRecoverySessionName      = "production-expiry-recovery-session"
 )
 
 var installedCertManager bool
@@ -101,6 +103,7 @@ var _ = Describe("Production installation", Ordered, func() {
 	AfterAll(func() {
 		for _, session := range []string{
 			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
+			certificateRotationSessionName, expiryRecoverySessionName,
 		} {
 			_, _ = utils.Run(exec.Command("kubectl", "delete", "breakglasssession", session, "--ignore-not-found"))
 		}
@@ -195,6 +198,32 @@ var _ = Describe("Production installation", Ordered, func() {
 		).Should(Succeed())
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
 	})
+
+	It("recovers webhook certificates and expires a grant after a complete manager restart", func() {
+		By("forcing cert-manager to reissue the serving secret without weakening admission")
+		previousCertificateSecretUID := certificateSecretUID()
+		_, err := utils.Run(exec.Command("kubectl", "delete", "secret", "webhook-server-cert", "-n", managerNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(certificateSecretWasReissued(previousCertificateSecretUID), 5*time.Minute, time.Second).Should(Succeed())
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+		Expect(createSession(certificateRotationSessionName)).To(Succeed())
+		Eventually(sessionIsActive(certificateRotationSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		revokeSession(certificateRotationSessionName)
+
+		By("allowing a session to pass its TTL while every manager is stopped")
+		Expect(createSession(expiryRecoverySessionName)).To(Succeed())
+		Eventually(sessionIsActive(expiryRecoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
+		bindingName := sessionBindingName(expiryRecoverySessionName)
+		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0"))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(webhookEndpointsAreAbsent, 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(sessionHasPassedExpiry(expiryRecoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
+		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2"))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+		Eventually(sessionHasPhase(expiryRecoverySessionName, "Expired"), 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
+	})
 })
 
 func assertProductionReady(g Gomega) {
@@ -253,6 +282,25 @@ func webhookEndpointsAreAbsent(g Gomega) {
 	g.Expect(count).To(BeZero())
 }
 
+func certificateSecretUID() string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "get", "secret", "webhook-server-cert", "-n", managerNamespace, "-o", "jsonpath={.metadata.uid}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(output).NotTo(BeEmpty())
+	return output
+}
+
+func certificateSecretWasReissued(previousUID string) func(Gomega) {
+	return func(g Gomega) {
+		output, err := utils.Run(exec.Command(
+			"kubectl", "get", "secret", "webhook-server-cert", "-n", managerNamespace, "-o", "jsonpath={.metadata.uid}",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).NotTo(Equal(previousUID))
+	}
+}
+
 func createSession(name string) error {
 	_, err := applyManifestAs(requesterName, fmt.Sprintf(`
 apiVersion: access.breakglass.io/v1alpha1
@@ -279,6 +327,24 @@ func sessionIsActive(name string) func(Gomega) {
 		g.Expect(parts[0]).To(Equal("Active"))
 		g.Expect(parts[1]).To(Equal(requesterName))
 		g.Expect(parts[2]).NotTo(BeEmpty())
+	}
+}
+
+func sessionHasPhase(name, phase string) func(Gomega) {
+	return func(g Gomega) {
+		output, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.phase}"))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal(phase))
+	}
+}
+
+func sessionHasPassedExpiry(name string) func(Gomega) {
+	return func(g Gomega) {
+		output, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.expiresAt}"))
+		g.Expect(err).NotTo(HaveOccurred())
+		expiresAt, err := time.Parse(time.RFC3339, output)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(time.Now()).To(BeTemporally(">", expiresAt))
 	}
 }
 
