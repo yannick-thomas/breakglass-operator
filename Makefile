@@ -106,6 +106,13 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+.PHONY: verify-manifests
+verify-manifests: manifests generate kustomize ## Render installation profiles and verify production security invariants.
+	@git diff --exit-code
+	"$(KUSTOMIZE)" build config/default | go run ./test/manifestcheck --profile default
+	"$(KUSTOMIZE)" build config/overlays/production | go run ./test/manifestcheck --profile production
+	"$(KUSTOMIZE)" build config/overlays/production-namespaced | go run ./test/manifestcheck --profile production-namespaced
+
 ##@ Build
 
 .PHONY: build

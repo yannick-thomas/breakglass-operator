@@ -9,15 +9,21 @@ resources:
   - manager-rolebindings-production.yaml
 
 patches:
-  # The RoleBinding policy rule is last in the generated manager ClusterRole.
+  # The RoleBinding policy rule is currently the ninth generated manager rule.
   # If controller-gen changes this ordering, rendering must fail review rather
   # than silently removing a different permission.
   - target:
       kind: ClusterRole
       name: breakglass-operator-manager-role
     patch: |-
+      - op: test
+        path: /rules/8/apiGroups/0
+        value: rbac.authorization.k8s.io
+      - op: test
+        path: /rules/8/resources/0
+        value: rolebindings
       - op: remove
-        path: /rules/7
+        path: /rules/8
   - target:
       kind: Deployment
       labelSelector: control-plane=controller-manager
