@@ -1,0 +1,11 @@
+# Bind only to a restricted audit/SIEM-reader group. BreakGlassSession objects
+# contain requester identities and incident reasons, so do not grant this to
+# ordinary requesters.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-auditor
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions", "accessprofiles"]
+    verbs: ["get", "list", "watch"]

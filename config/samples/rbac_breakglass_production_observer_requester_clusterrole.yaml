@@ -1,0 +1,14 @@
+# Bind this role only to the approved on-call group. It intentionally grants
+# one named profile, not profile administration or arbitrary RBAC access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-production-pod-observer-requester
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions"]
+    verbs: ["create", "get", "list", "watch", "patch"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer"]
+    verbs: ["get", "use"]

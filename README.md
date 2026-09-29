@@ -196,12 +196,19 @@ metadata:
 rules:
   - apiGroups: ["access.breakglass.io"]
     resources: ["breakglasssessions"]
-    verbs: ["create", "get", "list", "watch"]
+    verbs: ["create", "get", "list", "watch", "patch"]
   - apiGroups: ["access.breakglass.io"]
     resources: ["accessprofiles"]
     resourceNames: ["production-pod-observer"]
     verbs: ["use"]
 ```
+
+`patch` is intentionally limited to early self-revocation: admission permits
+only the immutable request fields plus the one-way `spec.revoked: true`
+transition, and it rejects an attempt to change another requester's session.
+The repository also supplies an unbound, profile-specific requester role and
+a separate audit-reader role in `config/samples/`; bind them to distinct
+on-call and audit groups through your GitOps policy.
 
 The requester submits only intent; do not provide `subject` or
 `accessProfileUID` because the mutating webhook owns both fields:
