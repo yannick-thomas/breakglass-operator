@@ -8,6 +8,9 @@ rendered Kustomize configuration, container/CI configuration, and focused unit
 tests. This is not a penetration test, a Kubernetes cluster assessment, or a
 substitute for an independent release review.
 
+The concise attacker and trust-boundary analysis is maintained separately in
+[Threat model](threat-model.md).
+
 ## Executive summary
 
 The current API is a meaningful improvement over a free-form break-glass CR:
