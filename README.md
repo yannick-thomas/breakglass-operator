@@ -99,6 +99,25 @@ The generated manager role has `bind` only for the sample curated role
 deployment RBAC deliberately with that exact role name before deploying it.
 Do not replace this with unrestricted `bind`.
 
+### Downloadable installer bundles
+
+Every successful push to `main` publishes a GitHub Actions artifact named
+`breakglass-operator-install-<commit>`. It contains the fully rendered,
+single-file installers `install.yaml`, `install-production.yaml`, and
+`install-production-namespaced.yaml`. Their manager image is pinned by digest,
+so the reviewed manifest and the executed image cannot drift apart.
+
+Download the artifact from the **Package Installers** workflow, select the one
+profile that matches your cluster, and apply it directly. For example:
+
+```bash
+kubectl apply -f install-production-namespaced.yaml
+```
+
+The first GitHub Container Registry package may need to be made readable by
+the target cluster (or public for unauthenticated pulls) in its package
+settings. Do not apply more than one installer profile to the same cluster.
+
 The installer intentionally does **not** include generic Kubebuilder
 `Admin`/`Editor`/`Viewer` roles for either CRD. Define platform-admin and
 requester permissions explicitly; a broad profile-editor role could otherwise

@@ -174,10 +174,17 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+build-installer: build-installers ## Generate the default consolidated installation YAML (legacy alias).
+
+.PHONY: build-installers
+build-installers: manifests generate kustomize ## Generate consolidated default and production installation YAMLs without changing sources.
+	@temp_dir="$$(mktemp -d)"; trap 'rm -rf "$$temp_dir"' EXIT; \
+		cp -R config "$$temp_dir/config"; \
+		(cd "$$temp_dir/config/manager" && "$(KUSTOMIZE)" edit set image controller=${IMG}); \
+		mkdir -p dist; \
+		"$(KUSTOMIZE)" build "$$temp_dir/config/default" > dist/install.yaml; \
+		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production" > dist/install-production.yaml; \
+		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production-namespaced" > dist/install-production-namespaced.yaml
 
 ##@ Deployment
 
@@ -196,9 +203,11 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+deploy: manifests kustomize ## Deploy controller without changing the checked-out configuration.
+	@temp_dir="$$(mktemp -d)"; trap 'rm -rf "$$temp_dir"' EXIT; \
+		cp -R config "$$temp_dir/config"; \
+		cd "$$temp_dir/config/manager" && "$(KUSTOMIZE)" edit set image controller=${IMG}; \
+		"$(KUSTOMIZE)" build "$$temp_dir/config/default" | "$(KUBECTL)" apply -f -
 
 .PHONY: deploy-production
 deploy-production: manifests kustomize ## Deploy the HA production overlay without modifying tracked manifests.
