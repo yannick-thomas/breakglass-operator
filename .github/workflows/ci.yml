@@ -86,9 +86,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # The policy is deliberately defined in this trusted workflow instead of
-      # a repository configuration file, so a pull request cannot mute or
-      # lower the severity threshold that protects it.
+      # Keep the policy explicit here so changes are visible in code review.
+      # Required CI and branch protection must protect main from any change
+      # that weakens this gate.
       - name: Scan source, Kubernetes manifests, and tracked secrets
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
