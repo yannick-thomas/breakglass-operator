@@ -1,0 +1,6 @@
+# The rendered default package uses this exact manager ServiceAccount identity.
+# Admission accepts a workload identity for a sourced session only when it
+# matches this value and independently verifies the request/approval chain.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --request-controller-username=system:serviceaccount:breakglass-operator-system:breakglass-operator-controller-manager

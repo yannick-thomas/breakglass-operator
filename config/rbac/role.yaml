@@ -15,6 +15,7 @@ rules:
   - access.breakglass.io
   resources:
   - accessprofiles
+  - breakglassapprovals
   - breakglassrequests
   verbs:
   - get
@@ -35,6 +36,7 @@ rules:
   resources:
   - breakglasssessions
   verbs:
+  - create
   - get
   - list
   - patch

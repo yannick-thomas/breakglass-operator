@@ -31,6 +31,7 @@ spec:
     name: breakglass-pod-observer
   targetNamespace: production
   maxDuration: 30m
+  deliveryMode: SelfService
 ```
 
 Profiles are cluster-scoped because they are platform policy, but every
@@ -40,17 +41,23 @@ provides reusable rules; it does not create a ClusterRoleBinding.
 ## Trust and authorization flow
 
 1. Kubernetes authenticates the API caller.
-2. The mutating webhook, on `CREATE` only, overwrites `spec.subject` with
-   `AdmissionRequest.userInfo.username` and records the selected profile's
-   server-assigned UID in `spec.accessProfileUID`.
-3. The validating webhook independently checks that final subject, profile UID,
-   and duration are valid. It then asks Kubernetes for a
-   `SubjectAccessReview` of `verb=use` on that exact profile name.
-4. The controller resolves the profile, verifies its UID and maximum duration,
-   snapshots role/scope into status, and creates the one RoleBinding.
-5. A later profile deletion, name reuse, policy mismatch, binding replacement,
-   binding-content drift, or missing expiry suspends the session instead of
-   recreating access.
+2. `deliveryMode: SelfService` lets the session webhook overwrite
+   `spec.subject` with `AdmissionRequest.userInfo.username`, snapshot the
+   profile UID, and authorize named `use` on the profile.
+3. `deliveryMode: ApprovalRequired` denies direct sessions. The request and
+   approval webhooks instead authenticate requester and approver, require
+   distinct named `use`/`approve` authorization, and record one immutable,
+   UID-bound decision before the controller can reserve a session.
+4. The session webhook accepts that controller-sourced session only from the
+   configured manager identity after rechecking request UID, approval UID,
+   profile mode, deadline, reservation, and copied intent fields.
+5. The session controller resolves the profile, verifies its UID and maximum
+   duration, snapshots role/scope into status, and creates the one
+   RoleBinding. It continues to verify the request/approval source, profile,
+   role, binding and expiry after activation.
+6. A later profile deletion, name reuse, policy mismatch, request/approval
+   source loss, binding replacement, binding-content drift, or missing expiry
+   suspends the session instead of recreating access.
 
 The requester needs normal `create` on `breakglasssessions` **and** an RBAC
 rule such as:
@@ -117,9 +124,10 @@ associated audit logs rather than assuming a destroyed binding will reappear.
   versioned, immutable curated roles remain the preferred operating model.
   Sessions created before the snapshot fields existed suspend fail-closed at
   their next active check and should be inventoried before upgrade.
-* There is no approval workflow in this API. A future `BreakGlassRequest`
-  should preserve immutable requester/profile/duration/reason intent, then let
-  an independently authorized approver cause a session to be created.
+* Approval-required profiles use exactly one independent, append-only
+  `BreakGlassApproval` per request UID. Quorum, escalation, ticket policy and
+  an `ApprovalPolicy` CRD remain deliberately out of scope until real shared
+  policy reuse justifies their additional invariants.
 * Events and Prometheus metrics are operational data. Kubernetes audit logs
   and a durable restricted sink remain the source of forensic truth.
 

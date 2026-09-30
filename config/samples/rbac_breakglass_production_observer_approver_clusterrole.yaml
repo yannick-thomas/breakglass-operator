@@ -1,0 +1,15 @@
+# Bind only to an independently authorized incident commander or approver
+# group. `approve` is intentionally separate from the requester's `use` verb.
+# The webhook stamps the authenticated approver and rejects self-approval.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-production-pod-observer-approver
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglassapprovals"]
+    verbs: ["create"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer-approval"]
+    verbs: ["get", "approve"]

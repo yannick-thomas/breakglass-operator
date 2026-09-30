@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -166,6 +167,91 @@ func TestDefaulterRejectsWorkloadIdentity(t *testing.T) {
 	err := defaulter.Default(requestContext("system:serviceaccount:production:deployer"), testSessionRequest())
 	if err == nil || !strings.Contains(err.Error(), "service account") {
 		t.Fatalf("Default() error = %v, want service account rejection", err)
+	}
+}
+
+func TestValidatorAcceptsOnlyTheReservedControllerSourcedSession(t *testing.T) {
+	now := time.Now()
+	profile := testApprovalAccessProfile()
+	request := testPendingApprovalRequest(now)
+	request.Status.Phase = accessv1alpha1.RequestPhaseProvisioning
+	request.Status.ApprovalRef = &accessv1alpha1.BreakGlassObjectReference{Name: accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)), UID: "approval-uid"}
+	request.Status.SessionRef = &accessv1alpha1.BreakGlassObjectReference{Name: accessv1alpha1.SessionNameForRequestUID(string(request.UID))}
+	approval := testApprovalForRequest(request)
+	approval.UID = "approval-uid"
+	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile, request, approval).Build()
+	controllerUsername := "system:serviceaccount:breakglass-operator-system:breakglass-operator-controller-manager"
+
+	newSession := func() *accessv1alpha1.BreakGlassSession {
+		return &accessv1alpha1.BreakGlassSession{
+			ObjectMeta: metav1.ObjectMeta{Name: request.Status.SessionRef.Name},
+			Spec: accessv1alpha1.BreakGlassSessionSpec{
+				AccessProfile:    request.Spec.AccessProfile,
+				AccessProfileUID: request.Spec.AccessProfileUID,
+				Subject:          request.Spec.Requester,
+				Duration:         request.Spec.Duration,
+				Reason:           request.Spec.Reason,
+				RequestRef:       &accessv1alpha1.BreakGlassRequestReference{Name: request.Name, UID: string(request.UID)},
+			},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		username string
+		mutate   func(*accessv1alpha1.BreakGlassSession)
+		wantErr  string
+	}{
+		{name: "allows only the exact configured controller", username: controllerUsername},
+		{name: "rejects another service account", username: "system:serviceaccount:production:deployer", wantErr: "configured request controller"},
+		{
+			name:     "rejects a session with changed request fields",
+			username: controllerUsername,
+			mutate: func(session *accessv1alpha1.BreakGlassSession) {
+				session.Spec.Duration = "30m"
+			},
+			wantErr: "must exactly match",
+		},
+		{
+			name:     "rejects a session with another name",
+			username: controllerUsername,
+			mutate: func(session *accessv1alpha1.BreakGlassSession) {
+				session.Name = "a-second-session"
+			},
+			wantErr: "has not reserved",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			validator := &BreakGlassSessionValidator{
+				ProfileReader:             reader,
+				RequestReader:             reader,
+				ApprovalReader:            reader,
+				RequestControllerUsername: controllerUsername,
+			}
+			session := newSession()
+			if test.mutate != nil {
+				test.mutate(session)
+			}
+			_, err := validator.ValidateCreate(requestContext(test.username), session)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("ValidateCreate() error = %v, want nil", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("ValidateCreate() error = %v, want substring %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatorRejectsDirectSessionForApprovalRequiredProfile(t *testing.T) {
+	profile := testApprovalAccessProfile()
+	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
+	validator := &BreakGlassSessionValidator{ProfileReader: reader, Reviewer: fakeReviewer{allowed: true}}
+	_, err := validator.ValidateCreate(requestContext("engineer@example.com"), testSessionRequest())
+	if err == nil || !strings.Contains(err.Error(), "requires the approval workflow") {
+		t.Fatalf("ValidateCreate() error = %v, want approval-only denial", err)
 	}
 }
 

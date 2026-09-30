@@ -49,7 +49,7 @@ using high-impact profiles.
 
 ## Confirmed controls
 
-* The request CR does not offer a free `roleRef`, target namespace, or subject.
+* Requests and sessions do not offer a free `roleRef`, target namespace, or subject.
 * The mutating webhook overwrites the grantee with
   `AdmissionRequest.userInfo.username`; the validator checks it again.
 * `SubjectAccessReview` authorizes `use` on the specific `AccessProfile` name.
@@ -63,6 +63,10 @@ using high-impact profiles.
   is deliberately left untouched.
 * Webhooks are configured fail-closed with TLS/CA injection. Metrics are HTTPS
   with authentication/authorization and avoid high-cardinality identity labels.
+* `AccessProfile.deliveryMode` selects exactly one human entry point:
+  `SelfService` or `ApprovalRequired`. The latter rejects direct sessions,
+  requires independent named `approve` authorization, and uses deterministic
+  UID-bound request, approval and session references.
 
 ## Findings and release gates
 
@@ -84,8 +88,9 @@ using high-impact profiles.
    suspension and investigation event.
 3. Do not create an in-etcd audit-event CRD. Kubernetes audit plus a restricted
    external sink is the forensic source of truth.
-4. The next workflow CRD remains `BreakGlassRequest`, but only after SR-01 to
-   SR-03 are closed. Approval cannot compensate for an overly broad manager.
+4. Approval cannot compensate for an overly broad manager. Use the namespaced
+   production overlay (or an equivalent reviewed multi-namespace composition)
+   before assigning high-impact approval-required profiles.
 
 ## Minimum production release checklist
 

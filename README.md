@@ -5,18 +5,22 @@ time-bound emergency access. It is intended for the narrow but common gap
 between permanent production access and an incident where an on-call engineer
 needs a small, auditable permission set for a short time.
 
-`v1alpha1` deliberately supports a conservative first production slice:
+`v1alpha1` supports two explicit, conservative delivery modes:
 
 ```text
 AccessProfile (admin-owned, fixed role + namespace + maximum duration)
         │
-        │ requester has RBAC verb: use
-        ▼
-BreakGlassSession (profile + duration + reason only)
+        ├─ SelfService: requester has RBAC verb use
+        │       │
+        │       ▼
+        │   BreakGlassSession (profile + duration + reason)
         │
-        ├─ admission webhook attributes the authenticated requester
-        ├─ validates profile UID, duration, and SubjectAccessReview
-        ▼
+        └─ ApprovalRequired: requester use → request → independent approve
+                                                │
+                                                ▼
+                                     controller-sourced BreakGlassSession
+                                                │
+                                                ▼
 one UID-tracked RoleBinding in the profile's fixed namespace
         │
         └─ revoked, expired, or suspended on integrity failure
@@ -39,6 +43,12 @@ does **not** make the grant cluster-wide.
 * **Profile-specific authorization:** the validating webhook performs a
   `SubjectAccessReview` for the custom verb `use` on exactly the named
   `AccessProfile`.
+* **Independent approval where required:** `deliveryMode: ApprovalRequired`
+  denies direct sessions. A requester creates immutable intent, a different
+  human with the named `approve` verb records one append-only decision, and
+  only the configured controller identity may create the resulting session.
+  Request, approval, session, profile and binding are linked by server-issued
+  UIDs; the active session rechecks that chain and suspends on source drift.
 * **Fail-closed lifecycle:** the standard Kustomize deployment installs TLS
   webhooks with `failurePolicy: Fail` and a five-second timeout. A missing,
   replaced, or modified binding suspends the session; it is never silently
@@ -101,14 +111,14 @@ Do not replace this with unrestricted `bind`.
 
 ### Downloadable installer bundles
 
-Every successful push to `main` publishes a GitHub Actions artifact named
+Every successful gated CI run on `main` publishes a GitHub Actions artifact named
 `breakglass-operator-install-<commit>`. It contains the fully rendered,
 single-file installers `install.yaml`, `install-production.yaml`, and
 `install-production-namespaced.yaml`. Their manager image is pinned by digest,
 so the reviewed manifest and the executed image cannot drift apart. The image
 bundle supports both `linux/amd64` and `linux/arm64` clusters.
 
-Download the artifact from the **Package Installers** workflow, select the one
+Download the artifact from the **CI** workflow, select the one
 profile that matches your cluster, and apply it directly. For example:
 
 ```bash
@@ -182,6 +192,7 @@ spec:
     name: breakglass-pod-observer
   targetNamespace: production
   maxDuration: 30m
+  deliveryMode: SelfService
 ```
 
 Give an on-call group normal `create` access to `breakglasssessions` and only
@@ -249,6 +260,44 @@ remain immutable.
 kubectl patch bgs <session-name> --type=merge -p '{"spec":{"revoked":true}}'
 ```
 
+## Approval-required workflow
+
+Use an approval-required profile for higher-risk production access. The
+repository supplies a least-privilege sample profile plus distinct requester
+and approver roles in `config/samples/`. Bind those roles to different groups
+through GitOps; neither role receives RoleBinding, `bind`, or controller
+credentials.
+
+```yaml
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassRequest
+metadata:
+  name: incident-db-approval
+spec:
+  accessProfile: production-pod-observer-approval
+  duration: 20m
+  reason: "INC-1092: investigate database connection exhaustion"
+---
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassApproval
+metadata:
+  # The webhook replaces this with the one deterministic slot for the request.
+  generateName: incident-db-approval-
+spec:
+  requestRef:
+    name: incident-db-approval
+  decision: Approved
+  comment: "Incident commander approval"
+```
+
+The requester supplies neither `requester`, `accessProfileUID` nor
+`requestTTL`; the approver supplies neither request UID nor `approver`. The
+webhooks derive those values from the authenticated Kubernetes identity and
+server state. Do not grant requesters broad `list` or `watch` access to the
+cluster-scoped request resource: it can reveal other incidents. See the
+[request workflow design](docs/breakglass-request-design.md) and
+[ADR-001](docs/adr-001-single-grant-path.md) for the full trust boundary.
+
 ## Development and verification
 
 ```bash
@@ -268,14 +317,10 @@ This is intentionally not a generic PAM replacement. It is most useful as a
 small, Kubernetes-native production-access primitive beside existing OIDC,
 RBAC, GitOps, audit, and incident systems.
 
-Before a broad rollout, prioritize the production install gate, curated-role
-integrity (a role name alone does not freeze its rules), alert/runbook/audit
-integration, and realistic Kind/E2E tests. The immutable cluster-scoped
-`BreakGlassRequest` now provides the safe first half of a two-person workflow:
-the authenticated requester, profile UID and policy boundary are captured at
-admission, then the manager records `Pending` and expires unconsumed requests
-after `--request-ttl` (15 minutes by default). It never grants access by
-itself. The next milestone adds `BreakGlassApproval` and a server-verified,
-idempotent request-to-session path; ChatOps, CLI, and a future optional WebUI
-must build on that shared workflow instead of creating a second approval
-model. The ranked rationale is maintained in [ROADMAP.md](ROADMAP.md).
+Before a broad rollout of approval-required profiles, prioritize the
+production install gate, curated-role integrity (a role name alone does not
+freeze its rules), alert/runbook/audit integration, and realistic Kind/E2E
+tests for every request-to-session recovery point. CLI, ChatOps and a future
+optional WebUI must remain clients of this single server-verified path; they
+must not create a second approval or RBAC grant model. The ranked rationale is
+maintained in [ROADMAP.md](ROADMAP.md).

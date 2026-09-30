@@ -81,6 +81,7 @@ func verifyRequiredCRDs(objects []unstructured.Unstructured) error {
 	for _, name := range []string{
 		"accessprofiles.access.breakglass.io",
 		"breakglassrequests.access.breakglass.io",
+		"breakglassapprovals.access.breakglass.io",
 		"breakglasssessions.access.breakglass.io",
 	} {
 		if _, err := requiredObject(objects, "CustomResourceDefinition", name); err != nil {

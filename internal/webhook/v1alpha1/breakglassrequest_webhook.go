@@ -18,14 +18,19 @@ import (
 // boundary with the same target-namespace constraint as direct sessions. A
 // request must not be able to select a profile that this manager would later
 // refuse to grant.
-func SetupBreakGlassRequestWebhookWithManager(mgr ctrl.Manager, allowedTargetNamespaces map[string]struct{}) error {
+func SetupBreakGlassRequestWebhookWithManager(
+	mgr ctrl.Manager,
+	allowedTargetNamespaces map[string]struct{},
+	requestTTL time.Duration,
+) error {
 	return ctrl.NewWebhookManagedBy(mgr, &accessv1alpha1.BreakGlassRequest{}).
-		WithDefaulter(&BreakGlassRequestDefaulter{ProfileReader: mgr.GetAPIReader(), Metrics: breakglassmetrics.DefaultRecorder}).
+		WithDefaulter(&BreakGlassRequestDefaulter{ProfileReader: mgr.GetAPIReader(), Metrics: breakglassmetrics.DefaultRecorder, RequestTTL: requestTTL}).
 		WithValidator(&BreakGlassRequestValidator{
 			ProfileReader:           mgr.GetAPIReader(),
 			Reviewer:                KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
 			Metrics:                 breakglassmetrics.DefaultRecorder,
 			AllowedTargetNamespaces: allowedTargetNamespaces,
+			RequestTTL:              requestTTL,
 		}).
 		Complete()
 }
@@ -34,6 +39,7 @@ func SetupBreakGlassRequestWebhookWithManager(mgr ctrl.Manager, allowedTargetNam
 type BreakGlassRequestDefaulter struct {
 	ProfileReader client.Reader
 	Metrics       breakglassmetrics.AdmissionRecorder
+	RequestTTL    time.Duration
 }
 
 func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1alpha1.BreakGlassRequest) (err error) {
@@ -56,6 +62,9 @@ func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1a
 	if d.ProfileReader == nil {
 		return &admissionInternalError{err: fmt.Errorf("AccessProfile reader is not configured")}
 	}
+	if d.RequestTTL <= 0 {
+		return &admissionInternalError{err: fmt.Errorf("request TTL is not configured")}
+	}
 	p := &accessv1alpha1.AccessProfile{}
 	if err := d.ProfileReader.Get(ctx, client.ObjectKey{Name: obj.Spec.AccessProfile}, p); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -68,6 +77,7 @@ func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1a
 	}
 	obj.Spec.Requester = accessv1alpha1.SubjectReference{Kind: accessv1alpha1.SubjectKindUser, Name: req.UserInfo.Username}
 	obj.Spec.AccessProfileUID = string(p.UID)
+	obj.Spec.RequestTTL = d.RequestTTL.String()
 	return nil
 }
 
@@ -77,6 +87,7 @@ type BreakGlassRequestValidator struct {
 	Reviewer                SubjectAccessReviewer
 	Metrics                 breakglassmetrics.AdmissionRecorder
 	AllowedTargetNamespaces map[string]struct{}
+	RequestTTL              time.Duration
 }
 
 func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *accessv1alpha1.BreakGlassRequest) (warnings admission.Warnings, err error) {
@@ -104,6 +115,15 @@ func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *ac
 	}
 	if obj.Spec.AccessProfileUID != string(p.UID) {
 		return nil, fmt.Errorf("accessProfileUID does not match the current AccessProfile")
+	}
+	if p.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+		return nil, fmt.Errorf("AccessProfile %q does not require the approval workflow", p.Name)
+	}
+	if v.RequestTTL <= 0 {
+		return nil, apierrors.NewInternalError(fmt.Errorf("request TTL is not configured"))
+	}
+	if obj.Spec.RequestTTL != v.RequestTTL.String() {
+		return nil, fmt.Errorf("requestTTL does not match the current manager policy")
 	}
 	duration, err := time.ParseDuration(obj.Spec.Duration)
 	if err != nil || duration <= 0 {

@@ -1,0 +1,22 @@
+name: Set up Kind
+description: Installs the pinned Kind version used by the E2E test suites.
+
+inputs:
+  version:
+    description: Exact Kind release to install.
+    required: false
+    default: v0.27.0
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Kind
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl --fail --location --retry 3 --silent --show-error \
+          --output ./kind \
+          "https://kind.sigs.k8s.io/dl/${{ inputs.version }}/kind-linux-amd64"
+        chmod +x ./kind
+        sudo install -m 0755 ./kind /usr/local/bin/kind
+        kind version

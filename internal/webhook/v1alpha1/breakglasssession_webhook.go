@@ -47,17 +47,25 @@ var breakglasssessionlog = logf.Log.WithName("breakglasssession-resource")
 // validating admission endpoints. GetAPIReader deliberately bypasses the
 // cache: authorization must evaluate the profile currently stored by the API
 // server, not a stale cache entry.
-func SetupBreakGlassSessionWebhookWithManager(mgr ctrl.Manager, allowedTargetNamespaces map[string]struct{}) error {
+func SetupBreakGlassSessionWebhookWithManager(
+	mgr ctrl.Manager,
+	allowedTargetNamespaces map[string]struct{},
+	requestControllerUsername string,
+) error {
 	return ctrl.NewWebhookManagedBy(mgr, &accessv1alpha1.BreakGlassSession{}).
 		WithValidator(&BreakGlassSessionValidator{
-			ProfileReader:           mgr.GetAPIReader(),
-			Reviewer:                KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
-			Metrics:                 breakglassmetrics.DefaultRecorder,
-			AllowedTargetNamespaces: allowedTargetNamespaces,
+			ProfileReader:             mgr.GetAPIReader(),
+			RequestReader:             mgr.GetAPIReader(),
+			ApprovalReader:            mgr.GetAPIReader(),
+			Reviewer:                  KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+			Metrics:                   breakglassmetrics.DefaultRecorder,
+			AllowedTargetNamespaces:   allowedTargetNamespaces,
+			RequestControllerUsername: requestControllerUsername,
 		}).
 		WithDefaulter(&BreakGlassSessionDefaulter{
-			ProfileReader: mgr.GetAPIReader(),
-			Metrics:       breakglassmetrics.DefaultRecorder,
+			ProfileReader:             mgr.GetAPIReader(),
+			Metrics:                   breakglassmetrics.DefaultRecorder,
+			RequestControllerUsername: requestControllerUsername,
 		}).
 		Complete()
 }
@@ -68,8 +76,9 @@ func SetupBreakGlassSessionWebhookWithManager(mgr ctrl.Manager, allowedTargetNam
 // trusted subject: the user authenticated by the Kubernetes API server. It
 // deliberately overwrites any client-provided value rather than validating it.
 type BreakGlassSessionDefaulter struct {
-	ProfileReader client.Reader
-	Metrics       breakglassmetrics.AdmissionRecorder
+	ProfileReader             client.Reader
+	Metrics                   breakglassmetrics.AdmissionRecorder
+	RequestControllerUsername string
 }
 
 // Default implements admission.Defaulter. controller-runtime places the
@@ -87,6 +96,12 @@ func (d *BreakGlassSessionDefaulter) Default(ctx context.Context, obj *accessv1a
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		return &admissionInternalError{err: fmt.Errorf("read authenticated admission requester: %w", err)}
+	}
+	if obj.Spec.RequestRef != nil {
+		if d.RequestControllerUsername == "" || req.UserInfo.Username != d.RequestControllerUsername {
+			return fmt.Errorf("request-sourced sessions may only be created by the configured request controller")
+		}
+		return nil
 	}
 	if err := validateHumanRequester(req.UserInfo); err != nil {
 		return err
@@ -133,6 +148,17 @@ type KubernetesSubjectAccessReviewer struct {
 }
 
 func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
+	return r.canAccessProfile(ctx, user, profile, "use")
+}
+
+// CanApprove verifies the custom, profile-scoped approval verb. Keeping this
+// distinct from use prevents a requester from approving their own access just
+// because they may start a direct self-service session.
+func (r KubernetesSubjectAccessReviewer) CanApprove(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
+	return r.canAccessProfile(ctx, user, profile, "approve")
+}
+
+func (r KubernetesSubjectAccessReviewer) canAccessProfile(ctx context.Context, user authenticationv1.UserInfo, profile, verb string) (bool, error) {
 	if r.Client == nil {
 		return false, fmt.Errorf("SubjectAccessReview client is not configured")
 	}
@@ -150,7 +176,7 @@ func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authen
 				Group:    accessv1alpha1.GroupVersion.Group,
 				Version:  accessv1alpha1.GroupVersion.Version,
 				Resource: "accessprofiles",
-				Verb:     "use",
+				Verb:     verb,
 				Name:     profile,
 			},
 		},
@@ -167,10 +193,13 @@ func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authen
 // BreakGlassSessionValidator validates the fully-mutated session and enforces
 // the profile-specific custom RBAC verb "use" at creation time.
 type BreakGlassSessionValidator struct {
-	ProfileReader           client.Reader
-	Reviewer                SubjectAccessReviewer
-	Metrics                 breakglassmetrics.AdmissionRecorder
-	AllowedTargetNamespaces map[string]struct{}
+	ProfileReader             client.Reader
+	RequestReader             client.Reader
+	ApprovalReader            client.Reader
+	Reviewer                  SubjectAccessReviewer
+	Metrics                   breakglassmetrics.AdmissionRecorder
+	AllowedTargetNamespaces   map[string]struct{}
+	RequestControllerUsername string
 }
 
 // ValidateCreate rejects a request unless its persisted subject exactly equals
@@ -185,6 +214,9 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 	if err != nil {
 		return nil, apierrors.NewInternalError(fmt.Errorf("read authenticated admission requester: %w", err))
 	}
+	if obj.Spec.RequestRef != nil {
+		return nil, v.validateRequestSourcedSession(ctx, req.UserInfo, obj)
+	}
 	if err := validateHumanRequester(req.UserInfo); err != nil {
 		return nil, err
 	}
@@ -198,6 +230,9 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 	}
 	if string(profile.UID) != obj.Spec.AccessProfileUID {
 		return nil, fmt.Errorf("accessProfileUID does not match the current AccessProfile")
+	}
+	if profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeSelfService {
+		return nil, fmt.Errorf("AccessProfile %q requires the approval workflow", profile.Name)
 	}
 	duration, err := time.ParseDuration(obj.Spec.Duration)
 	if err != nil || duration <= 0 {
@@ -232,13 +267,103 @@ func (v *BreakGlassSessionValidator) ValidateUpdate(_ context.Context, oldObj, n
 		oldSpec.AccessProfileUID != newSpec.AccessProfileUID ||
 		oldSpec.Subject != newSpec.Subject ||
 		oldSpec.Duration != newSpec.Duration ||
-		oldSpec.Reason != newSpec.Reason {
+		oldSpec.Reason != newSpec.Reason ||
+		!requestReferencesEqual(oldSpec.RequestRef, newSpec.RequestRef) {
 		return nil, fmt.Errorf("access request fields are immutable")
 	}
 	if oldSpec.Revoked && !newSpec.Revoked {
 		return nil, fmt.Errorf("revoked cannot be changed from true to false")
 	}
 	return nil, nil
+}
+
+// validateRequestSourcedSession is the only admission path for a workload
+// identity. It is deliberately narrow: the manager must present the exact
+// configured ServiceAccount identity and may create only the session name
+// reserved by a current, approved request.
+func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
+	ctx context.Context,
+	user authenticationv1.UserInfo,
+	obj *accessv1alpha1.BreakGlassSession,
+) error {
+	if v.RequestControllerUsername == "" || user.Username != v.RequestControllerUsername {
+		return fmt.Errorf("request-sourced sessions may only be created by the configured request controller")
+	}
+	ref := obj.Spec.RequestRef
+	if ref == nil || ref.Name == "" || ref.UID == "" {
+		return fmt.Errorf("requestRef name and UID are required for a controller-sourced session")
+	}
+	if v.RequestReader == nil || v.ApprovalReader == nil {
+		return apierrors.NewInternalError(fmt.Errorf("request or approval reader is not configured"))
+	}
+	request := &accessv1alpha1.BreakGlassRequest{}
+	if err := v.RequestReader.Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
+		}
+		return apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for session admission: %w", err))
+	}
+	if string(request.UID) != ref.UID {
+		return fmt.Errorf("requestRef UID does not match the current BreakGlassRequest")
+	}
+	if request.Status.Phase != accessv1alpha1.RequestPhaseProvisioning || request.Status.SessionRef == nil ||
+		request.Status.SessionRef.Name != obj.Name || request.Status.SessionRef.UID != "" {
+		return fmt.Errorf("BreakGlassRequest %q has not reserved this session for provisioning", request.Name)
+	}
+	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
+	if err != nil || requestTTL <= 0 {
+		return fmt.Errorf("BreakGlassRequest %q has no valid immutable request TTL", request.Name)
+	}
+	if !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
+		return fmt.Errorf("BreakGlassRequest %q has expired", request.Name)
+	}
+	if request.Status.ApprovalRef == nil || request.Status.ApprovalRef.Name == "" || request.Status.ApprovalRef.UID == "" {
+		return fmt.Errorf("BreakGlassRequest %q has no verified approval reference", request.Name)
+	}
+	approval := &accessv1alpha1.BreakGlassApproval{}
+	if err := v.ApprovalReader.Get(ctx, client.ObjectKey{Name: request.Status.ApprovalRef.Name}, approval); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("BreakGlassApproval %q does not exist", request.Status.ApprovalRef.Name)
+		}
+		return apierrors.NewInternalError(fmt.Errorf("read BreakGlassApproval for session admission: %w", err))
+	}
+	if string(approval.UID) != request.Status.ApprovalRef.UID ||
+		approval.Spec.Decision != accessv1alpha1.ApprovalDecisionApproved ||
+		approval.Spec.RequestRef.Name != request.Name || approval.Spec.RequestRef.UID != string(request.UID) ||
+		approval.Spec.Approver.Kind != accessv1alpha1.SubjectKindUser ||
+		approval.Spec.Approver.Name == request.Spec.Requester.Name {
+		return fmt.Errorf("BreakGlassRequest %q approval reference is not a valid independent approval", request.Name)
+	}
+	if obj.Spec.AccessProfile != request.Spec.AccessProfile ||
+		obj.Spec.AccessProfileUID != request.Spec.AccessProfileUID ||
+		obj.Spec.Subject != request.Spec.Requester ||
+		obj.Spec.Duration != request.Spec.Duration ||
+		obj.Spec.Reason != request.Spec.Reason {
+		return fmt.Errorf("controller-sourced session fields must exactly match the approved BreakGlassRequest")
+	}
+
+	profile, maxDuration, err := v.loadAndValidateProfile(ctx, request.Spec.AccessProfile)
+	if err != nil {
+		return err
+	}
+	if string(profile.UID) != request.Spec.AccessProfileUID {
+		return fmt.Errorf("BreakGlassRequest accessProfileUID does not match the current AccessProfile")
+	}
+	if profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+		return fmt.Errorf("AccessProfile %q does not require the approval workflow", profile.Name)
+	}
+	duration, err := time.ParseDuration(request.Spec.Duration)
+	if err != nil || duration <= 0 || duration > maxDuration {
+		return fmt.Errorf("BreakGlassRequest duration is no longer valid for the current AccessProfile")
+	}
+	return nil
+}
+
+func requestReferencesEqual(left, right *accessv1alpha1.BreakGlassRequestReference) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 // ValidateDelete performs no extra policy check. Kubernetes RBAC governs who

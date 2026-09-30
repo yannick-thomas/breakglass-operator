@@ -95,6 +95,7 @@ type RoleReference struct {
 // +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject",message="subject is immutable"
 // +kubebuilder:validation:XValidation:rule="self.duration == oldSelf.duration",message="duration is immutable"
 // +kubebuilder:validation:XValidation:rule="self.reason == oldSelf.reason",message="reason is immutable"
+// +kubebuilder:validation:XValidation:rule="self.requestRef == oldSelf.requestRef",message="requestRef is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked) && self.revoked)",message="revoked cannot be changed from true to false"
 // +kubebuilder:validation:XValidation:rule="self.subject.kind == 'User' && (!has(self.subject.namespace) || size(self.subject.namespace) == 0)",message="v1alpha1 self-service sessions may only grant the authenticated User requester"
 type BreakGlassSessionSpec struct {
@@ -128,6 +129,13 @@ type BreakGlassSessionSpec struct {
 	// +kubebuilder:validation:MinLength=5
 	// +kubebuilder:validation:MaxLength=1024
 	Reason string `json:"reason"`
+
+	// RequestRef is present only for the approval workflow. The session webhook
+	// accepts it only from the configured request controller after it verifies
+	// the exact request UID, approval state, deadline, and reserved session
+	// name. Self-service users cannot set this field.
+	// +optional
+	RequestRef *BreakGlassRequestReference `json:"requestRef,omitempty"`
 
 	// Revoked allows manual revocation before the duration expires.
 	// +optional

@@ -111,6 +111,9 @@ func (r *AccessProfileReconciler) evaluateReadiness(
 	if duration, err := time.ParseDuration(profile.Spec.MaxDuration); err != nil || duration <= 0 {
 		return metav1.ConditionFalse, "InvalidDuration", "The profile must specify a positive maximum duration", nil
 	}
+	if mode := profile.Spec.EffectiveDeliveryMode(); mode != accessv1alpha1.AccessDeliveryModeSelfService && mode != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+		return metav1.ConditionFalse, "InvalidDeliveryMode", "The profile must specify a supported access delivery mode", nil
+	}
 	if !r.targetNamespaceAllowed(profile.Spec.TargetNamespace) {
 		return metav1.ConditionFalse, "NamespaceOutOfScope", fmt.Sprintf("Target namespace %q is outside this manager's allowed namespace set", profile.Spec.TargetNamespace), nil
 	}

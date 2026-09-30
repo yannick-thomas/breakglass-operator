@@ -71,6 +71,14 @@ spec:
                 maxLength: 1024
                 minLength: 5
                 type: string
+              requestTTL:
+                description: |-
+                  RequestTTL is overwritten by admission from the manager configuration.
+                  It snapshots the server policy that determines the request deadline, so
+                  approval and provisioning never depend on a later asynchronous status
+                  write or a changed manager flag.
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
               requester:
                 description: SubjectReference specifies the subject receiving the
                   privileged access
@@ -102,6 +110,7 @@ spec:
             - accessProfileUID
             - duration
             - reason
+            - requestTTL
             - requester
             type: object
             x-kubernetes-validations:
@@ -109,6 +118,25 @@ spec:
               rule: self == oldSelf
           status:
             properties:
+              approvalRef:
+                description: |-
+                  ApprovalRef is the one decision selected by the request controller. It
+                  is immutable after the request leaves Pending and provides an audit link
+                  without copying the approver identity into a metric label.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: |-
+                      UID is empty only while the controller reserves a deterministic session
+                      name before creating it. Once a reference is persisted as terminal, the
+                      UID is required and prevents same-name adoption.
+                    type: string
+                required:
+                - name
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -195,6 +223,25 @@ spec:
                 - SessionCreated
                 - Failed
                 type: string
+              sessionRef:
+                description: |-
+                  SessionRef is reserved before the controller creates the final session,
+                  then completed with the server-assigned UID. The session admission
+                  webhook accepts a controller-sourced grant only for this exact reference.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: |-
+                      UID is empty only while the controller reserves a deterministic session
+                      name before creating it. Once a reference is persisted as terminal, the
+                      UID is required and prevents same-name adoption.
+                    type: string
+                required:
+                - name
+                type: object
             type: object
         required:
         - spec

@@ -118,6 +118,28 @@ const (
 	CuratedRoleUnknown         CuratedRoleDriftReason = "unknown"
 )
 
+// RequestSourceIntegrityReason is a fixed vocabulary for a failed
+// request/approval provenance check on a controller-sourced session. It must
+// never contain an object name, identity, namespace, profile, or raw error.
+type RequestSourceIntegrityReason string
+
+const (
+	RequestSourceReference           RequestSourceIntegrityReason = "request_reference"
+	RequestSourceMissing             RequestSourceIntegrityReason = "request_missing"
+	RequestSourceUIDMismatch         RequestSourceIntegrityReason = "request_uid_mismatch"
+	RequestSourceContentMismatch     RequestSourceIntegrityReason = "request_content_mismatch"
+	RequestSourceReservationMismatch RequestSourceIntegrityReason = "session_reservation_mismatch"
+	RequestSourceSessionUIDMismatch  RequestSourceIntegrityReason = "session_uid_mismatch"
+	RequestSourcePhase               RequestSourceIntegrityReason = "request_phase"
+	RequestSourceTTLInvalid          RequestSourceIntegrityReason = "request_ttl_invalid"
+	RequestSourceExpired             RequestSourceIntegrityReason = "request_expired"
+	RequestSourceApprovalReference   RequestSourceIntegrityReason = "approval_reference"
+	RequestSourceApprovalMissing     RequestSourceIntegrityReason = "approval_missing"
+	RequestSourceApprovalUIDMismatch RequestSourceIntegrityReason = "approval_uid_mismatch"
+	RequestSourceApprovalInvalid     RequestSourceIntegrityReason = "approval_invalid"
+	RequestSourceUnknown             RequestSourceIntegrityReason = "unknown"
+)
+
 // BindingOperation identifies a privileged RBAC lifecycle action.
 type BindingOperation string
 
@@ -167,6 +189,7 @@ type LifecycleRecorder interface {
 	RecordTransition(LifecycleTransition, Scope)
 	RecordBindingDrift(BindingDriftReason, Scope)
 	RecordCuratedRoleDrift(CuratedRoleDriftReason, Scope)
+	RecordRequestSourceIntegrity(RequestSourceIntegrityReason, Scope)
 	RecordBindingOperation(BindingOperation, BindingOperationResult, Scope)
 	ObserveExpiryCleanupLag(Scope, time.Duration)
 }
@@ -188,13 +211,14 @@ type AdmissionRecorder interface {
 // controller. Metrics are best-effort operational telemetry, not an audit
 // record.
 type Recorder struct {
-	transitions        *prometheus.CounterVec
-	bindingDrift       *prometheus.CounterVec
-	curatedRoleDrift   *prometheus.CounterVec
-	bindingOperations  *prometheus.CounterVec
-	expiryCleanupLag   *prometheus.HistogramVec
-	admissionRequests  *prometheus.CounterVec
-	requestTransitions *prometheus.CounterVec
+	transitions            *prometheus.CounterVec
+	bindingDrift           *prometheus.CounterVec
+	curatedRoleDrift       *prometheus.CounterVec
+	requestSourceIntegrity *prometheus.CounterVec
+	bindingOperations      *prometheus.CounterVec
+	expiryCleanupLag       *prometheus.HistogramVec
+	admissionRequests      *prometheus.CounterVec
+	requestTransitions     *prometheus.CounterVec
 }
 
 var _ LifecycleRecorder = (*Recorder)(nil)
@@ -229,6 +253,11 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 			Name:      "curated_role_drift_total",
 			Help:      "Total number of detected curated ClusterRole integrity failures.",
 		}, []string{metricLabelReason, metricLabelScope}),
+		requestSourceIntegrity: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace,
+			Name:      "request_source_integrity_failures_total",
+			Help:      "Total number of failed request or approval provenance checks for controller-sourced sessions.",
+		}, []string{metricLabelReason, metricLabelScope}),
 		bindingOperations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace,
 			Name:      "binding_operations_total",
@@ -256,6 +285,7 @@ func NewRecorder(registry prometheus.Registerer) (*Recorder, error) {
 		recorder.transitions,
 		recorder.bindingDrift,
 		recorder.curatedRoleDrift,
+		recorder.requestSourceIntegrity,
 		recorder.bindingOperations,
 		recorder.expiryCleanupLag,
 		recorder.admissionRequests,
@@ -308,6 +338,18 @@ func (r *Recorder) RecordCuratedRoleDrift(reason CuratedRoleDriftReason, scope S
 		return
 	}
 	r.curatedRoleDrift.WithLabelValues(string(normalizeCuratedRoleDriftReason(reason)), string(normalizeScope(scope))).Inc()
+}
+
+// RecordRequestSourceIntegrity records a failed request/approval provenance
+// check once after the session was suspended.
+func (r *Recorder) RecordRequestSourceIntegrity(reason RequestSourceIntegrityReason, scope Scope) {
+	if r == nil {
+		return
+	}
+	r.requestSourceIntegrity.WithLabelValues(
+		string(normalizeRequestSourceIntegrityReason(reason)),
+		string(normalizeScope(scope)),
+	).Inc()
 }
 
 // RecordBindingOperation records a privileged binding action. Regular
@@ -409,6 +451,28 @@ func normalizeCuratedRoleDriftReason(reason CuratedRoleDriftReason) CuratedRoleD
 		return reason
 	default:
 		return CuratedRoleUnknown
+	}
+}
+
+func normalizeRequestSourceIntegrityReason(reason RequestSourceIntegrityReason) RequestSourceIntegrityReason {
+	switch reason {
+	case RequestSourceReference,
+		RequestSourceMissing,
+		RequestSourceUIDMismatch,
+		RequestSourceContentMismatch,
+		RequestSourceReservationMismatch,
+		RequestSourceSessionUIDMismatch,
+		RequestSourcePhase,
+		RequestSourceTTLInvalid,
+		RequestSourceExpired,
+		RequestSourceApprovalReference,
+		RequestSourceApprovalMissing,
+		RequestSourceApprovalUIDMismatch,
+		RequestSourceApprovalInvalid,
+		RequestSourceUnknown:
+		return reason
+	default:
+		return RequestSourceUnknown
 	}
 }
 

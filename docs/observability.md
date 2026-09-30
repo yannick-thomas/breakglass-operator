@@ -29,7 +29,9 @@ Only bounded labels are exposed:
 * `reason`: `missing`, `ownership`, `uid_mismatch`, `role_ref`, `subjects`,
   `binding_reference`, `missing_expiry`, `integrity_unknown`, or `unknown`
   for binding drift; curated-role drift uses only `missing`, `uid_mismatch`,
-  `rules_hash`, `snapshot_missing`, or `unknown`.
+  `rules_hash`, `snapshot_missing`, or `unknown`. Request-source integrity
+  uses a separate fixed vocabulary for request, reservation, approval, UID,
+  phase, TTL, and expiry failures; it never includes an object identifier.
 * binding `operation`: `grant`, `restore`, `cleanup`, or `unknown`
 * `result`: `success`, `error`, or `unknown`
 * admission `operation`: `create`, `update`, or `unknown`
@@ -45,6 +47,7 @@ Only bounded labels are exposed:
 | `breakglass_session_transitions_total{transition,scope}` | Persisted lifecycle transitions. One session can produce multiple transition events over its lifecycle. |
 | `breakglass_binding_drift_total{reason,scope}` | Detected managed-binding integrity failures. |
 | `breakglass_curated_role_drift_total{reason,scope}` | Detected curated ClusterRole identity or rule-set drift. |
+| `breakglass_request_source_integrity_failures_total{reason,scope}` | Failed UID-bound request or approval provenance checks for controller-sourced sessions. |
 | `breakglass_binding_operations_total{operation,result,scope}` | Privileged RBAC binding actions; routine no-op reconciliations are excluded. |
 | `breakglass_expiry_cleanup_lag_seconds{scope}` | Histogram of delay between expiry and successful binding cleanup. |
 | `breakglass_admission_requests_total{operation,outcome}` | Terminal webhook decisions. `denied` means policy rejection; `error` signals an admission dependency or internal failure. |
@@ -84,6 +87,7 @@ binding/profile snapshot, not from a raw profile or namespace label.
 * Critical: `increase(breakglass_binding_operations_total{operation="cleanup",result="error"}[5m]) > 0`.
 * High severity: `increase(breakglass_binding_drift_total[5m]) > 0`.
 * Critical: `increase(breakglass_curated_role_drift_total[5m]) > 0`.
+* Critical: `increase(breakglass_request_source_integrity_failures_total[5m]) > 0`; investigate source deletion, recreation, policy drift, or an unexpected manager action before restoring access.
 * High severity: `increase(breakglass_admission_requests_total{outcome="error"}[5m]) > 0`; this can block all new requests because the webhook is fail-closed.
 * High severity: `increase(breakglass_request_transitions_total{transition="failed"}[5m]) > 0` after approval provisioning is enabled.
 * SLO: alert if the 99th percentile of

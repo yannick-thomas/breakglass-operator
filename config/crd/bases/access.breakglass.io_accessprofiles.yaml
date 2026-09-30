@@ -61,6 +61,16 @@ spec:
           spec:
             description: spec defines the desired state of AccessProfile
             properties:
+              deliveryMode:
+                default: SelfService
+                description: |-
+                  DeliveryMode chooses whether a human may create a direct self-service
+                  BreakGlassSession or must use the two-person request/approval workflow.
+                  Existing profiles default to SelfService for v1alpha1 compatibility.
+                enum:
+                - SelfService
+                - ApprovalRequired
+                type: string
               maxDuration:
                 description: |-
                   MaxDuration is the longest permitted session duration for this profile,

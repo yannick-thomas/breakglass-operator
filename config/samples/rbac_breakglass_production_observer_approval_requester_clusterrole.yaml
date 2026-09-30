@@ -1,0 +1,16 @@
+# Bind only to the approved on-call group. This role cannot create a direct
+# BreakGlassSession, RoleBinding, or approval decision. It deliberately omits
+# list/watch because cluster-scoped requests can expose another incident's
+# requester identity and reason.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-production-pod-observer-approval-requester
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglassrequests"]
+    verbs: ["create", "get"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer-approval"]
+    verbs: ["get", "use"]

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -29,13 +30,13 @@ import (
 )
 
 func TestRequestDefaulterOverwritesClientSuppliedIdentityAndProfileUID(t *testing.T) {
-	profile := testAccessProfile()
+	profile := testApprovalAccessProfile()
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
 	request := testBreakGlassRequest()
 	request.Spec.Requester.Name = "attacker@example.com"
 	request.Spec.AccessProfileUID = "forged"
 
-	defaulter := &BreakGlassRequestDefaulter{ProfileReader: reader}
+	defaulter := &BreakGlassRequestDefaulter{ProfileReader: reader, RequestTTL: 15 * time.Minute}
 	if err := defaulter.Default(requestContext("engineer@example.com"), request); err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
@@ -45,10 +46,13 @@ func TestRequestDefaulterOverwritesClientSuppliedIdentityAndProfileUID(t *testin
 	if request.Spec.AccessProfileUID != string(profile.UID) {
 		t.Fatalf("Default() accessProfileUID = %q, want %q", request.Spec.AccessProfileUID, profile.UID)
 	}
+	if request.Spec.RequestTTL != "15m0s" {
+		t.Fatalf("Default() requestTTL = %q, want 15m0s", request.Spec.RequestTTL)
+	}
 }
 
 func TestRequestValidatorEnforcesTheSessionProfileBoundary(t *testing.T) {
-	profile := testAccessProfile()
+	profile := testApprovalAccessProfile()
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
 
 	tests := []struct {
@@ -106,6 +110,7 @@ func TestRequestValidatorEnforcesTheSessionProfileBoundary(t *testing.T) {
 				ProfileReader:           reader,
 				Reviewer:                test.reviewer,
 				AllowedTargetNamespaces: test.allowed,
+				RequestTTL:              15 * time.Minute,
 			}
 			_, err := validator.ValidateCreate(requestContext("engineer@example.com"), request)
 			if test.wantErr == "" && err != nil {
@@ -119,7 +124,7 @@ func TestRequestValidatorEnforcesTheSessionProfileBoundary(t *testing.T) {
 }
 
 func TestRequestAdmissionMetricsRecordTerminalOutcomes(t *testing.T) {
-	profile := testAccessProfile()
+	profile := testApprovalAccessProfile()
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
 	recorder := &recordingAdmissionRecorder{}
 
@@ -127,6 +132,7 @@ func TestRequestAdmissionMetricsRecordTerminalOutcomes(t *testing.T) {
 		ProfileReader: reader,
 		Reviewer:      fakeReviewer{allowed: true},
 		Metrics:       recorder,
+		RequestTTL:    15 * time.Minute,
 	}
 	if _, err := validator.ValidateCreate(requestContext("engineer@example.com"), testBreakGlassRequest()); err != nil {
 		t.Fatalf("ValidateCreate() error = %v", err)
@@ -136,6 +142,7 @@ func TestRequestAdmissionMetricsRecordTerminalOutcomes(t *testing.T) {
 		ProfileReader: reader,
 		Reviewer:      fakeReviewer{allowed: false},
 		Metrics:       recorder,
+		RequestTTL:    15 * time.Minute,
 	}
 	if _, err := denied.ValidateCreate(requestContext("engineer@example.com"), testBreakGlassRequest()); err == nil {
 		t.Fatal("ValidateCreate() allowed an unauthorized profile use")
@@ -145,6 +152,7 @@ func TestRequestAdmissionMetricsRecordTerminalOutcomes(t *testing.T) {
 		ProfileReader: reader,
 		Reviewer:      fakeReviewer{err: errors.New("API unavailable")},
 		Metrics:       recorder,
+		RequestTTL:    15 * time.Minute,
 	}
 	if _, err := failing.ValidateCreate(requestContext("engineer@example.com"), testBreakGlassRequest()); err == nil {
 		t.Fatal("ValidateCreate() succeeded when authorization infrastructure failed")
@@ -170,9 +178,9 @@ func TestRequestAdmissionMetricsRecordTerminalOutcomes(t *testing.T) {
 }
 
 func TestRequestDefaulterFailsClosedForAWorkloadIdentity(t *testing.T) {
-	profile := testAccessProfile()
+	profile := testApprovalAccessProfile()
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
-	defaulter := &BreakGlassRequestDefaulter{ProfileReader: reader}
+	defaulter := &BreakGlassRequestDefaulter{ProfileReader: reader, RequestTTL: 15 * time.Minute}
 
 	err := defaulter.Default(requestContext("system:serviceaccount:production:deployer"), testBreakGlassRequest())
 	if err == nil || !strings.Contains(err.Error(), "service account") {
@@ -189,8 +197,15 @@ func testBreakGlassRequest() *accessv1alpha1.BreakGlassRequest {
 				Kind: accessv1alpha1.SubjectKindUser,
 				Name: "engineer@example.com",
 			},
-			Duration: "15m",
-			Reason:   "Investigating active production incident",
+			Duration:   "15m",
+			RequestTTL: "15m0s",
+			Reason:     "Investigating active production incident",
 		},
 	}
+}
+
+func testApprovalAccessProfile() *accessv1alpha1.AccessProfile {
+	profile := testAccessProfile()
+	profile.Spec.DeliveryMode = accessv1alpha1.AccessDeliveryModeApprovalRequired
+	return profile
 }

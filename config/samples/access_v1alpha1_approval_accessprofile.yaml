@@ -1,0 +1,17 @@
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: production-pod-observer-approval
+spec:
+  # A ClusterRole is still bound through one RoleBinding in this fixed
+  # namespace. ApprovalRequired changes who may initiate the grant, not its
+  # RBAC scope.
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m
+  deliveryMode: ApprovalRequired

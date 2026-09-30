@@ -627,6 +627,70 @@ func TestFindSessionsForAccessProfileUsesProfileFieldIndex(t *testing.T) {
 	}
 }
 
+func TestReconcileSuspendsAnActiveSessionWhenItsApprovalSourceDisappears(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Finalizers = []string{BreakGlassFinalizer}
+	session.Spec.RequestRef = &accessv1alpha1.BreakGlassRequestReference{Name: "incident-request", UID: "request-uid"}
+	profile, role := activationPolicyObjects()
+	profile.Spec.DeliveryMode = accessv1alpha1.AccessDeliveryModeApprovalRequired
+	request, approval := requestSourceObjects(session)
+	testClient := newTestClient(scheme, session, profile, role, request, approval)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+	key := client.ObjectKeyFromObject(session)
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("activate request-sourced session: %v", err)
+	}
+	active := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), key, active); err != nil {
+		t.Fatalf("get active request-sourced session: %v", err)
+	}
+	if active.Status.Phase != accessv1alpha1.PhaseActive || active.Status.BindingRef == nil {
+		t.Fatalf("active request-sourced session = %#v, want active session with binding reference", active.Status)
+	}
+
+	if err := testClient.Delete(context.Background(), request); err != nil {
+		t.Fatalf("delete source request: %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile after source request deletion: %v", err)
+	}
+
+	suspended := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), key, suspended); err != nil {
+		t.Fatalf("get suspended session: %v", err)
+	}
+	if suspended.Status.Phase != accessv1alpha1.PhaseSuspended {
+		t.Fatalf("session phase = %q, want %q", suspended.Status.Phase, accessv1alpha1.PhaseSuspended)
+	}
+	if !hasCondition(suspended.Status.Conditions, RequestSourceCondition, metav1.ConditionFalse, "RequestMissing") {
+		t.Fatalf("session conditions = %#v, want RequestMissing source condition", suspended.Status.Conditions)
+	}
+	if err := testClient.Get(context.Background(), types.NamespacedName{Name: active.Status.BindingRef.Name, Namespace: active.Status.BindingRef.Namespace}, &rbacv1.RoleBinding{}); err == nil {
+		t.Fatal("suspended request-sourced session left its RoleBinding behind")
+	}
+}
+
+func TestFindSessionsForBreakGlassRequestUsesSourceFieldIndex(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Spec.RequestRef = &accessv1alpha1.BreakGlassRequestReference{Name: "incident-request", UID: "request-uid"}
+	otherSession := testSession()
+	otherSession.Name = "unrelated-session"
+	otherSession.Spec.RequestRef = &accessv1alpha1.BreakGlassRequestReference{Name: "other-request", UID: "other-request-uid"}
+	reconciler := &BreakGlassSessionReconciler{Client: newTestClient(scheme, session, otherSession)}
+
+	requests := reconciler.findSessionsForBreakGlassRequest(context.Background(), &accessv1alpha1.BreakGlassRequest{ObjectMeta: metav1.ObjectMeta{Name: "incident-request"}})
+	if len(requests) != 1 || requests[0].Name != session.Name {
+		t.Fatalf("source request watch mapped %#v, want only %q", requests, session.Name)
+	}
+}
+
 func TestAccessProfileWatchPredicateSkipsStatusOnlyUpdates(t *testing.T) {
 	t.Parallel()
 
@@ -701,6 +765,38 @@ func testSession() *accessv1alpha1.BreakGlassSession {
 	}
 }
 
+func requestSourceObjects(session *accessv1alpha1.BreakGlassSession) (*accessv1alpha1.BreakGlassRequest, *accessv1alpha1.BreakGlassApproval) {
+	request := &accessv1alpha1.BreakGlassRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              session.Spec.RequestRef.Name,
+			UID:               types.UID(session.Spec.RequestRef.UID),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
+		},
+		Spec: accessv1alpha1.BreakGlassRequestSpec{
+			AccessProfile:    session.Spec.AccessProfile,
+			AccessProfileUID: session.Spec.AccessProfileUID,
+			Requester:        session.Spec.Subject,
+			Duration:         session.Spec.Duration,
+			RequestTTL:       "15m",
+			Reason:           session.Spec.Reason,
+		},
+		Status: accessv1alpha1.BreakGlassRequestStatus{
+			Phase:       accessv1alpha1.RequestPhaseSessionCreated,
+			ApprovalRef: &accessv1alpha1.BreakGlassObjectReference{Name: accessv1alpha1.ApprovalNameForRequestUID(session.Spec.RequestRef.UID), UID: "approval-uid"},
+			SessionRef:  &accessv1alpha1.BreakGlassObjectReference{Name: session.Name, UID: string(session.UID)},
+		},
+	}
+	approval := &accessv1alpha1.BreakGlassApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: request.Status.ApprovalRef.Name, UID: types.UID(request.Status.ApprovalRef.UID)},
+		Spec: accessv1alpha1.BreakGlassApprovalSpec{
+			RequestRef: accessv1alpha1.BreakGlassRequestReference{Name: request.Name, UID: string(request.UID)},
+			Decision:   accessv1alpha1.ApprovalDecisionApproved,
+			Approver:   accessv1alpha1.SubjectReference{Kind: accessv1alpha1.SubjectKindUser, Name: "approver@example.com"},
+		},
+	}
+	return request, approval
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -721,6 +817,7 @@ func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Clie
 		WithScheme(scheme).
 		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}, &accessv1alpha1.BreakGlassRequest{}).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
+		WithIndex(&accessv1alpha1.BreakGlassSession{}, requestSourceField, requestSourceNameIndex).
 		WithObjects(objects...).
 		Build()
 	return interceptor.NewClient(raw, interceptor.Funcs{
@@ -734,8 +831,9 @@ func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Clie
 }
 
 type recordingMetrics struct {
-	driftReasons      []breakglassmetrics.BindingDriftReason
-	curatedRoleDrifts []breakglassmetrics.CuratedRoleDriftReason
+	driftReasons          []breakglassmetrics.BindingDriftReason
+	curatedRoleDrifts     []breakglassmetrics.CuratedRoleDriftReason
+	requestSourceFailures []breakglassmetrics.RequestSourceIntegrityReason
 }
 
 func (r *recordingMetrics) RecordTransition(breakglassmetrics.LifecycleTransition, breakglassmetrics.Scope) {
@@ -747,6 +845,10 @@ func (r *recordingMetrics) RecordBindingDrift(reason breakglassmetrics.BindingDr
 
 func (r *recordingMetrics) RecordCuratedRoleDrift(reason breakglassmetrics.CuratedRoleDriftReason, _ breakglassmetrics.Scope) {
 	r.curatedRoleDrifts = append(r.curatedRoleDrifts, reason)
+}
+
+func (r *recordingMetrics) RecordRequestSourceIntegrity(reason breakglassmetrics.RequestSourceIntegrityReason, _ breakglassmetrics.Scope) {
+	r.requestSourceFailures = append(r.requestSourceFailures, reason)
 }
 
 func (r *recordingMetrics) RecordBindingOperation(breakglassmetrics.BindingOperation, breakglassmetrics.BindingOperationResult, breakglassmetrics.Scope) {

@@ -68,6 +68,11 @@ const (
 	// CuratedRoleCondition records whether the role rules and identity match the
 	// immutable snapshot taken before the binding was created.
 	CuratedRoleCondition = "CuratedRoleValid"
+	// RequestSourceCondition records whether a session created for the approval
+	// workflow still has its exact, independently verifiable request source.
+	// It is intentionally separate from binding integrity: a valid binding must
+	// still be removed when the request, decision, or their UID linkage fails.
+	RequestSourceCondition = "RequestSourceValid"
 
 	// DefaultBindingIntegrityCheckInterval bounds how long a missed RBAC watch
 	// event can leave an active session unchecked. It deliberately trades a
@@ -86,6 +91,10 @@ const (
 	// It keeps profile-policy changes proportional to the affected sessions,
 	// rather than scanning every BreakGlassSession in the cluster.
 	accessProfileField = ".spec.accessProfile"
+	// requestSourceField indexes approval-workflow sessions by the name of the
+	// immutable request they cite. The request UID is verified after retrieval;
+	// the name is only a cache index and never an authorization decision.
+	requestSourceField = ".spec.requestRef.name"
 
 	clusterRoleKind = "ClusterRole"
 	roleBindingKind = "RoleBinding"
@@ -132,6 +141,8 @@ func (r *BreakGlassSessionReconciler) policyReader() client.Reader {
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglasssessions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglasssessions/finalizers,verbs=update
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=accessprofiles,verbs=get;list;watch
+// +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassrequests,verbs=get;list;watch
+// +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassapprovals,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=breakglass-pod-observer,verbs=get;bind
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -195,6 +206,20 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	switch session.Status.Phase {
 	case accessv1alpha1.PhaseExpired, accessv1alpha1.PhaseDenied, accessv1alpha1.PhaseSuspended, accessv1alpha1.PhaseRevoked:
 		return ctrl.Result{}, nil
+	}
+
+	// Sessions from the approval workflow must continuously prove their source,
+	// not merely pass admission at creation time. This catches a request or its
+	// decision being deleted/recreated while the session is waiting to activate
+	// or already active. Direct self-service sessions have no request source.
+	if session.Spec.RequestRef != nil {
+		sourceIssue, err := r.verifyRequestSource(ctx, session)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if sourceIssue != nil {
+			return r.suspendForRequestSource(ctx, session, sourceIssue)
+		}
 	}
 
 	// 5. Active lifecycle, including periodic binding integrity verification.
@@ -266,6 +291,9 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingVerified", "The emergency access binding identity and content were verified")
 	r.setAccessProfileCondition(session, metav1.ConditionTrue, "AccessProfileVerified", "The immutable AccessProfile snapshot was verified")
 	r.setCuratedRoleCondition(session, metav1.ConditionTrue, "CuratedRoleVerified", "The curated ClusterRole identity and rules were verified")
+	if session.Spec.RequestRef != nil {
+		r.setRequestSourceCondition(session, metav1.ConditionTrue, "RequestSourceVerified", "The approved request source and immutable decision were verified")
+	}
 
 	targetDesc := fmt.Sprintf("namespace %q", grant.TargetNamespace)
 
@@ -483,6 +511,177 @@ func (r *BreakGlassSessionReconciler) validateSession(session *accessv1alpha1.Br
 	return duration, nil
 }
 
+// requestSourceIssue describes a semantic failure in the approval-workflow
+// provenance of a session. It deliberately contains no object names, users,
+// or incident reasons so it can be converted to a bounded metric reason.
+type requestSourceIssue struct {
+	Code            string
+	ConditionReason string
+	Message         string
+}
+
+// verifyRequestSource re-checks every persisted link in the approval path
+// using direct API reads. It is required before a request-sourced session can
+// first create a binding and on every later active integrity check.
+//
+// A request's deadline is a decision deadline, not an active-session TTL. It
+// is enforced until the session is active; otherwise a manager outage could
+// turn an expired request into a late grant. Once active, the session's own
+// immutable expiry remains the authority for the temporary RoleBinding.
+func (r *BreakGlassSessionReconciler) verifyRequestSource(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*requestSourceIssue, error) {
+	ref := session.Spec.RequestRef
+	if ref == nil || ref.Name == "" || ref.UID == "" {
+		return &requestSourceIssue{
+			Code:            "request_reference",
+			ConditionReason: "RequestReferenceInvalid",
+			Message:         "the approval-workflow session has no complete immutable request reference",
+		}, nil
+	}
+
+	request := &accessv1alpha1.BreakGlassRequest{}
+	if err := r.policyReader().Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
+		if apierrors.IsNotFound(err) {
+			return &requestSourceIssue{
+				Code:            "request_missing",
+				ConditionReason: "RequestMissing",
+				Message:         "the approved source request no longer exists",
+			}, nil
+		}
+		return nil, err
+	}
+	if string(request.UID) != ref.UID {
+		return &requestSourceIssue{
+			Code:            "request_uid_mismatch",
+			ConditionReason: "RequestUIDMismatch",
+			Message:         "a different request object now uses the recorded source request name",
+		}, nil
+	}
+	if request.Spec.AccessProfile != session.Spec.AccessProfile ||
+		request.Spec.AccessProfileUID != session.Spec.AccessProfileUID ||
+		request.Spec.Requester != session.Spec.Subject ||
+		request.Spec.Duration != session.Spec.Duration ||
+		request.Spec.Reason != session.Spec.Reason {
+		return &requestSourceIssue{
+			Code:            "request_content_mismatch",
+			ConditionReason: "RequestContentMismatch",
+			Message:         "the session fields differ from the immutable approved request",
+		}, nil
+	}
+
+	if request.Status.SessionRef == nil || request.Status.SessionRef.Name != session.Name {
+		return &requestSourceIssue{
+			Code:            "session_reservation_mismatch",
+			ConditionReason: "SessionReservationMismatch",
+			Message:         "the source request does not reserve this session name",
+		}, nil
+	}
+	switch request.Status.Phase {
+	case accessv1alpha1.RequestPhaseProvisioning:
+		// Creation and the subsequent request-status write are separate API
+		// operations. During that short recovery-safe window the reservation may
+		// not yet contain the server-assigned session UID.
+		if request.Status.SessionRef.UID != "" && request.Status.SessionRef.UID != string(session.UID) {
+			return &requestSourceIssue{
+				Code:            "session_uid_mismatch",
+				ConditionReason: "SessionUIDMismatch",
+				Message:         "the request reservation cites a different session object",
+			}, nil
+		}
+	case accessv1alpha1.RequestPhaseSessionCreated:
+		if request.Status.SessionRef.UID == "" || request.Status.SessionRef.UID != string(session.UID) {
+			return &requestSourceIssue{
+				Code:            "session_uid_mismatch",
+				ConditionReason: "SessionUIDMismatch",
+				Message:         "the source request does not cite this server-assigned session UID",
+			}, nil
+		}
+	default:
+		return &requestSourceIssue{
+			Code:            "request_phase",
+			ConditionReason: "RequestNotProvisioned",
+			Message:         "the source request is not in a session-provisioned lifecycle phase",
+		}, nil
+	}
+
+	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
+	if err != nil || requestTTL <= 0 {
+		return &requestSourceIssue{
+			Code:            "request_ttl_invalid",
+			ConditionReason: "RequestTTLInvalid",
+			Message:         "the immutable source request has no valid positive request TTL",
+		}, nil
+	}
+	if session.Status.ExpiresAt == nil && !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
+		return &requestSourceIssue{
+			Code:            "request_expired",
+			ConditionReason: "RequestExpired",
+			Message:         "the source request expired before this session became active",
+		}, nil
+	}
+
+	approvalRef := request.Status.ApprovalRef
+	if approvalRef == nil || approvalRef.Name != accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)) || approvalRef.UID == "" {
+		return &requestSourceIssue{
+			Code:            "approval_reference",
+			ConditionReason: "ApprovalReferenceInvalid",
+			Message:         "the source request has no complete deterministic approval reference",
+		}, nil
+	}
+	approval := &accessv1alpha1.BreakGlassApproval{}
+	if err := r.policyReader().Get(ctx, client.ObjectKey{Name: approvalRef.Name}, approval); err != nil {
+		if apierrors.IsNotFound(err) {
+			return &requestSourceIssue{
+				Code:            "approval_missing",
+				ConditionReason: "ApprovalMissing",
+				Message:         "the source request approval no longer exists",
+			}, nil
+		}
+		return nil, err
+	}
+	if string(approval.UID) != approvalRef.UID {
+		return &requestSourceIssue{
+			Code:            "approval_uid_mismatch",
+			ConditionReason: "ApprovalUIDMismatch",
+			Message:         "a different approval object now uses the recorded decision name",
+		}, nil
+	}
+	if approval.Spec.RequestRef.Name != request.Name || approval.Spec.RequestRef.UID != string(request.UID) ||
+		approval.Spec.Decision != accessv1alpha1.ApprovalDecisionApproved ||
+		approval.Spec.Approver.Kind != accessv1alpha1.SubjectKindUser ||
+		approval.Spec.Approver.Name == "" || approval.Spec.Approver.Name == request.Spec.Requester.Name {
+		return &requestSourceIssue{
+			Code:            "approval_invalid",
+			ConditionReason: "ApprovalInvalid",
+			Message:         "the source request approval is not an independent approved decision",
+		}, nil
+	}
+	return nil, nil
+}
+
+func (r *BreakGlassSessionReconciler) suspendForRequestSource(ctx context.Context, session *accessv1alpha1.BreakGlassSession, issue *requestSourceIssue) (ctrl.Result, error) {
+	cleanup, err := r.cleanupBindingWithResult(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if issue == nil {
+		issue = &requestSourceIssue{Code: "source_unknown", ConditionReason: "RequestSourceUnknown", Message: "the approval-workflow session source could not be verified"}
+	}
+
+	session.Status.Phase = accessv1alpha1.PhaseSuspended
+	r.setAccessGrantedCondition(session, metav1.ConditionFalse, "RequestSourceInvalid", "Emergency access was suspended because its approval-workflow source failed verification")
+	r.setRequestSourceCondition(session, metav1.ConditionFalse, issue.ConditionReason, issue.Message)
+	r.setCleanupIntegrityCondition(session, cleanup)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(session, corev1.EventTypeWarning, "RequestSourceInvalid", "Emergency access suspended because its approval-workflow source failed verification: %s", issue.Code)
+	}
+	if err := r.Status().Update(ctx, session); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.recordTransition(breakglassmetrics.TransitionSuspended, session)
+	r.recordRequestSourceIntegrity(issue, session)
+	return ctrl.Result{}, nil
+}
+
 // requestDeniedError identifies a semantic request failure that should be
 // persisted as Denied instead of retried. API connectivity failures are not
 // wrapped in this type and remain retryable.
@@ -525,6 +724,12 @@ func (r *BreakGlassSessionReconciler) resolveAccessGrant(ctx context.Context, se
 	if err != nil {
 		return nil, 0, denyRequest(err)
 	}
+	if session.Spec.RequestRef == nil && profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeSelfService {
+		return nil, 0, denyRequest(fmt.Errorf("AccessProfile %q requires the approval workflow", profile.Name))
+	}
+	if session.Spec.RequestRef != nil && profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+		return nil, 0, denyRequest(fmt.Errorf("AccessProfile %q does not authorize a controller-sourced approval workflow session", profile.Name))
+	}
 	if duration > maxDuration {
 		return nil, 0, denyRequest(fmt.Errorf("duration %s exceeds AccessProfile maximum of %s", duration, maxDuration))
 	}
@@ -563,6 +768,9 @@ func validateAccessProfile(profile *accessv1alpha1.AccessProfile) (time.Duration
 	maxDuration, err := time.ParseDuration(profile.Spec.MaxDuration)
 	if err != nil || maxDuration <= 0 {
 		return 0, fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", profile.Name)
+	}
+	if mode := profile.Spec.EffectiveDeliveryMode(); mode != accessv1alpha1.AccessDeliveryModeSelfService && mode != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+		return 0, fmt.Errorf("AccessProfile %q has an unsupported delivery mode", profile.Name)
 	}
 	return maxDuration, nil
 }
@@ -624,6 +832,20 @@ func (r *BreakGlassSessionReconciler) setCuratedRoleCondition(
 ) {
 	meta.SetStatusCondition(&session.Status.Conditions, metav1.Condition{
 		Type:               CuratedRoleCondition,
+		Status:             status,
+		ObservedGeneration: session.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+}
+
+func (r *BreakGlassSessionReconciler) setRequestSourceCondition(
+	session *accessv1alpha1.BreakGlassSession,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
+	meta.SetStatusCondition(&session.Status.Conditions, metav1.Condition{
+		Type:               RequestSourceCondition,
 		Status:             status,
 		ObservedGeneration: session.Generation,
 		Reason:             reason,
@@ -710,6 +932,44 @@ func (r *BreakGlassSessionReconciler) recordCuratedRoleDrift(issue *curatedRoleI
 	r.Metrics.RecordCuratedRoleDrift(reason, SessionScope(session))
 }
 
+func (r *BreakGlassSessionReconciler) recordRequestSourceIntegrity(issue *requestSourceIssue, session *accessv1alpha1.BreakGlassSession) {
+	if r.Metrics == nil || issue == nil {
+		return
+	}
+	var reason breakglassmetrics.RequestSourceIntegrityReason
+	switch issue.Code {
+	case "request_reference":
+		reason = breakglassmetrics.RequestSourceReference
+	case "request_missing":
+		reason = breakglassmetrics.RequestSourceMissing
+	case "request_uid_mismatch":
+		reason = breakglassmetrics.RequestSourceUIDMismatch
+	case "request_content_mismatch":
+		reason = breakglassmetrics.RequestSourceContentMismatch
+	case "session_reservation_mismatch":
+		reason = breakglassmetrics.RequestSourceReservationMismatch
+	case "session_uid_mismatch":
+		reason = breakglassmetrics.RequestSourceSessionUIDMismatch
+	case "request_phase":
+		reason = breakglassmetrics.RequestSourcePhase
+	case "request_ttl_invalid":
+		reason = breakglassmetrics.RequestSourceTTLInvalid
+	case "request_expired":
+		reason = breakglassmetrics.RequestSourceExpired
+	case "approval_reference":
+		reason = breakglassmetrics.RequestSourceApprovalReference
+	case "approval_missing":
+		reason = breakglassmetrics.RequestSourceApprovalMissing
+	case "approval_uid_mismatch":
+		reason = breakglassmetrics.RequestSourceApprovalUIDMismatch
+	case "approval_invalid":
+		reason = breakglassmetrics.RequestSourceApprovalInvalid
+	default:
+		reason = breakglassmetrics.RequestSourceUnknown
+	}
+	r.Metrics.RecordRequestSourceIntegrity(reason, SessionScope(session))
+}
+
 func curatedRoleRulesHash(rules []rbacv1.PolicyRule) string {
 	canonicalRules := make([]rbacv1.PolicyRule, len(rules))
 	for i, rule := range rules {
@@ -760,6 +1020,12 @@ func (r *BreakGlassSessionReconciler) verifyAccessProfile(ctx context.Context, s
 	}
 	if profile.Spec.RoleRef != grant.RoleRef || profile.Spec.TargetNamespace != grant.TargetNamespace {
 		return &accessProfileIssue{ConditionReason: "AccessProfilePolicyDrift", Message: "the AccessProfile policy differs from the resolved session snapshot"}, nil
+	}
+	if session.Spec.RequestRef == nil && profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeSelfService {
+		return &accessProfileIssue{ConditionReason: "AccessProfileDeliveryModeDrift", Message: "the profile no longer permits a direct self-service session"}, nil
+	}
+	if session.Spec.RequestRef != nil && profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+		return &accessProfileIssue{ConditionReason: "AccessProfileDeliveryModeDrift", Message: "the profile no longer permits an approval-workflow session"}, nil
 	}
 	return nil, nil
 }
@@ -1246,6 +1512,9 @@ func (r *BreakGlassSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex); err != nil {
 		return fmt.Errorf("index BreakGlassSessions by AccessProfile: %w", err)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.BreakGlassSession{}, requestSourceField, requestSourceNameIndex); err != nil {
+		return fmt.Errorf("index BreakGlassSessions by request source: %w", err)
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&accessv1alpha1.BreakGlassSession{}).
@@ -1261,6 +1530,14 @@ func (r *BreakGlassSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			// enabled so a newly available or deleted policy is handled promptly.
 			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
+		Watches(
+			&accessv1alpha1.BreakGlassRequest{},
+			handler.EnqueueRequestsFromMapFunc(r.findSessionsForBreakGlassRequest),
+		).
+		Watches(
+			&accessv1alpha1.BreakGlassApproval{},
+			handler.EnqueueRequestsFromMapFunc(r.findSessionsForBreakGlassApproval),
+		).
 		Named("breakglasssession").
 		Complete(r)
 }
@@ -1271,6 +1548,14 @@ func accessProfileNameIndex(obj client.Object) []string {
 		return nil
 	}
 	return []string{session.Spec.AccessProfile}
+}
+
+func requestSourceNameIndex(obj client.Object) []string {
+	session, ok := obj.(*accessv1alpha1.BreakGlassSession)
+	if !ok || session.Spec.RequestRef == nil || session.Spec.RequestRef.Name == "" {
+		return nil
+	}
+	return []string{session.Spec.RequestRef.Name}
 }
 
 func (r *BreakGlassSessionReconciler) findSessionsForAccessProfile(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -1284,6 +1569,34 @@ func (r *BreakGlassSessionReconciler) findSessionsForAccessProfile(ctx context.C
 		return nil
 	}
 	requests := make([]ctrl.Request, 0)
+	for i := range sessions.Items {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&sessions.Items[i])})
+	}
+	return requests
+}
+
+func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassRequest(ctx context.Context, obj client.Object) []ctrl.Request {
+	request, ok := obj.(*accessv1alpha1.BreakGlassRequest)
+	if !ok || request.Name == "" {
+		return nil
+	}
+	return r.sessionsForRequestSourceName(ctx, request.Name)
+}
+
+func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassApproval(ctx context.Context, obj client.Object) []ctrl.Request {
+	approval, ok := obj.(*accessv1alpha1.BreakGlassApproval)
+	if !ok || approval.Spec.RequestRef.Name == "" {
+		return nil
+	}
+	return r.sessionsForRequestSourceName(ctx, approval.Spec.RequestRef.Name)
+}
+
+func (r *BreakGlassSessionReconciler) sessionsForRequestSourceName(ctx context.Context, requestName string) []ctrl.Request {
+	sessions := &accessv1alpha1.BreakGlassSessionList{}
+	if err := r.List(ctx, sessions, client.MatchingFields{requestSourceField: requestName}); err != nil {
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(sessions.Items))
 	for i := range sessions.Items {
 		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&sessions.Items[i])})
 	}

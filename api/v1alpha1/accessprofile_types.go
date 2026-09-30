@@ -21,6 +21,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// AccessDeliveryMode controls the only permitted path by which a profile may
+// create a session. It prevents a two-person approval policy from being
+// silently bypassed through the direct self-service API.
+// +kubebuilder:validation:Enum=SelfService;ApprovalRequired
+type AccessDeliveryMode string
+
+const (
+	AccessDeliveryModeSelfService      AccessDeliveryMode = "SelfService"
+	AccessDeliveryModeApprovalRequired AccessDeliveryMode = "ApprovalRequired"
+)
+
 // AccessProfileSpec is an administrator-owned, fixed access policy.
 //
 // Each profile deliberately resolves to one namespaced RBAC grant.  A requester
@@ -49,6 +60,23 @@ type AccessProfileSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
 	MaxDuration string `json:"maxDuration"`
+
+	// DeliveryMode chooses whether a human may create a direct self-service
+	// BreakGlassSession or must use the two-person request/approval workflow.
+	// Existing profiles default to SelfService for v1alpha1 compatibility.
+	// +optional
+	// +kubebuilder:default=SelfService
+	DeliveryMode AccessDeliveryMode `json:"deliveryMode,omitempty"`
+}
+
+// EffectiveDeliveryMode treats an omitted field from a pre-existing v1alpha1
+// profile as SelfService. Admission still rejects any non-enum value so an
+// unavailable or malformed policy cannot become an approval bypass.
+func (s AccessProfileSpec) EffectiveDeliveryMode() AccessDeliveryMode {
+	if s.DeliveryMode == "" {
+		return AccessDeliveryModeSelfService
+	}
+	return s.DeliveryMode
 }
 
 // AccessProfileStatus reports whether the policy can be activated by this

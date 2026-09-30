@@ -68,6 +68,7 @@ func main() {
 	var enableLeaderElection bool
 	var maxSessionDuration time.Duration
 	var requestTTL time.Duration
+	var requestControllerUsername string
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -83,6 +84,8 @@ func main() {
 		"Maximum lifetime allowed for a BreakGlassSession. Set to 0 to disable the controller-side limit.")
 	flag.DurationVar(&requestTTL, "request-ttl", 15*time.Minute,
 		"Maximum time a BreakGlassRequest may await a decision. Must be greater than zero.")
+	flag.StringVar(&requestControllerUsername, "request-controller-username", "",
+		"Exact Kubernetes username allowed to create a session sourced from an approved BreakGlassRequest. Empty disables request provisioning.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -245,9 +248,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.BreakGlassRequestReconciler{
-		Client:     mgr.GetClient(),
-		RequestTTL: requestTTL,
-		Metrics:    breakglassmetrics.DefaultRecorder,
+		Client:                    mgr.GetClient(),
+		Metrics:                   breakglassmetrics.DefaultRecorder,
+		RequestControllerUsername: requestControllerUsername,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "breakglassrequest")
 		os.Exit(1)
@@ -256,12 +259,16 @@ func main() {
 		setupLog.Error(err, "Failed to register BreakGlass session metrics")
 		os.Exit(1)
 	}
-	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(mgr, allowedTargetNamespaces); err != nil {
+	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(mgr, allowedTargetNamespaces, requestControllerUsername); err != nil {
 		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
 		os.Exit(1)
 	}
-	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(mgr, allowedTargetNamespaces); err != nil {
+	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(mgr, allowedTargetNamespaces, requestTTL); err != nil {
 		setupLog.Error(err, "unable to create BreakGlassRequest webhook")
+		os.Exit(1)
+	}
+	if err := webhookv1alpha1.SetupBreakGlassApprovalWebhookWithManager(mgr, allowedTargetNamespaces); err != nil {
+		setupLog.Error(err, "unable to create BreakGlassApproval webhook")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

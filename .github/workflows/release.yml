@@ -7,9 +7,13 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: Publish signed-reference installer assets
+    name: Promote the previously gated image and publish installer assets
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,20 +24,42 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+          fetch-depth: 0
+      - name: Require a tag commit already merged to main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: image
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ env.IMAGE_REPOSITORY }}:${{ github.ref_name }}
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists" >&2
+            exit 1
+          fi
+      - name: Resolve the image built by the gated main CI
+        id: image
+        run: |
+          digest="$(docker buildx imagetools inspect "${IMAGE_REPOSITORY}:sha-${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          case "${digest}" in
+            sha256:*) echo "digest=${digest}" >> "${GITHUB_OUTPUT}" ;;
+            *) echo "Could not resolve a manifest-list digest for the gated source image" >&2; exit 1 ;;
+          esac
+      - name: Promote the exact multi-architecture manifest list
+        run: |
+          docker buildx imagetools create \
+            --tag "${IMAGE_REPOSITORY}:${GITHUB_REF_NAME}" \
+            "${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}"
       - name: Render digest-pinned installers
         run: |
           make build-installers IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}"

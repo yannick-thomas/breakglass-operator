@@ -94,6 +94,24 @@ spec:
                 maxLength: 1024
                 minLength: 5
                 type: string
+              requestRef:
+                description: |-
+                  RequestRef is present only for the approval workflow. The session webhook
+                  accepts it only from the configured request controller after it verifies
+                  the exact request UID, approval state, deadline, and reserved session
+                  name. Self-service users cannot set this field.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
               revoked:
                 description: Revoked allows manual revocation before the duration
                   expires.
@@ -144,6 +162,8 @@ spec:
               rule: self.duration == oldSelf.duration
             - message: reason is immutable
               rule: self.reason == oldSelf.reason
+            - message: requestRef is immutable
+              rule: self.requestRef == oldSelf.requestRef
             - message: revoked cannot be changed from true to false
               rule: '!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked)
                 && self.revoked)'

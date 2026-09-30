@@ -44,6 +44,8 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	recorder.RecordBindingDrift(BindingDriftReason("INC-1092"), Scope("production-payments"))
 	recorder.RecordCuratedRoleDrift(CuratedRoleRulesHash, ScopeNamespaced)
 	recorder.RecordCuratedRoleDrift(CuratedRoleDriftReason("breakglass-pod-observer"), Scope("production-payments"))
+	recorder.RecordRequestSourceIntegrity(RequestSourceMissing, ScopeNamespaced)
+	recorder.RecordRequestSourceIntegrity(RequestSourceIntegrityReason("incident-db-approval"), Scope("production-payments"))
 	recorder.RecordBindingOperation(BindingOperationGrant, BindingOperationSuccess, ScopeNamespaced)
 	recorder.RecordBindingOperation(BindingOperation("breakglass-engineer@example.com"), BindingOperationResult("failed: forbidden"), Scope("production-payments"))
 	recorder.ObserveExpiryCleanupLag(ScopeNamespaced, -time.Second)
@@ -67,6 +69,14 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	assertMetricValue(t, registry, "breakglass_curated_role_drift_total", map[string]string{
 		metricLabelReason: string(CuratedRoleRulesHash),
 		metricLabelScope:  string(ScopeNamespaced),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_request_source_integrity_failures_total", map[string]string{
+		metricLabelReason: string(RequestSourceMissing),
+		metricLabelScope:  string(ScopeNamespaced),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_request_source_integrity_failures_total", map[string]string{
+		metricLabelReason: string(RequestSourceUnknown),
+		metricLabelScope:  string(ScopeUnknown),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_curated_role_drift_total", map[string]string{
 		metricLabelReason: string(CuratedRoleUnknown),
@@ -284,17 +294,30 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(RequestTransitionFailed):         true,
 		},
 		metricLabelReason: {
-			string(DriftMissing):               true,
-			string(DriftOwnership):             true,
-			string(DriftUIDMismatch):           true,
-			string(DriftRoleRef):               true,
-			string(DriftSubjects):              true,
-			string(DriftBindingReference):      true,
-			string(DriftMissingExpiry):         true,
-			string(DriftIntegrityUnknown):      true,
-			string(DriftUnknown):               true,
-			string(CuratedRoleRulesHash):       true,
-			string(CuratedRoleSnapshotMissing): true,
+			string(DriftMissing):                     true,
+			string(DriftOwnership):                   true,
+			string(DriftUIDMismatch):                 true,
+			string(DriftRoleRef):                     true,
+			string(DriftSubjects):                    true,
+			string(DriftBindingReference):            true,
+			string(DriftMissingExpiry):               true,
+			string(DriftIntegrityUnknown):            true,
+			string(DriftUnknown):                     true,
+			string(CuratedRoleRulesHash):             true,
+			string(CuratedRoleSnapshotMissing):       true,
+			string(RequestSourceReference):           true,
+			string(RequestSourceMissing):             true,
+			string(RequestSourceUIDMismatch):         true,
+			string(RequestSourceContentMismatch):     true,
+			string(RequestSourceReservationMismatch): true,
+			string(RequestSourceSessionUIDMismatch):  true,
+			string(RequestSourcePhase):               true,
+			string(RequestSourceTTLInvalid):          true,
+			string(RequestSourceExpired):             true,
+			string(RequestSourceApprovalReference):   true,
+			string(RequestSourceApprovalMissing):     true,
+			string(RequestSourceApprovalUIDMismatch): true,
+			string(RequestSourceApprovalInvalid):     true,
 		},
 		metricLabelOperation: {
 			string(BindingOperationGrant):    true,

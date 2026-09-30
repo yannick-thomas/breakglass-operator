@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# A newer commit or pull-request update makes any older run obsolete. Cancelling
+# it before Kind and multi-architecture work begins saves the largest runner
+# cost without weakening the checks performed for the newest revision.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    name: Verify Go module metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Verify module metadata without modifying the checkout
+        run: make verify-dependencies
+
+  lint:
+    name: Lint
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check linter configuration
+        run: make lint-config
+      - name: Run linter
+        run: make lint
+
+  test:
+    name: Unit and integration tests
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Run tests
+        run: make test
+
+  verify-manifests:
+    name: Render and verify installation profiles
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Render and verify manifests
+        run: make verify-manifests
+
+  test-e2e:
+    name: E2E on Kind
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Set up Kind
+        uses: ./.github/actions/setup-kind
+      - name: Run E2E tests
+        run: make test-e2e
+
+  test-e2e-production:
+    name: Production E2E on Kind workers
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Set up Kind
+        uses: ./.github/actions/setup-kind
+      - name: Run production E2E tests
+        run: make test-e2e-production
+
+  package:
+    name: Publish image and rendered installers
+    needs: [lint, test, verify-manifests, test-e2e, test-e2e-production]
+    # Publishing is deliberately a post-gate action. Pull requests never get a
+    # registry token or a Buildx cache write; manual runs are restricted to
+    # main as well.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/breakglass-operator
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Enable amd64 and arm64 image builds
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish the manager image
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=breakglass-operator-main
+          cache-to: type=gha,mode=max,scope=breakglass-operator-main
+      - name: Render immutable installers
+        run: |
+          make build-installers IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}"
+          printf '%s\n' \
+            '# BreakGlass Operator installer bundle' \
+            '' \
+            "Manager image: ${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}" \
+            '' \
+            'Choose exactly one profile:' \
+            '- `install.yaml`: default secure installation.' \
+            '- `install-production.yaml`: high-availability cluster-wide production installation.' \
+            '- `install-production-namespaced.yaml`: high-assurance production installation restricted to the `production` target namespace.' \
+            '' \
+            'Prerequisites:' \
+            '- cert-manager must already be installed and ready; this bundle intentionally does not install a cluster-wide cert-manager dependency.' \
+            '- The namespaced profile deliberately does not create the application namespace. Before using it, create or verify the approved `production` namespace.' \
+            '' \
+            'Preflight commands:' \
+            '`kubectl get crd certificates.cert-manager.io`' \
+            '`kubectl get namespace production`' \
+            '' \
+            'Install with, for example:' \
+            '`kubectl apply -f install-production-namespaced.yaml`' \
+            > dist/README.md
+      - name: Upload installer bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: breakglass-operator-install-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

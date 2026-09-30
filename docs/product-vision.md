@@ -72,24 +72,24 @@ second access-control path.
 | --- | --- | --- |
 | Now | Profile-gated, namespaced JIT RoleBinding with UID-safe cleanup and bounded telemetry | `AccessProfile` + `BreakGlassSession` |
 | Trustworthy operation | Namespace-scoped manager RBAC, curated-role integrity, E2E failure tests, release provenance, audit/runbooks | No new CRD |
-| Governed access | Request/approval separation, expiry before approval, no self-approval, policy preview | `BreakGlassRequest`; optional append-only approval type only if native approval is needed |
+| Governed access | Request/approval separation, expiry before approval, no self-approval, and one UID-bound session reservation | `BreakGlassRequest` + append-only `BreakGlassApproval` |
 | Human workflow | `kubectl breakglass`, ChatOps adapters, incident/ticket verification, on-call routing | Clients consume the request workflow; no second grant API |
 | Identity convergence | Short-lived OIDC/cloud credentials, verified risk signals, cloud-IAM correlation | Separate identity integrations; do not overload a RoleBinding CRD |
 
-## The next CRD—only when the foundation is proven
+## Governed access—implemented as one grant path
 
-`BreakGlassRequest` is the next justified domain object. It separates an
+`BreakGlassRequest` separates an
 untrusted request from an active grant and records immutable requester,
 profile UID, requested duration, reason, and decision lifecycle:
 
 ```text
-Pending → Approved → SessionCreated → Expired
-       ↘ Denied
+Pending → Approved → Provisioning → SessionCreated
+       ↘ Denied | Expired | Failed
 ```
 
 The controller—not an approver or ChatOps callback—creates the resulting
 session. An approval decision must be idempotent, non-self-approved, time
-bounded, and auditable. A separate `ApprovalPolicy` is premature until teams
+bounded, UID-bound, and auditable. A separate `ApprovalPolicy` is premature until teams
 demonstrably share approval/quorum semantics; configuration CRDs should follow
 real policy reuse, not anticipated complexity.
 

@@ -109,7 +109,7 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	err = SetupBreakGlassSessionWebhookWithManager(mgr, nil)
+	err = SetupBreakGlassSessionWebhookWithManager(mgr, nil, "")
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:webhook

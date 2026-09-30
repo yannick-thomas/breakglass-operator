@@ -1,0 +1,132 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: breakglassapprovals.access.breakglass.io
+spec:
+  group: access.breakglass.io
+  names:
+    kind: BreakGlassApproval
+    listKind: BreakGlassApprovalList
+    plural: breakglassapprovals
+    shortNames:
+    - bga
+    singular: breakglassapproval
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Approved request
+      jsonPath: .spec.requestRef.name
+      name: Request
+      type: string
+    - description: Immutable decision
+      jsonPath: .spec.decision
+      name: Decision
+      type: string
+    - description: Authenticated approver
+      jsonPath: .spec.approver.name
+      name: Approver
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              BreakGlassApprovalSpec is an append-only, authenticated approval decision.
+              The webhook stamps Approver from Kubernetes admission identity and verifies
+              RequestRef against the current request UID and expiry.
+            properties:
+              approver:
+                description: |-
+                  Approver is overwritten by the mutating webhook from the authenticated
+                  Kubernetes user. A requester can never nominate a different approver.
+                properties:
+                  kind:
+                    description: Kind of the subject (User, Group, ServiceAccount)
+                    enum:
+                    - User
+                    - Group
+                    - ServiceAccount
+                    type: string
+                  name:
+                    description: Name of the subject (e.g. email, username, serviceaccount
+                      name)
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the subject (only relevant when Kind
+                      is ServiceAccount)
+                    maxLength: 63
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              comment:
+                description: |-
+                  Comment is optional audit context. It must never contain credentials or
+                  be used as a Prometheus label.
+                maxLength: 1024
+                type: string
+              decision:
+                description: ApprovalDecision is an immutable human decision on a
+                  request.
+                enum:
+                - Approved
+                - Denied
+                type: string
+              requestRef:
+                description: |-
+                  BreakGlassRequestReference identifies one immutable request instance. The
+                  UID prevents a delete/recreate under the same name from being approved or
+                  provisioned by mistake.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+            required:
+            - approver
+            - decision
+            - requestRef
+            type: object
+            x-kubernetes-validations:
+            - message: BreakGlassApproval spec is immutable
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

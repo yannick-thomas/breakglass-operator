@@ -2,7 +2,10 @@
 resources:
 - rbac_breakglass_pod_observer_clusterrole.yaml
 - rbac_breakglass_production_observer_requester_clusterrole.yaml
+- rbac_breakglass_production_observer_approval_requester_clusterrole.yaml
+- rbac_breakglass_production_observer_approver_clusterrole.yaml
 - rbac_breakglass_auditor_clusterrole.yaml
 - access_v1alpha1_breakglasssession.yaml
 - access_v1alpha1_accessprofile.yaml
+- access_v1alpha1_approval_accessprofile.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

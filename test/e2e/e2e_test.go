@@ -54,7 +54,12 @@ const (
 	e2eRequesterRole          = "breakglass-e2e-requester"
 	e2eRequesterRoleBinding   = "breakglass-e2e-requester-binding"
 	e2eRequesterUser          = "e2e-requester"
+	e2eApproverRole           = "breakglass-e2e-approver"
+	e2eApproverRoleBinding    = "breakglass-e2e-approver-binding"
+	e2eApproverUser           = "e2e-approver"
 	e2eSessionName            = "e2e-short-lived-session"
+	e2eApprovalRequestName    = "e2e-approved-request"
+	e2eApprovalProfile        = "production-pod-observer-approval"
 	productionObserverProfile = "production-pod-observer"
 )
 
@@ -98,6 +103,20 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply curated access policy")
 		}
+		_, err = applyManifest(`
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  name: production-pod-observer-approval
+spec:
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m
+  deliveryMode: ApprovalRequired
+`)
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply approval-required access policy")
 
 		By("granting explicit test identities the least privilege required for the flow")
 		_, err = applyManifest(`
@@ -111,8 +130,11 @@ rules:
     verbs: ["create", "get", "list", "watch"]
   - apiGroups: ["access.breakglass.io"]
     resources: ["accessprofiles"]
-    resourceNames: ["production-pod-observer"]
+    resourceNames: ["production-pod-observer", "production-pod-observer-approval"]
     verbs: ["use"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglassrequests"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -125,6 +147,32 @@ roleRef:
 subjects:
   - kind: User
     name: e2e-requester
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-e2e-approver
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglassapprovals"]
+    verbs: ["create"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer-approval"]
+    verbs: ["approve"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: breakglass-e2e-approver-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-e2e-approver
+subjects:
+  - kind: User
+    name: e2e-approver
     apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -158,15 +206,19 @@ subjects:
 		By("cleaning up breakglass e2e policy")
 		cmd := exec.Command("kubectl", "delete", "breakglasssession", e2eSessionName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eRequesterRoleBinding, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eApproverRoleBinding, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eDeniedCreatorBinding, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "clusterrole", e2eRequesterRole, e2eDeniedCreatorRole, "breakglass-pod-observer", "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "clusterrole", e2eRequesterRole, e2eApproverRole, e2eDeniedCreatorRole, "breakglass-pod-observer", "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "accessprofile", productionObserverProfile, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "accessprofile", productionObserverProfile, e2eApprovalProfile, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -492,6 +544,104 @@ spec:
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("Expired"))
+				cmd = exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
+				_, err = utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}).Should(Succeed())
+		})
+
+		It("should require independent approval before granting and suspend on source deletion", func() {
+			By("rejecting a direct session for an approval-required profile")
+			_, err := createManifestAs(e2eRequesterUser, `
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassSession
+metadata:
+  name: e2e-approval-bypass-attempt
+spec:
+  accessProfile: production-pod-observer-approval
+  duration: "30s"
+  reason: "E2E verification that approval policy cannot be bypassed"
+`)
+			Expect(err).To(HaveOccurred(), "Admission must reject a direct session for an approval-required profile")
+
+			By("submitting approval-workflow intent as the authenticated requester")
+			_, err = createManifestAs(e2eRequesterUser, `
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassRequest
+metadata:
+  name: e2e-approved-request
+spec:
+  accessProfile: production-pod-observer-approval
+  duration: "30s"
+  reason: "E2E verification of the independent approval workflow"
+`)
+			Expect(err).NotTo(HaveOccurred(), "BreakGlassRequest should pass requester admission")
+
+			By("waiting for the request controller to persist Pending state")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "--as="+e2eRequesterUser, "get", "breakglassrequest", e2eApprovalRequestName,
+					"-o", "jsonpath={.status.phase},{.spec.requester.kind},{.spec.requester.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Pending,User," + e2eRequesterUser))
+			}).Should(Succeed())
+
+			By("recording the one decision through a separately authorized approver identity")
+			_, err = createManifestAs(e2eApproverUser, `
+apiVersion: access.breakglass.io/v1alpha1
+kind: BreakGlassApproval
+metadata:
+  generateName: e2e-approval-
+spec:
+  requestRef:
+    name: e2e-approved-request
+  decision: Approved
+  comment: "E2E independent approval"
+`)
+			Expect(err).NotTo(HaveOccurred(), "BreakGlassApproval should pass independent approver admission")
+
+			var sessionName, bindingName string
+			By("waiting for exactly one controller-sourced session to become active")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "breakglassrequest", e2eApprovalRequestName,
+					"-o", "jsonpath={.status.phase},{.status.sessionRef.name},{.status.sessionRef.uid}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts := strings.Split(output, ",")
+				g.Expect(parts).To(HaveLen(3))
+				g.Expect(parts[0]).To(Equal("SessionCreated"))
+				g.Expect(parts[1]).NotTo(BeEmpty())
+				g.Expect(parts[2]).NotTo(BeEmpty())
+				sessionName = parts[1]
+
+				cmd = exec.Command("kubectl", "get", "breakglasssession", sessionName,
+					"-o", "jsonpath={.status.phase},{.spec.subject.kind},{.spec.subject.name},{.status.bindingRef.name}")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts = strings.Split(output, ",")
+				g.Expect(parts).To(HaveLen(4))
+				g.Expect(parts[0]).To(Equal("Active"))
+				g.Expect(parts[1]).To(Equal("User"))
+				g.Expect(parts[2]).To(Equal(e2eRequesterUser))
+				g.Expect(parts[3]).NotTo(BeEmpty())
+				bindingName = parts[3]
+			}).Should(Succeed())
+
+			By("verifying that the active grant remains namespaced")
+			cmd := exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the source request and requiring fail-closed suspension")
+			cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "breakglasssession", sessionName,
+					"-o", "jsonpath={.status.phase},{.status.conditions[?(@.type=='RequestSourceValid')].reason}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Suspended,RequestMissing"))
 				cmd = exec.Command("kubectl", "get", "rolebinding", bindingName, "-n", targetNamespace)
 				_, err = utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())

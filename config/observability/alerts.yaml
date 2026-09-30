@@ -19,7 +19,7 @@ spec:
             summary: BreakGlass access remains active after expiry
             runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#controller-outage-expiry-and-emergency-recovery
         - alert: BreakGlassIntegrityDrift
-          expr: increase(breakglass_binding_drift_total[5m]) > 0 or increase(breakglass_curated_role_drift_total[5m]) > 0
+          expr: increase(breakglass_binding_drift_total[5m]) > 0 or increase(breakglass_curated_role_drift_total[5m]) > 0 or increase(breakglass_request_source_integrity_failures_total[5m]) > 0
           for: 0m
           labels:
             severity: critical
