@@ -38,6 +38,7 @@ const (
 	RequestAwaitingApprovalCondition = "AwaitingApproval"
 	RequestProvisionedCondition      = "Provisioned"
 	approvalRequestNameField         = ".spec.requestRef.name"
+	requestTransitionRequeueDelay    = time.Nanosecond
 )
 
 // BreakGlassRequestReconciler establishes the fail-closed lifecycle boundary
@@ -163,7 +164,7 @@ func (r *BreakGlassRequestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// intentionally event-driven: an approval watch will wake the controller.
 	if updated && previousPhase != request.Status.Phase &&
 		(request.Status.Phase == accessv1alpha1.RequestPhaseApproved || request.Status.Phase == accessv1alpha1.RequestPhaseProvisioning) {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: requestTransitionRequeueDelay}, nil
 	}
 	return ctrl.Result{RequeueAfter: expiresAt.Sub(now)}, nil
 }

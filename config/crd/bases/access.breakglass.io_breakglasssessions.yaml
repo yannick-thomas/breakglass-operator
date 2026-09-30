@@ -163,7 +163,8 @@ spec:
             - message: reason is immutable
               rule: self.reason == oldSelf.reason
             - message: requestRef is immutable
-              rule: self.requestRef == oldSelf.requestRef
+              rule: '!has(oldSelf.requestRef) ? !has(self.requestRef) : has(self.requestRef)
+                && self.requestRef == oldSelf.requestRef'
             - message: revoked cannot be changed from true to false
               rule: '!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked)
                 && self.revoked)'

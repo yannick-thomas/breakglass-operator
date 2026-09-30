@@ -95,7 +95,7 @@ type RoleReference struct {
 // +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject",message="subject is immutable"
 // +kubebuilder:validation:XValidation:rule="self.duration == oldSelf.duration",message="duration is immutable"
 // +kubebuilder:validation:XValidation:rule="self.reason == oldSelf.reason",message="reason is immutable"
-// +kubebuilder:validation:XValidation:rule="self.requestRef == oldSelf.requestRef",message="requestRef is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.requestRef) ? !has(self.requestRef) : has(self.requestRef) && self.requestRef == oldSelf.requestRef",message="requestRef is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked) && self.revoked)",message="revoked cannot be changed from true to false"
 // +kubebuilder:validation:XValidation:rule="self.subject.kind == 'User' && (!has(self.subject.namespace) || size(self.subject.namespace) == 0)",message="v1alpha1 self-service sessions may only grant the authenticated User requester"
 type BreakGlassSessionSpec struct {

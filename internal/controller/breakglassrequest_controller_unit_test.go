@@ -191,10 +191,10 @@ func TestRequestReconcileConsumesOneApprovedDecisionIntoOneReservedSession(t *te
 			t.Fatalf("Reconcile() error = %v", err)
 		}
 		if want == accessv1alpha1.RequestPhaseApproved || want == accessv1alpha1.RequestPhaseProvisioning {
-			if !result.Requeue {
+			if result.RequeueAfter != requestTransitionRequeueDelay {
 				t.Fatalf("transition to %q must requeue immediately", want)
 			}
-		} else if result.Requeue {
+		} else if result.RequeueAfter == requestTransitionRequeueDelay {
 			t.Fatalf("terminal transition to %q must not requeue immediately", want)
 		}
 		updated := &accessv1alpha1.BreakGlassRequest{}

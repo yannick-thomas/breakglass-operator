@@ -289,27 +289,57 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 	if v.RequestControllerUsername == "" || user.Username != v.RequestControllerUsername {
 		return fmt.Errorf("request-sourced sessions may only be created by the configured request controller")
 	}
-	ref := obj.Spec.RequestRef
+	request, err := v.loadRequestForSourcedSession(ctx, obj.Spec.RequestRef)
+	if err != nil {
+		return err
+	}
+	if err := validateRequestSessionReservation(request, obj); err != nil {
+		return err
+	}
+	if err := validateRequestTTL(request); err != nil {
+		return err
+	}
+	if err := v.validateRequestApproval(ctx, request); err != nil {
+		return err
+	}
+	if err := validateSessionMatchesRequest(obj, request); err != nil {
+		return err
+	}
+	return v.validateRequestProfile(ctx, request)
+}
+
+func (v *BreakGlassSessionValidator) loadRequestForSourcedSession(
+	ctx context.Context,
+	ref *accessv1alpha1.BreakGlassRequestReference,
+) (*accessv1alpha1.BreakGlassRequest, error) {
 	if ref == nil || ref.Name == "" || ref.UID == "" {
-		return fmt.Errorf("requestRef name and UID are required for a controller-sourced session")
+		return nil, fmt.Errorf("requestRef name and UID are required for a controller-sourced session")
 	}
 	if v.RequestReader == nil || v.ApprovalReader == nil {
-		return apierrors.NewInternalError(fmt.Errorf("request or approval reader is not configured"))
+		return nil, apierrors.NewInternalError(fmt.Errorf("request or approval reader is not configured"))
 	}
 	request := &accessv1alpha1.BreakGlassRequest{}
 	if err := v.RequestReader.Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
+			return nil, fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
 		}
-		return apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for session admission: %w", err))
+		return nil, apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for session admission: %w", err))
 	}
 	if string(request.UID) != ref.UID {
-		return fmt.Errorf("requestRef UID does not match the current BreakGlassRequest")
+		return nil, fmt.Errorf("requestRef UID does not match the current BreakGlassRequest")
 	}
+	return request, nil
+}
+
+func validateRequestSessionReservation(request *accessv1alpha1.BreakGlassRequest, session *accessv1alpha1.BreakGlassSession) error {
 	if request.Status.Phase != accessv1alpha1.RequestPhaseProvisioning || request.Status.SessionRef == nil ||
-		request.Status.SessionRef.Name != obj.Name || request.Status.SessionRef.UID != "" {
+		request.Status.SessionRef.Name != session.Name || request.Status.SessionRef.UID != "" {
 		return fmt.Errorf("BreakGlassRequest %q has not reserved this session for provisioning", request.Name)
 	}
+	return nil
+}
+
+func validateRequestTTL(request *accessv1alpha1.BreakGlassRequest) error {
 	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
 	if err != nil || requestTTL <= 0 {
 		return fmt.Errorf("BreakGlassRequest %q has no valid immutable request TTL", request.Name)
@@ -317,6 +347,10 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 	if !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
 		return fmt.Errorf("BreakGlassRequest %q has expired", request.Name)
 	}
+	return nil
+}
+
+func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) error {
 	if request.Status.ApprovalRef == nil || request.Status.ApprovalRef.Name == "" || request.Status.ApprovalRef.UID == "" {
 		return fmt.Errorf("BreakGlassRequest %q has no verified approval reference", request.Name)
 	}
@@ -334,14 +368,21 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 		approval.Spec.Approver.Name == request.Spec.Requester.Name {
 		return fmt.Errorf("BreakGlassRequest %q approval reference is not a valid independent approval", request.Name)
 	}
-	if obj.Spec.AccessProfile != request.Spec.AccessProfile ||
-		obj.Spec.AccessProfileUID != request.Spec.AccessProfileUID ||
-		obj.Spec.Subject != request.Spec.Requester ||
-		obj.Spec.Duration != request.Spec.Duration ||
-		obj.Spec.Reason != request.Spec.Reason {
+	return nil
+}
+
+func validateSessionMatchesRequest(session *accessv1alpha1.BreakGlassSession, request *accessv1alpha1.BreakGlassRequest) error {
+	if session.Spec.AccessProfile != request.Spec.AccessProfile ||
+		session.Spec.AccessProfileUID != request.Spec.AccessProfileUID ||
+		session.Spec.Subject != request.Spec.Requester ||
+		session.Spec.Duration != request.Spec.Duration ||
+		session.Spec.Reason != request.Spec.Reason {
 		return fmt.Errorf("controller-sourced session fields must exactly match the approved BreakGlassRequest")
 	}
+	return nil
+}
 
+func (v *BreakGlassSessionValidator) validateRequestProfile(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) error {
 	profile, maxDuration, err := v.loadAndValidateProfile(ctx, request.Spec.AccessProfile)
 	if err != nil {
 		return err

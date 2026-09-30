@@ -87,6 +87,8 @@ const (
 	bindingUIDHashLength  = 12
 	maxKubernetesNameSize = 253
 
+	requestSourceSessionUIDMismatch = "session_uid_mismatch"
+
 	// accessProfileField indexes sessions by their immutable profile reference.
 	// It keeps profile-policy changes proportional to the affected sessions,
 	// rather than scanning every BreakGlassSession in the cluster.
@@ -529,9 +531,26 @@ type requestSourceIssue struct {
 // turn an expired request into a late grant. Once active, the session's own
 // immutable expiry remains the authority for the temporary RoleBinding.
 func (r *BreakGlassSessionReconciler) verifyRequestSource(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*requestSourceIssue, error) {
+	request, issue, err := r.requestForSessionSource(ctx, session)
+	if err != nil || issue != nil {
+		return issue, err
+	}
+	if issue := validateRequestSessionReservation(request, session); issue != nil {
+		return issue, nil
+	}
+	if issue := validateRequestDecisionDeadline(request, session); issue != nil {
+		return issue, nil
+	}
+	return r.verifyRequestApproval(ctx, request)
+}
+
+func (r *BreakGlassSessionReconciler) requestForSessionSource(
+	ctx context.Context,
+	session *accessv1alpha1.BreakGlassSession,
+) (*accessv1alpha1.BreakGlassRequest, *requestSourceIssue, error) {
 	ref := session.Spec.RequestRef
 	if ref == nil || ref.Name == "" || ref.UID == "" {
-		return &requestSourceIssue{
+		return nil, &requestSourceIssue{
 			Code:            "request_reference",
 			ConditionReason: "RequestReferenceInvalid",
 			Message:         "the approval-workflow session has no complete immutable request reference",
@@ -541,16 +560,16 @@ func (r *BreakGlassSessionReconciler) verifyRequestSource(ctx context.Context, s
 	request := &accessv1alpha1.BreakGlassRequest{}
 	if err := r.policyReader().Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
 		if apierrors.IsNotFound(err) {
-			return &requestSourceIssue{
+			return nil, &requestSourceIssue{
 				Code:            "request_missing",
 				ConditionReason: "RequestMissing",
 				Message:         "the approved source request no longer exists",
 			}, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if string(request.UID) != ref.UID {
-		return &requestSourceIssue{
+		return nil, &requestSourceIssue{
 			Code:            "request_uid_mismatch",
 			ConditionReason: "RequestUIDMismatch",
 			Message:         "a different request object now uses the recorded source request name",
@@ -561,19 +580,25 @@ func (r *BreakGlassSessionReconciler) verifyRequestSource(ctx context.Context, s
 		request.Spec.Requester != session.Spec.Subject ||
 		request.Spec.Duration != session.Spec.Duration ||
 		request.Spec.Reason != session.Spec.Reason {
-		return &requestSourceIssue{
+		return nil, &requestSourceIssue{
 			Code:            "request_content_mismatch",
 			ConditionReason: "RequestContentMismatch",
 			Message:         "the session fields differ from the immutable approved request",
 		}, nil
 	}
+	return request, nil, nil
+}
 
+func validateRequestSessionReservation(
+	request *accessv1alpha1.BreakGlassRequest,
+	session *accessv1alpha1.BreakGlassSession,
+) *requestSourceIssue {
 	if request.Status.SessionRef == nil || request.Status.SessionRef.Name != session.Name {
 		return &requestSourceIssue{
 			Code:            "session_reservation_mismatch",
 			ConditionReason: "SessionReservationMismatch",
 			Message:         "the source request does not reserve this session name",
-		}, nil
+		}
 	}
 	switch request.Status.Phase {
 	case accessv1alpha1.RequestPhaseProvisioning:
@@ -582,43 +607,55 @@ func (r *BreakGlassSessionReconciler) verifyRequestSource(ctx context.Context, s
 		// not yet contain the server-assigned session UID.
 		if request.Status.SessionRef.UID != "" && request.Status.SessionRef.UID != string(session.UID) {
 			return &requestSourceIssue{
-				Code:            "session_uid_mismatch",
+				Code:            requestSourceSessionUIDMismatch,
 				ConditionReason: "SessionUIDMismatch",
 				Message:         "the request reservation cites a different session object",
-			}, nil
+			}
 		}
 	case accessv1alpha1.RequestPhaseSessionCreated:
 		if request.Status.SessionRef.UID == "" || request.Status.SessionRef.UID != string(session.UID) {
 			return &requestSourceIssue{
-				Code:            "session_uid_mismatch",
+				Code:            requestSourceSessionUIDMismatch,
 				ConditionReason: "SessionUIDMismatch",
 				Message:         "the source request does not cite this server-assigned session UID",
-			}, nil
+			}
 		}
 	default:
 		return &requestSourceIssue{
 			Code:            "request_phase",
 			ConditionReason: "RequestNotProvisioned",
 			Message:         "the source request is not in a session-provisioned lifecycle phase",
-		}, nil
+		}
 	}
+	return nil
+}
 
+func validateRequestDecisionDeadline(
+	request *accessv1alpha1.BreakGlassRequest,
+	session *accessv1alpha1.BreakGlassSession,
+) *requestSourceIssue {
 	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
 	if err != nil || requestTTL <= 0 {
 		return &requestSourceIssue{
 			Code:            "request_ttl_invalid",
 			ConditionReason: "RequestTTLInvalid",
 			Message:         "the immutable source request has no valid positive request TTL",
-		}, nil
+		}
 	}
 	if session.Status.ExpiresAt == nil && !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
 		return &requestSourceIssue{
 			Code:            "request_expired",
 			ConditionReason: "RequestExpired",
 			Message:         "the source request expired before this session became active",
-		}, nil
+		}
 	}
+	return nil
+}
 
+func (r *BreakGlassSessionReconciler) verifyRequestApproval(
+	ctx context.Context,
+	request *accessv1alpha1.BreakGlassRequest,
+) (*requestSourceIssue, error) {
 	approvalRef := request.Status.ApprovalRef
 	if approvalRef == nil || approvalRef.Name != accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)) || approvalRef.UID == "" {
 		return &requestSourceIssue{
@@ -948,7 +985,7 @@ func (r *BreakGlassSessionReconciler) recordRequestSourceIntegrity(issue *reques
 		reason = breakglassmetrics.RequestSourceContentMismatch
 	case "session_reservation_mismatch":
 		reason = breakglassmetrics.RequestSourceReservationMismatch
-	case "session_uid_mismatch":
+	case requestSourceSessionUIDMismatch:
 		reason = breakglassmetrics.RequestSourceSessionUIDMismatch
 	case "request_phase":
 		reason = breakglassmetrics.RequestSourcePhase

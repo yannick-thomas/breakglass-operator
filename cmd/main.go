@@ -85,7 +85,8 @@ func main() {
 	flag.DurationVar(&requestTTL, "request-ttl", 15*time.Minute,
 		"Maximum time a BreakGlassRequest may await a decision. Must be greater than zero.")
 	flag.StringVar(&requestControllerUsername, "request-controller-username", "",
-		"Exact Kubernetes username allowed to create a session sourced from an approved BreakGlassRequest. Empty disables request provisioning.")
+		"Exact Kubernetes username permitted to create a session sourced from an approved "+
+			"BreakGlassRequest. Empty disables request provisioning.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -259,11 +260,15 @@ func main() {
 		setupLog.Error(err, "Failed to register BreakGlass session metrics")
 		os.Exit(1)
 	}
-	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(mgr, allowedTargetNamespaces, requestControllerUsername); err != nil {
+	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(
+		mgr, allowedTargetNamespaces, requestControllerUsername,
+	); err != nil {
 		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
 		os.Exit(1)
 	}
-	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(mgr, allowedTargetNamespaces, requestTTL); err != nil {
+	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(
+		mgr, allowedTargetNamespaces, requestTTL,
+	); err != nil {
 		setupLog.Error(err, "unable to create BreakGlassRequest webhook")
 		os.Exit(1)
 	}
