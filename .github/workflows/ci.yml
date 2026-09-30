@@ -75,6 +75,32 @@ jobs:
       - name: Run tests
         run: make test
 
+  security:
+    name: Trivy source and manifest scan
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # The policy is deliberately defined in this trusted workflow instead of
+      # a repository configuration file, so a pull request cannot mute or
+      # lower the severity threshold that protects it.
+      - name: Scan source, Kubernetes manifests, and tracked secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          hide-progress: "true"
+          timeout: 10m
+
   verify-manifests:
     name: Render and verify installation profiles
     needs: dependencies
@@ -138,7 +164,7 @@ jobs:
 
   package:
     name: Publish image and rendered installers
-    needs: [lint, test, verify-manifests, test-e2e, test-e2e-production]
+    needs: [lint, test, security, verify-manifests, test-e2e, test-e2e-production]
     # Publishing is deliberately a post-gate action. Pull requests never get a
     # registry token or a Buildx cache write; manual runs are restricted to
     # main as well.
@@ -179,6 +205,19 @@ jobs:
           tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ github.sha }}
           cache-from: type=gha,scope=breakglass-operator-main
           cache-to: type=gha,mode=max,scope=breakglass-operator-main
+      # The image is addressed by its immutable digest, not its mutable tag.
+      # Installer artifacts are produced only after this policy gate succeeds.
+      - name: Scan the published manager image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.image.outputs.digest }}
+          scanners: vuln,secret
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          hide-progress: "true"
+          timeout: 10m
       - name: Render immutable installers
         run: |
           make build-installers IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}"

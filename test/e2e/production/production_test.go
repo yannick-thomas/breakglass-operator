@@ -113,8 +113,8 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found"))
-		_, _ = utils.Run(exec.Command("make", "undeploy-production"))
-		_, _ = utils.Run(exec.Command("make", "uninstall"))
+		_, _ = utils.Run(exec.Command("make", "undeploy-production-test"))
+		_, _ = utils.Run(exec.Command("make", "uninstall-test"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", managerNamespace, "--ignore-not-found"))
 	})
 

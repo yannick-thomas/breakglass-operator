@@ -200,6 +200,10 @@ ifndef ignore-not-found
   ignore-not-found = false
 endif
 
+ifndef delete-wait
+  delete-wait = true
+endif
+
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
@@ -208,7 +212,11 @@ install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
-	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
+	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -; else echo "No CRDs to delete; skipping."; fi
+
+.PHONY: uninstall-test
+uninstall-test: ## Uninstall CRDs without waiting; intended only for disposable test clusters.
+	$(MAKE) uninstall ignore-not-found=true delete-wait=false
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller without changing the checked-out configuration.
@@ -226,11 +234,19 @@ deploy-production: manifests kustomize ## Deploy the HA production overlay witho
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -
+
+.PHONY: undeploy-test
+undeploy-test: ## Undeploy without waiting; intended only for disposable test clusters.
+	$(MAKE) undeploy ignore-not-found=true delete-wait=false
 
 .PHONY: undeploy-production
 undeploy-production: kustomize ## Undeploy the HA production overlay from the current cluster.
-	"$(KUSTOMIZE)" build config/overlays/production | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+	"$(KUSTOMIZE)" build config/overlays/production | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -
+
+.PHONY: undeploy-production-test
+undeploy-production-test: ## Undeploy the HA overlay without waiting; intended only for disposable test clusters.
+	$(MAKE) undeploy-production ignore-not-found=true delete-wait=false
 
 ##@ Dependencies
 

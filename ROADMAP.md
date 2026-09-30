@@ -17,9 +17,11 @@ In modernen Kubernetes-Umgebungen (SOC2, ISO 27001, PCI-DSS, FedRAMP) ist die pe
 Der BreakGlass Operator schließt diese Lücke, indem er das **„Principle of Least Privilege“** automatisiert:
 Standardmäßig besitzt niemand privilegierte Rechte. Bei Zwischenfällen wird der Zugriff temporär, begründet, freigegeben und lückenlos auditiert bereitgestellt – und nach Ablauf der TTL spurlos wieder entzogen.
 
-> Das folgende Diagramm ist die **Zielarchitektur**, nicht der aktuelle
-> Funktionsumfang: `BreakGlassRequest`, Approval Engine, kurzlebige Tokens und
-> ein Post-Mortem-Export gehören zu späteren Phasen. Der heutige Kern erzeugt
+> Das folgende Diagramm trennt den bereits umgesetzten Kubernetes-Kern von
+> späteren Integrationen: `BreakGlassRequest`, eine append-only
+> `BreakGlassApproval` und der eine UID-gebundene Session-Pfad existieren
+> bereits. Kurzlebige Credentials, ChatOps, Post-Mortem-Export und Cloud-IAM
+> gehören bewusst zu späteren Phasen. Der Operator erzeugt weiterhin
 > ausschließlich eine UID-überwachte, namespaced `RoleBinding`.
 
 ```mermaid
@@ -70,7 +72,7 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Phase 1** *(Kern implementiert)* | **MVP & Core Reliability** | Solide CRD-Basis, `RequeueAfter`-Lifecycle, Fail-Closed Drift-Detection, Events | Kubebuilder, Controller-Runtime |
 | **Phase 2** | **Security Boundary & Admission Governance** | Kontrollierte AccessProfiles, echte Requester-Identität, begrenzte RBAC-Delegation | Admission Webhooks, Cert-Manager, SubjectAccessReview |
-| **Phase 3** | **Interactive Approvals & ChatOps** | 4-Augen-Prinzip, Slack/Teams Integration, Self-Service CLI | Slack API / Webhooks, CLI-Plugin |
+| **Phase 3** *(Kern implementiert)* | **Governed Approvals, später Clients** | 4-Augen-Prinzip im Kubernetes-Pfad; danach CLI und ChatOps als Clients | `BreakGlassRequest`, `BreakGlassApproval`, später CLI/ChatOps |
 | **Phase 4** | **Audit Trail & Forensik** | Was hat der User während der Session getan? Audit-Log Korrelation | K8s Audit Logs, OpenTelemetry |
 | **Phase 5** | **Zero-Trust Identity Federation** | Kurzlebige Tokens statt statischer User, Cloud-IAM Bridging | OIDC, Ephemeral SAs, Vault |
 
@@ -132,8 +134,8 @@ flowchart TD
 1. **P0 – Produktions-Installations- und Test-Gate (keine neue CRD):** Webhook-HA/PDB, Cert-Manager-/CA-Readiness, Fail-Closed-Ausfalltest, Kind-E2E für reale `UserInfo`-Attribution, SAR-Allow/Deny, TTL/Restart, Delete/Recreate und RBAC-Kollision. Dazu Threat Model, Support-Matrix, Supply-Chain- und Upgrade-/Rollback-Gates inklusive Inventar/Expiry oder Revocation alter freier Sessions vor dem API-Wechsel.
 2. **P0 – Integrität kuratierter Rollen (keine neue CRD, Kern implementiert):** Jeder neue Grant snapshottet ClusterRole-UID und kanonischen Regel-Hash. Der Controller liest die konkret referenzierte Rolle bei jedem aktiven Integritätscheck direkt und suspendiert bei Missing/Recreate/Rule-Drift; die neue Metrik `breakglass_curated_role_drift_total` alarmiert ohne Rollenname als Label. Der Production-Kind-Gate deckt Regel-Drift sowie Delete/Recreate mit gleichem Namen ab. Rollen bleiben versioniert und unveränderlich; als Restarbeit benötigt [#4](https://github.com/yannick-thomas/breakglass-operator/issues/4) Upgrade-Proben für alte Sessions ohne Snapshot.
 3. **P0/P1 – Betrieb, Audit und Recovery (keine neue CRD):** PrometheusRule-/Dashboard-Pack, Runbooks für Drift, Cleanup-Fehler und Webhook-Ausfälle, strukturierte Lifecycle-Logs sowie dokumentierte Kubernetes-Audit-zu-SIEM-Korrelation. Kein eigenes `BreakGlassAuditEvent`: sensible Forensik gehört nicht doppelt und manipulierbar in etcd.
-4. **P1 – `BreakGlassRequest` als nächste sinnvolle CRD:** Sie trennt untrusted Antrag und aktiven Grant. Sie snapshottet Requester, Profil-UID, Dauer und Grund, hat `Pending`/`Approved`/`Denied`/`Expired`, und nur der Controller erstellt danach eine Session. Für native Kubernetes-Approvals kann dieselbe Iteration eine append-only `BreakGlassApproval`-CRD enthalten; andernfalls liefert eine verifizierte Integration die Entscheidung.
-5. **P2 – CLI/ChatOps ohne neue Fach-CRD:** `kubectl breakglass` für Profil-Preflight/Policy-Preview, Request/Watch/Revoke; danach signierte Slack-/Teams-Adapter auf dem stabilen Request-Workflow.
+4. **P1 – Governed request/approval path (implementiert):** `BreakGlassRequest` trennt untrusted Antrag und aktiven Grant. Er snapshottet Requester, Profil-UID, Dauer und Grund und durchläuft `Pending`/`Approved`/`Provisioning`/`SessionCreated` beziehungsweise `Denied`/`Expired`/`Failed`. Eine append-only `BreakGlassApproval` ist unabhängig, nicht selbstgenehmigbar, an Request-UID und Ablauf gebunden. Nur der Controller reserviert und erstellt die eine Session.
+5. **P2 – CLI/ChatOps ohne neue Fach-CRD:** `kubectl breakglass` für Profil-Preflight/Policy-Preview, Request/Watch/Revoke; danach signierte Slack-/Teams-Adapter auf dem stabilen Request-Workflow. Beide bleiben Clients und dürfen keine zweite Grant- oder Approval-Logik enthalten.
 
 Die umsetzbaren Pakete sind als GitHub-Issues angelegt: [#3](https://github.com/yannick-thomas/breakglass-operator/issues/3) für Installation und Tests, [#4](https://github.com/yannick-thomas/breakglass-operator/issues/4) für ClusterRole-Integrität, [#5](https://github.com/yannick-thomas/breakglass-operator/issues/5) für Betrieb/Audit/Runbooks und [#6](https://github.com/yannick-thomas/breakglass-operator/issues/6) für den späteren Request-Workflow.
 
@@ -141,20 +143,21 @@ Die umsetzbaren Pakete sind als GitHub-Issues angelegt: [#3](https://github.com/
 
 ---
 
-### Phase 3: Interactive Approvals & ChatOps (4-Augen-Prinzip)
-> **Ziel:** Notfallzugriff erfordert in Produktivsystemen oft die Freigabe eines zweiten Engineers oder Security-Offiziers.
+### Phase 3: Governed Approvals, danach CLI & ChatOps
+> **Ziel:** Der 4-Augen-Kern bleibt im Kubernetes-Control-Plane-Pfad; jede
+> spätere Bedienoberfläche ist ein schmaler Client dieses Pfads.
 
-* **Entkopplung in Request & Session**:
+* [x] **Entkopplung in Request & Session**:
   * Neue CRD `BreakGlassRequest` $\rightarrow$ Prüfung $\rightarrow$ Operator erzeugt `BreakGlassSession`.
   * Requests verfallen automatisch; eine genehmigte Session wird nie durch ein nachträgliches Request-Update verändert.
-* **Approval-Sicherheit**:
-  * Kein Self-Approval, definierte Quoren und getrennte On-Call-/Security-Rollen.
-  * Signierte/verifizierte ChatOps-Callbacks, idempotente Approval-Entscheidungen und ein vollständiger Approval-Audit-Trail.
-* **ChatOps / Slack & Teams Integration**:
+* [x] **Approval-Sicherheit**:
+  * Kein Self-Approval und getrennte Requester-/Approver-Rollen über das benannte `approve`-Recht.
+  * Idempotente, UID-gebundene, append-only Entscheidungen. Quoren und signierte/verifizierte externe Callbacks bleiben absichtlich offen, bis es reale, wiederverwendbare Policy-Anforderungen gibt.
+* [ ] **ChatOps / Slack & Teams Integration**:
   * Wird ein Request erstellt, sendet der Operator eine Benachrichtigung in einen Alert-Channel:
     > *„@yannick beantragt das Profil `production-pod-observer` für 30m wegen Notfall INC-1092. [Approve] [Deny]“*
   * Bei Klick auf *Approve* schaltet der Operator die Session frei.
-* **`kubectl breakglass` CLI-Plugin (Krew)**:
+* [ ] **`kubectl breakglass` CLI-Plugin (Krew)**:
   * Ein interaktives Tool für Entwickler:
     ```bash
     kubectl breakglass request --profile production-pod-observer --duration 30m --reason "INC-404"
