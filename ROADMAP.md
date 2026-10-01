@@ -88,7 +88,7 @@ flowchart TD
 
 #### Noch vor produktivem Einsatz erforderlich
 * [ ] **Threat Model & Support-Matrix**: Vertrauensgrenzen, zulässige Cluster-/Namespace-Modelle, Ausfallverhalten und unterstützte Kubernetes-Versionen festlegen.
-* [ ] **Controller-Reliability-Tests**: Controller-Restart nahe der TTL, Namespace-/CR-Deletion-Rennen, Binding-Kollisionen und Uhrzeitgrenzen in envtest/Kind abdecken.
+* [~] **Controller-Reliability-Tests**: Fake-Client-Tests injizieren einen Status-Write-Fehler zwischen Binding-Reservation und Aktivierung; Kind prüft Rolling Restart, TTL-Recovery sowie Namespace-/Session-Deletion-Rennen. Offen bleiben eine explizite versionsübergreifende Upgrade-/Rollback-Probe und Lastmessungen unter realer API-Server-Latenz.
 * [x] **Binding-Integrität & sichere Expiry**: `status.bindingRef` persistiert Kind, Namespace, Namen und Objekt-UID. Delete/Recreate, Subject-/Role-Drift, verlorene Ownership oder fehlende TTL führen fail-closed zu `Suspended`; es gibt kein automatisches Re-Granting. Cleanup nutzt eine UID-Precondition und löscht keinen Ersatz mit gleichem Namen. Expiry bleibt ein best-effort SLO, bis der Zugriff zusätzlich durch wirklich ablaufende Credentials begrenzt ist.
 * [ ] **Scale-Grenzen**: RoleBinding-/AccessProfile-Watches mit Predicates und einem Feldindex auf `spec.accessProfile` begrenzen sowie Cache-/Reconcile-Last in großen Clustern messen.
 * [ ] **Secure Supply Chain**: Nicht-root-Image, minimale RBAC-/NetworkPolicies, SBOM, Image-Signing und abhängigkeitsspezifische Security-Scans als Release-Gate etablieren.

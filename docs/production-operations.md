@@ -64,7 +64,9 @@ scales all managers down to prove admission fails closed before restoring the
 deployment and successfully issuing a fresh request. It reissues the serving
 certificate and verifies that an active session keeps the exact recorded
 RoleBinding UID through a rolling manager restart. It does not remove or weaken
-the webhook configuration to simulate an outage.
+the webhook configuration to simulate an outage. Its final lifecycle check
+deletes a target namespace and its active session concurrently, proving that a
+vanished RoleBinding does not strand the Session finalizer.
 
 ## Upgrade and rollback
 

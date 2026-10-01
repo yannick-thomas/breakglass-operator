@@ -82,8 +82,10 @@ certificates, CA injection, `failurePolicy: Fail`, and a short timeout. Do not
 grant self-service session creation in a cluster where those configurations
 are absent or unhealthy.
 
-The controller needs `create/delete/get/list/watch` on RoleBindings and
-`bind` on the curated ClusterRoles it may reference. The checked-in manager
+The controller needs `create/delete/get/list/update/watch` on RoleBindings and
+`bind` on the curated ClusterRoles it may reference. `update` is used only for
+the one-way, UID-verified subject promotion after the reservation checkpoint.
+The checked-in manager
 RBAC grants `bind` only on `breakglass-pod-observer`, the sample profile role.
 Extending the profile catalogue requires an explicit deployment RBAC change
 with exact `resourceNames`; unrestricted `bind` is not an acceptable shortcut.
@@ -101,10 +103,23 @@ for cleanup. The controller additionally verifies its controller owner
 reference, labels, role reference, and subject on every binding watch and at a
 bounded periodic interval.
 
+Activation has a deliberate reservation checkpoint: the controller first
+creates an owner-bound RoleBinding with the approved role but **no subjects**.
+It persists the binding UID, grant snapshot, and expiry before making the
+one-way subject update that grants access. A status-write failure in this
+window can therefore leave at most a non-authorizing reservation; it cannot
+leave an untracked user grant. Once the UID is recorded, every later update or
+delete is tied to that exact server-issued object identity.
+
 If a binding is missing, replaced, or modified, the session becomes
 `Suspended`; it is not self-healed. Cleanup uses a UID precondition, so a new
-object reusing the same name remains untouched. Expiry and manual revocation
-remove the exact tracked object when it still exists.
+object reusing the same name remains untouched. The sole pre-UID exception is
+terminal cleanup of a zero-subject reservation after a failed status write: it
+requires the deterministic name, exact controller owner reference, and
+high-entropy Session UID labels, and is searched only in configured target
+namespaces. It cannot revoke or grant access because the reservation has no
+subjects. Expiry and manual revocation remove the exact tracked object when it
+still exists.
 
 This means a security response should alert on `Suspended` and inspect the
 associated audit logs rather than assuming a destroyed binding will reappear.

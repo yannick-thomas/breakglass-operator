@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -144,7 +145,10 @@ func TestReconcileExpiresPersistedSessionAfterControllerRestart(t *testing.T) {
 		t.Fatalf("add finalizer Reconcile() error = %v", err)
 	}
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
-		t.Fatalf("activate Reconcile() error = %v", err)
+		t.Fatalf("reserve binding Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("activate reserved binding Reconcile() error = %v", err)
 	}
 
 	active := &accessv1alpha1.BreakGlassSession{}
@@ -176,6 +180,196 @@ func TestReconcileExpiresPersistedSessionAfterControllerRestart(t *testing.T) {
 	binding := &rbacv1.RoleBinding{}
 	if err := testClient.Get(context.Background(), types.NamespacedName{Name: bindingName, Namespace: "default"}, binding); err == nil {
 		t.Fatal("expired session left its RoleBinding behind after controller restart")
+	}
+}
+
+func TestReconcileCleansUnrecordedBindingWhenPolicyDisappearsAfterStatusWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Status = accessv1alpha1.BreakGlassSessionStatus{}
+	profile, role := activationPolicyObjects()
+	testClient := newStatusFailingTestClient(scheme, session, profile, role)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}
+	reconciler := &BreakGlassSessionReconciler{
+		Client:                  testClient,
+		Scheme:                  scheme,
+		AllowedTargetNamespaces: map[string]struct{}{"default": {}},
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("add finalizer Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err == nil {
+		t.Fatal("activation Reconcile() error = nil, want injected status failure")
+	}
+
+	bindingKey := types.NamespacedName{Name: bindingNameForSession(session), Namespace: "default"}
+	reservedBinding := &rbacv1.RoleBinding{}
+	if err := testClient.Get(context.Background(), bindingKey, reservedBinding); err != nil {
+		t.Fatalf("get unrecorded RoleBinding after status failure: %v", err)
+	}
+	if len(reservedBinding.Subjects) != 0 {
+		t.Fatalf("unrecorded binding subjects = %#v, want an empty non-authorizing reservation", reservedBinding.Subjects)
+	}
+	if err := testClient.Delete(context.Background(), profile); err != nil {
+		t.Fatalf("delete profile after status failure: %v", err)
+	}
+
+	// Simulate the next work item being handled by a fresh process. Policy
+	// resolution now denies the session, so terminal cleanup must discover and
+	// delete the exact binding created before status persistence failed.
+	restartedReconciler := &BreakGlassSessionReconciler{
+		Client:                  testClient,
+		Scheme:                  scheme,
+		AllowedTargetNamespaces: map[string]struct{}{"default": {}},
+	}
+	if _, err := restartedReconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("post-policy-loss Reconcile() error = %v", err)
+	}
+
+	denied := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, denied); err != nil {
+		t.Fatalf("get denied session: %v", err)
+	}
+	if denied.Status.Phase != accessv1alpha1.PhaseDenied {
+		t.Fatalf("session phase = %q, want %q", denied.Status.Phase, accessv1alpha1.PhaseDenied)
+	}
+	remainingBinding := &rbacv1.RoleBinding{}
+	if err := testClient.Get(context.Background(), bindingKey, remainingBinding); err == nil {
+		t.Fatalf("denied session left its unrecorded RoleBinding behind: labels=%#v ownerReferences=%#v", remainingBinding.Labels, remainingBinding.OwnerReferences)
+	}
+}
+
+func TestCleanupNeverRecoversAnUnrecordedAuthorizingBinding(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Status = accessv1alpha1.BreakGlassSessionStatus{}
+	forged := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bindingNameForSession(session),
+			Namespace: "default",
+			UID:       types.UID("forged-binding-uid"),
+			Labels:    managedBindingLabels(session),
+		},
+		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: clusterRoleKind, Name: "breakglass-pod-observer"},
+		Subjects: []rbacv1.Subject{expectedSubject(session)},
+	}
+	if err := controllerutil.SetControllerReference(session, forged, scheme); err != nil {
+		t.Fatalf("set forged binding owner reference: %v", err)
+	}
+	testClient := newTestClient(scheme, session, forged)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+
+	cleanup, err := reconciler.cleanupBindingWithResult(context.Background(), session)
+	if err != nil {
+		t.Fatalf("cleanupBindingWithResult() error = %v", err)
+	}
+	if cleanup.Deleted || cleanup.IntegrityIssue != nil {
+		t.Fatalf("cleanup result = %#v, want no unrecorded authorizing-binding action", cleanup)
+	}
+	if err := testClient.Get(context.Background(), client.ObjectKeyFromObject(forged), &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("unrecorded authorizing RoleBinding was deleted: %v", err)
+	}
+}
+
+func TestReconcileFinalizesPendingSessionAfterSubjectPromotionStatusInterruption(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Status = accessv1alpha1.BreakGlassSessionStatus{}
+	profile, role := activationPolicyObjects()
+	testClient := newTestClient(scheme, session, profile, role)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("add finalizer Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("reserve binding Reconcile() error = %v", err)
+	}
+
+	pending := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, pending); err != nil {
+		t.Fatalf("get pending session: %v", err)
+	}
+	if pending.Status.Phase != accessv1alpha1.PhasePending || pending.Status.BindingRef == nil {
+		t.Fatalf("reserved session status = %#v, want pending session with binding reference", pending.Status)
+	}
+	binding := &rbacv1.RoleBinding{}
+	if err := testClient.Get(context.Background(), types.NamespacedName{
+		Name: pending.Status.BindingRef.Name, Namespace: pending.Status.BindingRef.Namespace,
+	}, binding); err != nil {
+		t.Fatalf("get reserved binding: %v", err)
+	}
+	binding.Subjects = []rbacv1.Subject{expectedSubject(pending)}
+	if err := testClient.Update(context.Background(), binding); err != nil {
+		t.Fatalf("simulate successful subject promotion: %v", err)
+	}
+
+	// The manager can crash after this RBAC update but before its Active status
+	// write returns. The recorded UID lets a new manager finish status without
+	// recreating or mutating a replacement binding.
+	restartedReconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+	if _, err := restartedReconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("finalize pending session Reconcile() error = %v", err)
+	}
+	active := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, active); err != nil {
+		t.Fatalf("get active session: %v", err)
+	}
+	if active.Status.Phase != accessv1alpha1.PhaseActive || active.Status.BindingRef == nil {
+		t.Fatalf("finalized session status = %#v, want active UID-tracked session", active.Status)
+	}
+}
+
+func TestReconcileDeletionCleansUnrecordedBindingAfterStatusWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Status = accessv1alpha1.BreakGlassSessionStatus{}
+	profile, role := activationPolicyObjects()
+	testClient := newStatusFailingTestClient(scheme, session, profile, role)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("add finalizer Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err == nil {
+		t.Fatal("activation Reconcile() error = nil, want injected status failure")
+	}
+
+	bindingKey := types.NamespacedName{Name: bindingNameForSession(session), Namespace: "default"}
+	if err := testClient.Get(context.Background(), bindingKey, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("get unrecorded RoleBinding after status failure: %v", err)
+	}
+	stored := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, stored); err != nil {
+		t.Fatalf("get session for deletion: %v", err)
+	}
+	if err := testClient.Delete(context.Background(), stored); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+
+	// The finalizer must not assume a nil status.bindingRef means no binding was
+	// ever created: the persisted object contains none after the injected error.
+	restartedReconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+	if _, err := restartedReconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("deletion Reconcile() error = %v", err)
+	}
+	if err := testClient.Get(context.Background(), request.NamespacedName, &accessv1alpha1.BreakGlassSession{}); err == nil {
+		t.Fatal("session finalizer remained after cleanup of the unrecorded binding")
+	}
+	remainingBinding := &rbacv1.RoleBinding{}
+	if err := testClient.Get(context.Background(), bindingKey, remainingBinding); err == nil {
+		t.Fatalf("deleted session left its unrecorded RoleBinding behind: labels=%#v ownerReferences=%#v", remainingBinding.Labels, remainingBinding.OwnerReferences)
 	}
 }
 
@@ -511,6 +705,42 @@ func TestCleanupNeverDeletesAReplacementBinding(t *testing.T) {
 	}
 }
 
+func TestReconcileRevocationRecordsCleanupUIDMismatch(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	session.Spec.Revoked = true
+	session.Finalizers = []string{BreakGlassFinalizer}
+	session.Status.BindingName = bindingNameForSession(session)
+	session.Status.BindingRef = &accessv1alpha1.BindingReference{
+		Kind:      roleBindingKind,
+		Name:      session.Status.BindingName,
+		Namespace: "default",
+		UID:       "original-binding-uid",
+	}
+	replacement := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      session.Status.BindingName,
+			Namespace: "default",
+			UID:       types.UID("replacement-binding-uid"),
+		},
+	}
+	recorder := &recordingMetrics{}
+	testClient := newTestClient(scheme, session, replacement)
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme, Metrics: recorder}
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}); err != nil {
+		t.Fatalf("revocation Reconcile() error = %v", err)
+	}
+	if len(recorder.driftReasons) != 1 || recorder.driftReasons[0] != breakglassmetrics.DriftUIDMismatch {
+		t.Fatalf("recorded cleanup drift = %#v, want uid mismatch", recorder.driftReasons)
+	}
+	if err := testClient.Get(context.Background(), client.ObjectKeyFromObject(replacement), &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("replacement RoleBinding was deleted: %v", err)
+	}
+}
+
 func TestVerifyBindingIntegrityDetectsSubjectDrift(t *testing.T) {
 	t.Parallel()
 
@@ -641,6 +871,9 @@ func TestReconcileSuspendsAnActiveSessionWhenItsApprovalSourceDisappears(t *test
 	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
 	key := client.ObjectKeyFromObject(session)
 
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reserve request-sourced session: %v", err)
+	}
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("activate request-sourced session: %v", err)
 	}
@@ -826,6 +1059,37 @@ func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Clie
 				obj.SetUID(types.UID("server-uid-" + obj.GetName()))
 			}
 			return next.Create(ctx, obj, opts...)
+		},
+	})
+}
+
+// newStatusFailingTestClient simulates the sole persistence failure that can
+// occur after the API server accepts a RoleBinding create but before the
+// controller records its UID in BreakGlassSession status.
+func newStatusFailingTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Client {
+	raw := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}, &accessv1alpha1.BreakGlassRequest{}).
+		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
+		WithIndex(&accessv1alpha1.BreakGlassSession{}, requestSourceField, requestSourceNameIndex).
+		WithObjects(objects...).
+		Build()
+	failStatusUpdate := true
+	return interceptor.NewClient(raw, interceptor.Funcs{
+		Create: func(ctx context.Context, next client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID("server-uid-" + obj.GetName()))
+			}
+			return next.Create(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, next client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResource == "status" && failStatusUpdate {
+				if _, ok := obj.(*accessv1alpha1.BreakGlassSession); ok {
+					failStatusUpdate = false
+					return errors.New("injected BreakGlassSession status write failure")
+				}
+			}
+			return next.SubResource(subResource).Update(ctx, obj, opts...)
 		},
 	})
 }

@@ -145,7 +145,7 @@ func (r *BreakGlassSessionReconciler) policyReader() client.Reader {
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=accessprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassrequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassapprovals,verbs=get;list;watch
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=breakglass-pod-observer,verbs=get;bind
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -176,6 +176,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				// finalizer lets deletion complete while preserving that object
 				// for investigation.
 				log.Info("Could not safely delete untrusted RBAC binding during BreakGlassSession cleanup", "session", session.Name, "reason", cleanup.IntegrityIssue.Code)
+				r.recordCleanupIntegrityIssue(cleanup, session)
 			}
 			controllerutil.RemoveFinalizer(session, BreakGlassFinalizer)
 			if err := r.Update(ctx, session); err != nil {
@@ -224,6 +225,15 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
+	// Activation deliberately has two durable steps. A Reserved binding has the
+	// approved RoleRef but no subjects and therefore grants no access; its UID,
+	// grant snapshot, and expiry are persisted before the subject is added.
+	// This prevents a create-before-status failure from leaving an untracked,
+	// authorizing RoleBinding behind.
+	if session.Status.Phase == accessv1alpha1.PhasePending && session.Status.BindingRef != nil {
+		return r.reconcileReservedSession(ctx, session)
+	}
+
 	// 5. Active lifecycle, including periodic binding integrity verification.
 	if session.Status.ExpiresAt != nil {
 		return r.reconcileActiveSession(ctx, session)
@@ -246,25 +256,40 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if !isRequestDenied(err) {
 			return ctrl.Result{}, err
 		}
+		// A prior reconciliation can have created the deterministic binding and
+		// then lost its status write. Resolve errors must therefore run the same
+		// strict cleanup recovery as every other terminal path before recording
+		// denial; otherwise a deleted/replaced profile could strand live access.
+		cleanup, cleanupErr := r.cleanupBindingWithResult(ctx, session)
+		if cleanupErr != nil {
+			return ctrl.Result{}, cleanupErr
+		}
 		log.Error(err, "BreakGlassSession could not be activated", "session", session.Name)
 		session.Status.Phase = accessv1alpha1.PhaseDenied
 		r.setAccessGrantedCondition(session, metav1.ConditionFalse, "InvalidSpec", err.Error())
+		if cleanup.Deleted || cleanup.IntegrityIssue != nil {
+			r.setCleanupIntegrityCondition(session, cleanup)
+		}
 		if r.Recorder != nil {
 			r.Recorder.Eventf(session, corev1.EventTypeWarning, "AccessDenied",
 				"Emergency access request was denied: %v", err)
+			if cleanup.IntegrityIssue != nil {
+				r.Recorder.Eventf(session, corev1.EventTypeWarning, "BindingIntegrityLost", "Emergency access binding could not be safely removed: %s", cleanup.IntegrityIssue.Code)
+			}
 		}
 		if statusErr := r.Status().Update(ctx, session); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		r.recordTransition(breakglassmetrics.TransitionDenied, session)
+		r.recordCleanupIntegrityIssue(cleanup, session)
 		return ctrl.Result{}, nil
 	}
 	session.Status.Grant = grant
 
-	// Create the RBAC binding before marking the session active. The returned
-	// UID is persisted in status and becomes the authority for all later
-	// cleanup and integrity checks.
-	bindingRef, err := r.ensureBindingReference(ctx, session)
+	// First reserve a non-authorizing binding and persist its server-assigned
+	// UID. The subject is added only by reconcileReservedSession after this
+	// status checkpoint succeeds.
+	bindingRef, err := r.ensureReservedBindingReference(ctx, session)
 	if err != nil {
 		if isBindingCollision(err) {
 			session.Status.Phase = accessv1alpha1.PhaseDenied
@@ -288,32 +313,78 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	session.Status.BindingRef = bindingRef
 	session.Status.StartTime = &now
 	session.Status.ExpiresAt = &expiresAt
-	session.Status.Phase = accessv1alpha1.PhaseActive
-	r.setAccessGrantedCondition(session, metav1.ConditionTrue, "AccessGranted", "Emergency access binding is active")
-	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingVerified", "The emergency access binding identity and content were verified")
+	session.Status.Phase = accessv1alpha1.PhasePending
+	r.setAccessGrantedCondition(session, metav1.ConditionFalse, "BindingReserved", "Emergency access binding is reserved but not yet active")
+	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingReserved", "The non-authorizing emergency access binding identity was recorded")
 	r.setAccessProfileCondition(session, metav1.ConditionTrue, "AccessProfileVerified", "The immutable AccessProfile snapshot was verified")
 	r.setCuratedRoleCondition(session, metav1.ConditionTrue, "CuratedRoleVerified", "The curated ClusterRole identity and rules were verified")
 	if session.Spec.RequestRef != nil {
 		r.setRequestSourceCondition(session, metav1.ConditionTrue, "RequestSourceVerified", "The approved request source and immutable decision were verified")
 	}
 
-	targetDesc := fmt.Sprintf("namespace %q", grant.TargetNamespace)
+	if err := r.Status().Update(ctx, session); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+}
 
-	if r.Recorder != nil {
-		r.Recorder.Eventf(session, corev1.EventTypeNormal, "AccessGranted",
-			"Granted %s %q access on %s to %s %q until %s",
-			grant.RoleRef.Kind, grant.RoleRef.Name, targetDesc,
-			session.Spec.Subject.Kind, session.Spec.Subject.Name,
-			expiresAt.Format(time.RFC3339))
+func (r *BreakGlassSessionReconciler) reconcileReservedSession(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (ctrl.Result, error) {
+	if session.Status.Grant == nil || session.Status.ExpiresAt == nil {
+		return r.suspendForIntegrity(ctx, session, &bindingIntegrityIssue{
+			Code:            bindingIssueReference,
+			ConditionReason: bindingReferenceInvalidReason,
+			Message:         "reserved session has no complete grant snapshot or expiry",
+		})
+	}
+	if !time.Now().Before(session.Status.ExpiresAt.Time) {
+		return r.expireSession(ctx, session)
+	}
+	profileIssue, err := r.verifyAccessProfile(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if profileIssue != nil {
+		return r.suspendForProfile(ctx, session, profileIssue)
+	}
+	roleIssue, err := r.verifyCuratedRole(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if roleIssue != nil {
+		return r.suspendForCuratedRole(ctx, session, roleIssue)
 	}
 
+	binding, granted, issue, err := r.bindingForReservedActivation(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if issue != nil {
+		return r.suspendForIntegrity(ctx, session, issue)
+	}
+	if !granted {
+		binding.Subjects = []rbacv1.Subject{expectedSubject(session)}
+		if err := r.Update(ctx, binding); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	session.Status.Phase = accessv1alpha1.PhaseActive
+	r.setAccessGrantedCondition(session, metav1.ConditionTrue, "AccessGranted", "Emergency access binding is active")
+	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingVerified", "The emergency access binding identity and content were verified")
 	if err := r.Status().Update(ctx, session); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.recordTransition(breakglassmetrics.TransitionActivated, session)
 
-	log.Info("BreakGlassSession activated successfully", "session", session.Name, "expiresAt", expiresAt)
-	return ctrl.Result{RequeueAfter: r.activeRequeueAfter(expiresAt.Time)}, nil
+	targetDesc := fmt.Sprintf("namespace %q", session.Status.Grant.TargetNamespace)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(session, corev1.EventTypeNormal, "AccessGranted",
+			"Granted %s %q access on %s to %s %q until %s",
+			session.Status.Grant.RoleRef.Kind, session.Status.Grant.RoleRef.Name, targetDesc,
+			session.Spec.Subject.Kind, session.Spec.Subject.Name,
+			session.Status.ExpiresAt.Format(time.RFC3339))
+	}
+	return ctrl.Result{RequeueAfter: r.activeRequeueAfter(session.Status.ExpiresAt.Time)}, nil
 }
 
 func (r *BreakGlassSessionReconciler) reconcileActiveSession(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (ctrl.Result, error) {
@@ -405,6 +476,7 @@ func (r *BreakGlassSessionReconciler) reconcileRevocation(ctx context.Context, s
 		return ctrl.Result{}, err
 	}
 	r.recordTransition(breakglassmetrics.TransitionRevoked, session)
+	r.recordCleanupIntegrityIssue(cleanup, session)
 	return ctrl.Result{}, nil
 }
 
@@ -427,6 +499,7 @@ func (r *BreakGlassSessionReconciler) expireSession(ctx context.Context, session
 		return ctrl.Result{}, err
 	}
 	r.recordTransition(breakglassmetrics.TransitionExpired, session)
+	r.recordCleanupIntegrityIssue(cleanup, session)
 	if cleanup.Deleted && r.Metrics != nil && session.Status.ExpiresAt != nil {
 		r.Metrics.ObserveExpiryCleanupLag(SessionScope(session), time.Since(session.Status.ExpiresAt.Time))
 	}
@@ -468,6 +541,14 @@ func (r *BreakGlassSessionReconciler) setCleanupIntegrityCondition(session *acce
 		return
 	}
 	r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingRemoved", "The emergency access binding was removed using its recorded identity")
+}
+
+// recordCleanupIntegrityIssue keeps terminal cleanup incidents visible even
+// when the session ends as Revoked or Expired rather than Suspended.
+func (r *BreakGlassSessionReconciler) recordCleanupIntegrityIssue(cleanup bindingCleanupResult, session *accessv1alpha1.BreakGlassSession) {
+	if cleanup.IntegrityIssue != nil {
+		r.recordBindingDrift(cleanup.IntegrityIssue, session)
+	}
 }
 
 func (r *BreakGlassSessionReconciler) activeRequeueAfter(expiresAt time.Time) time.Duration {
@@ -716,6 +797,7 @@ func (r *BreakGlassSessionReconciler) suspendForRequestSource(ctx context.Contex
 	}
 	r.recordTransition(breakglassmetrics.TransitionSuspended, session)
 	r.recordRequestSourceIntegrity(issue, session)
+	r.recordCleanupIntegrityIssue(cleanup, session)
 	return ctrl.Result{}, nil
 }
 
@@ -946,6 +1028,7 @@ func (r *BreakGlassSessionReconciler) suspendForCuratedRole(ctx context.Context,
 	}
 	r.recordTransition(breakglassmetrics.TransitionSuspended, session)
 	r.recordCuratedRoleDrift(issue, session)
+	r.recordCleanupIntegrityIssue(cleanup, session)
 	return ctrl.Result{}, nil
 }
 
@@ -1087,6 +1170,7 @@ func (r *BreakGlassSessionReconciler) suspendForProfile(ctx context.Context, ses
 		return ctrl.Result{}, err
 	}
 	r.recordTransition(breakglassmetrics.TransitionSuspended, session)
+	r.recordCleanupIntegrityIssue(cleanup, session)
 	return ctrl.Result{}, nil
 }
 
@@ -1224,6 +1308,46 @@ func (r *BreakGlassSessionReconciler) ensureBindingReference(ctx context.Context
 	return bindingReferenceFromObject(existing)
 }
 
+// ensureReservedBindingReference creates a binding with no subjects. It is a
+// durable, non-authorizing reservation: the caller must first persist its UID
+// in Session status before reconcileReservedSession can add the user subject.
+func (r *BreakGlassSessionReconciler) ensureReservedBindingReference(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*accessv1alpha1.BindingReference, error) {
+	expected := expectedBindingReference(session)
+	if expected.Namespace == "" || session.Status.Grant == nil {
+		return nil, fmt.Errorf("cannot reserve a binding without a resolved namespaced AccessProfile grant")
+	}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      expected.Name,
+			Namespace: expected.Namespace,
+			Labels:    managedBindingLabels(session),
+		},
+		RoleRef: expectedRoleRef(session),
+	}
+	if err := controllerutil.SetControllerReference(session, binding, r.Scheme); err != nil {
+		return nil, err
+	}
+	if err := r.Create(ctx, binding); err == nil {
+		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationSuccess, session)
+		return bindingReferenceFromObject(binding)
+	} else if !apierrors.IsAlreadyExists(err) {
+		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
+		return nil, err
+	}
+
+	existing := &rbacv1.RoleBinding{}
+	if err := r.Get(ctx, client.ObjectKey{Name: expected.Name, Namespace: expected.Namespace}, existing); err != nil {
+		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
+		return nil, err
+	}
+	if issue := bindingMatchesReservation(session, existing); issue != nil {
+		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
+		return nil, &bindingCollisionError{message: fmt.Sprintf("refusing to adopt existing RoleBinding %s/%s: %s", existing.Namespace, existing.Name, issue.Code)}
+	}
+	r.recordBindingOperation(breakglassmetrics.BindingOperationRestore, breakglassmetrics.BindingOperationSuccess, session)
+	return bindingReferenceFromObject(existing)
+}
+
 func expectedBindingReference(session *accessv1alpha1.BreakGlassSession) *accessv1alpha1.BindingReference {
 	bindingName := session.Status.BindingName
 	if bindingName == "" {
@@ -1345,6 +1469,28 @@ func isManagedBindingForSession(obj client.Object, session *accessv1alpha1.Break
 }
 
 func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj client.Object) *bindingIntegrityIssue {
+	if issue := bindingMatchesExpectedMetadata(session, obj); issue != nil {
+		return issue
+	}
+	binding := obj.(*rbacv1.RoleBinding)
+	if !equality.Semantic.DeepEqual(binding.Subjects, []rbacv1.Subject{expectedSubject(session)}) {
+		return &bindingIntegrityIssue{Code: "subjects", ConditionReason: "BindingSubjectsDrift", Message: "the RBAC binding subjects differ from the approved session"}
+	}
+	return nil
+}
+
+func bindingMatchesReservation(session *accessv1alpha1.BreakGlassSession, obj client.Object) *bindingIntegrityIssue {
+	if issue := bindingMatchesExpectedMetadata(session, obj); issue != nil {
+		return issue
+	}
+	binding := obj.(*rbacv1.RoleBinding)
+	if len(binding.Subjects) != 0 {
+		return &bindingIntegrityIssue{Code: "subjects", ConditionReason: "BindingSubjectsDrift", Message: "the reserved RBAC binding unexpectedly has subjects"}
+	}
+	return nil
+}
+
+func bindingMatchesExpectedMetadata(session *accessv1alpha1.BreakGlassSession, obj client.Object) *bindingIntegrityIssue {
 	if !bindingReferenceMatchesObjectLocation(expectedBindingReference(session), obj) {
 		return &bindingIntegrityIssue{
 			Code:            bindingIssueReference,
@@ -1360,19 +1506,44 @@ func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj clien
 		}
 	}
 
-	expectedRole := expectedRoleRef(session)
-	expectedSubjects := []rbacv1.Subject{expectedSubject(session)}
 	binding, ok := obj.(*rbacv1.RoleBinding)
 	if !ok {
 		return &bindingIntegrityIssue{Code: bindingIssueReference, ConditionReason: bindingReferenceInvalidReason, Message: "the referenced object is not an RBAC binding"}
 	}
-	if !equality.Semantic.DeepEqual(binding.RoleRef, expectedRole) {
+	if !equality.Semantic.DeepEqual(binding.RoleRef, expectedRoleRef(session)) {
 		return &bindingIntegrityIssue{Code: "role_ref", ConditionReason: "BindingRoleRefDrift", Message: "the RBAC binding role reference differs from the approved session"}
 	}
-	if !equality.Semantic.DeepEqual(binding.Subjects, expectedSubjects) {
-		return &bindingIntegrityIssue{Code: "subjects", ConditionReason: "BindingSubjectsDrift", Message: "the RBAC binding subjects differ from the approved session"}
-	}
 	return nil
+}
+
+// bindingForReservedActivation verifies the recorded UID before allowing the
+// one-way transition from an empty-subject reservation to an active grant. If
+// a write succeeded but its status update failed, the expected subject already
+// present is accepted so the controller can persist Active without recreating
+// or mutating a replacement object.
+func (r *BreakGlassSessionReconciler) bindingForReservedActivation(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*rbacv1.RoleBinding, bool, *bindingIntegrityIssue, error) {
+	bindingRef := session.Status.BindingRef
+	if bindingRef == nil || bindingRef.UID == "" || !bindingReferenceMatchesSession(bindingRef, session) {
+		return nil, false, &bindingIntegrityIssue{Code: bindingIssueReference, ConditionReason: bindingReferenceInvalidReason, Message: "the recorded reserved binding identity is invalid"}, nil
+	}
+	binding := &rbacv1.RoleBinding{}
+	if err := r.Get(ctx, client.ObjectKey{Name: bindingRef.Name, Namespace: bindingRef.Namespace}, binding); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}, nil
+		}
+		return nil, false, nil, err
+	}
+	if string(binding.UID) != bindingRef.UID {
+		return nil, false, &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}, nil
+	}
+	reservationIssue := bindingMatchesReservation(session, binding)
+	if reservationIssue == nil {
+		return binding, false, nil, nil
+	}
+	if issue := bindingMatchesExpected(session, binding); issue == nil {
+		return binding, true, nil, nil
+	}
+	return nil, false, reservationIssue, nil
 }
 
 // discoverBindingReference supports one-way migration of sessions created by
@@ -1436,11 +1607,31 @@ func (r *BreakGlassSessionReconciler) cleanupBinding(ctx context.Context, sessio
 	return err
 }
 
-// cleanupBindingWithResult deletes only the binding object whose UID was
-// recorded at activation. It uses a UID deletion precondition to close the
-// get/delete race against delete-and-recreate replacement attacks.
+// cleanupBindingWithResult deletes only a binding whose controller ownership is
+// proven. Normally that proof is the UID recorded at reservation. The only
+// unrecorded recovery permitted below is an empty-subject reservation, which
+// cannot authorize access; a live binding is never recovered without its
+// persisted UID.
 func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (bindingCleanupResult, error) {
 	bindingRef := session.Status.BindingRef
+	unrecordedBinding := false
+	if bindingRef == nil {
+		// Recover a narrow empty-subject reservation left by a failed status
+		// checkpoint. This never adopts or deletes an authorizing binding without
+		// a persisted UID, and it does not run for legacy status shapes.
+		recoveredRef, issue, err := r.findUnrecordedBindingReference(ctx, session)
+		if err != nil {
+			return bindingCleanupResult{}, err
+		}
+		if issue != nil {
+			return bindingCleanupResult{IntegrityIssue: issue}, nil
+		}
+		if recoveredRef != nil {
+			bindingRef = recoveredRef
+			unrecordedBinding = true
+		}
+	}
+
 	if bindingRef == nil {
 		// A never-activated request has nothing to clean up. For a legacy active
 		// session with a secure resolved grant, attempt the strict one-way
@@ -1469,7 +1660,7 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 		session.Status.BindingName = bindingRef.Name
 	}
 
-	if bindingRef.UID == "" || !bindingReferenceMatchesSession(bindingRef, session) {
+	if bindingRef.UID == "" || (!unrecordedBinding && !bindingReferenceMatchesSession(bindingRef, session)) {
 		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{
 			Code:            bindingIssueReference,
 			ConditionReason: bindingReferenceInvalidReason,
@@ -1485,6 +1676,7 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 		return bindingCleanupResult{}, err
 	}
 	if string(obj.GetUID()) != bindingRef.UID {
+		r.recordBindingOperation(breakglassmetrics.BindingOperationCleanup, breakglassmetrics.BindingOperationError, session)
 		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}}, nil
 	}
 
@@ -1502,6 +1694,78 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 	}
 	r.recordBindingOperation(breakglassmetrics.BindingOperationCleanup, breakglassmetrics.BindingOperationSuccess, session)
 	return bindingCleanupResult{Deleted: true}, nil
+}
+
+// findUnrecordedBindingReference discovers only an empty-subject reservation
+// created by this controller in the create-before-status persistence window. A
+// target namespace cannot be recovered from blank Session status, so a direct
+// lookup is not possible: use the high-entropy Session UID label, then
+// independently corroborate the deterministic name and controller owner
+// reference. A namespaced production manager searches only its configured
+// target namespaces, so this recovery never requires broader RoleBinding RBAC
+// than the grant path itself.
+//
+// A result is intentionally not written back to status here. Callers use it
+// only to perform immediate UID-precondition cleanup on a terminal path. A
+// non-terminal reconciliation instead reaches ensureReservedBindingReference and
+// persists the recovered reference after policy validation succeeds.
+func (r *BreakGlassSessionReconciler) findUnrecordedBindingReference(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*accessv1alpha1.BindingReference, *bindingIntegrityIssue, error) {
+	if session.Status.BindingName != "" || session.Status.Grant != nil ||
+		session.Status.StartTime != nil || session.Status.ExpiresAt != nil {
+		return nil, nil, nil
+	}
+	var bindings []rbacv1.RoleBinding
+	listBindings := func(options ...client.ListOption) error {
+		list := &rbacv1.RoleBindingList{}
+		options = append(options, client.MatchingLabels(managedBindingLabels(session)))
+		if err := r.policyReader().List(ctx, list, options...); err != nil {
+			return err
+		}
+		bindings = append(bindings, list.Items...)
+		return nil
+	}
+	if len(r.AllowedTargetNamespaces) == 0 {
+		if err := listBindings(); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		for namespace := range r.AllowedTargetNamespaces {
+			if err := listBindings(client.InNamespace(namespace)); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	expectedName := bindingNameForSession(session)
+	var matching []*accessv1alpha1.BindingReference
+	for i := range bindings {
+		binding := &bindings[i]
+		if binding.Name != expectedName || len(binding.Subjects) != 0 || !isManagedBindingForSession(binding, session) {
+			continue
+		}
+		ref, err := bindingReferenceFromObject(binding)
+		if err != nil {
+			return nil, &bindingIntegrityIssue{
+				Code:            bindingIssueReference,
+				ConditionReason: bindingReferenceInvalidReason,
+				Message:         "a managed emergency access binding has no server-assigned UID",
+			}, nil
+		}
+		matching = append(matching, ref)
+	}
+
+	switch len(matching) {
+	case 0:
+		return nil, nil, nil
+	case 1:
+		return matching[0], nil, nil
+	default:
+		return nil, &bindingIntegrityIssue{
+			Code:            bindingIssueReference,
+			ConditionReason: bindingReferenceInvalidReason,
+			Message:         "multiple managed RoleBindings match an unrecorded emergency access session",
+		}, nil
+	}
 }
 
 // findSessionForBinding maps changes in RBAC bindings back to their parent BreakGlassSession

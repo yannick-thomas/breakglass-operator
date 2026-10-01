@@ -53,6 +53,7 @@ const (
 	expiryRecoverySessionName      = "production-expiry-recovery-session"
 	rollingRestartSessionName      = "production-rolling-restart-session"
 	rollingRestartRecoverySession  = "production-rolling-restart-recovery-session"
+	namespaceDeletionSessionName   = "production-namespace-deletion-session"
 )
 
 var installedCertManager bool
@@ -112,7 +113,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		for _, session := range []string{
 			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
 			certificateRotationSessionName, expiryRecoverySessionName, rollingRestartSessionName,
-			rollingRestartRecoverySession,
+			rollingRestartRecoverySession, namespaceDeletionSessionName,
 		} {
 			_, _ = utils.Run(exec.Command(
 				"kubectl", "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
@@ -276,6 +277,24 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPhase(expiryRecoverySessionName, "Expired"), 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
+	})
+
+	It("releases the session finalizer when its target namespace disappears", func() {
+		By("creating a final active grant before deleting its target namespace")
+		Expect(createSessionWithDuration(namespaceDeletionSessionName, "5m")).To(Succeed())
+		Eventually(sessionIsActive(namespaceDeletionSessionName), 2*time.Minute, time.Second).Should(Succeed())
+
+		By("deleting the namespace and session without relying on RoleBinding delete ordering")
+		_, err := utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--wait=false"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = utils.Run(exec.Command(
+			"kubectl", "delete", "breakglasssession", namespaceDeletionSessionName, "--wait=false",
+		))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("requiring finalizer completion even after Kubernetes has removed the RoleBinding")
+		Eventually(sessionIsDeleted(namespaceDeletionSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(namespaceIsDeleted(targetNamespace), 2*time.Minute, time.Second).Should(Succeed())
 	})
 })
 
@@ -522,6 +541,20 @@ func sessionIsSuspendedForCuratedRole(name, reason string) func(Gomega) {
 func bindingIsDeleted(name string) func(Gomega) {
 	return func(g Gomega) {
 		_, err := utils.Run(exec.Command("kubectl", "get", "rolebinding", name, "-n", targetNamespace))
+		g.Expect(err).To(HaveOccurred())
+	}
+}
+
+func sessionIsDeleted(name string) func(Gomega) {
+	return func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name))
+		g.Expect(err).To(HaveOccurred())
+	}
+}
+
+func namespaceIsDeleted(name string) func(Gomega) {
+	return func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "namespace", name))
 		g.Expect(err).To(HaveOccurred())
 	}
 }

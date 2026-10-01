@@ -357,7 +357,7 @@ func roleHasNamedClusterRoleBind(role unstructured.Unstructured) bool {
 func roleHasExactRoleBindingVerbs(role unstructured.Unstructured) bool {
 	for _, item := range nestedRules(role) {
 		if containsString(item["resources"], roleBindingRule) {
-			return sameStrings(stringValues(item["verbs"]), []string{"create", "delete", "get", "list", "watch"})
+			return sameStrings(stringValues(item["verbs"]), []string{"create", "delete", "get", "list", "update", "watch"})
 		}
 	}
 	return false
