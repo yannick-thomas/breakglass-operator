@@ -101,11 +101,19 @@ var _ = Describe("Production installation", Ordered, func() {
 	})
 
 	AfterAll(func() {
+		// A failed outage assertion can leave the manager scaled to zero. Ask for
+		// recovery before deleting sessions so their finalizers have a controller
+		// available; the deletes below are still non-blocking as a final guard.
+		_, _ = utils.Run(exec.Command(
+			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
+		))
 		for _, session := range []string{
 			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
 			certificateRotationSessionName, expiryRecoverySessionName,
 		} {
-			_, _ = utils.Run(exec.Command("kubectl", "delete", "breakglasssession", session, "--ignore-not-found"))
+			_, _ = utils.Run(exec.Command(
+				"kubectl", "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
+			))
 		}
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding", requesterRoleBinding, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command(
@@ -120,8 +128,7 @@ var _ = Describe("Production installation", Ordered, func() {
 
 	AfterEach(func() {
 		if CurrentSpecReport().Failed() {
-			_, _ = utils.Run(exec.Command("kubectl", "get", "pods", "-n", managerNamespace, "-o", "wide"))
-			_, _ = utils.Run(exec.Command("kubectl", "get", "events", "-n", managerNamespace, "--sort-by=.lastTimestamp"))
+			reportProductionDiagnostics()
 		}
 	})
 
@@ -146,7 +153,8 @@ var _ = Describe("Production installation", Ordered, func() {
 			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0",
 		))
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(webhookEndpointsAreAbsent, 2*time.Minute, time.Second).Should(Succeed())
+		DeferCleanup(restoreProductionManager)
+		Eventually(managerOutageHasConverged, 2*time.Minute, time.Second).Should(Succeed())
 
 		By("proving that a new protected request is rejected while every webhook endpoint is unavailable")
 		Expect(createSession(outageSessionName)).To(MatchError(ContainSubstring("failed")))
@@ -218,7 +226,8 @@ var _ = Describe("Production installation", Ordered, func() {
 		bindingName := sessionBindingName(expiryRecoverySessionName)
 		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0"))
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(webhookEndpointsAreAbsent, 2*time.Minute, time.Second).Should(Succeed())
+		DeferCleanup(restoreProductionManager)
+		Eventually(managerOutageHasConverged, 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPassedExpiry(expiryRecoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
 		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2"))
 		Expect(err).NotTo(HaveOccurred())
@@ -257,31 +266,101 @@ func assertProductionReady(g Gomega) {
 }
 
 func readyManagerPods() []string {
+	pods, err := managerPods()
+	Expect(err).NotTo(HaveOccurred())
+	return pods
+}
+
+func managerPods() ([]string, error) {
 	output, err := utils.Run(exec.Command(
 		"kubectl", "get", "pods", "-n", managerNamespace,
 		"-l", "control-plane=controller-manager",
 		"-o", "jsonpath={range .items[?(@.status.phase=='Running')]}{.metadata.name}{'\\n'}{end}",
 	))
-	Expect(err).NotTo(HaveOccurred())
-	return utils.GetNonEmptyLines(output)
+	if err != nil {
+		return nil, err
+	}
+	return utils.GetNonEmptyLines(output), nil
 }
 
 func readyWebhookEndpointCount() (int, error) {
+	endpoints, err := readyWebhookEndpointAddresses()
+	if err != nil {
+		return 0, err
+	}
+	return len(endpoints), nil
+}
+
+func readyWebhookEndpointAddresses() ([]string, error) {
 	output, err := utils.Run(exec.Command(
 		"kubectl", "get", "endpointslices.discovery.k8s.io", "-n", managerNamespace,
 		"-l", "kubernetes.io/service-name=breakglass-operator-webhook-service",
 		"-o", "jsonpath={range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{'\\n'}{end}",
 	))
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return len(utils.GetNonEmptyLines(output)), nil
+	return utils.GetNonEmptyLines(output), nil
 }
 
-func webhookEndpointsAreAbsent(g Gomega) {
-	count, err := readyWebhookEndpointCount()
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(count).To(BeZero())
+func managerOutageHasConverged() error {
+	replicas, err := utils.Run(exec.Command(
+		"kubectl", "get", "deployment", managerName, "-n", managerNamespace,
+		"-o", "jsonpath={.spec.replicas}",
+	))
+	if err != nil {
+		return fmt.Errorf("read manager replica target: %w", err)
+	}
+
+	pods, err := managerPods()
+	if err != nil {
+		return fmt.Errorf("read manager pods: %w", err)
+	}
+	endpoints, err := readyWebhookEndpointAddresses()
+	if err != nil {
+		return fmt.Errorf("read ready webhook endpoints: %w", err)
+	}
+
+	if strings.TrimSpace(replicas) != "0" || len(pods) != 0 || len(endpoints) != 0 {
+		return fmt.Errorf(
+			"manager outage has not converged: desired replicas=%q, running pods=%v, ready webhook endpoints=%v",
+			strings.TrimSpace(replicas), pods, endpoints,
+		)
+	}
+	return nil
+}
+
+func restoreProductionManager() {
+	By("restoring manager replicas after the outage simulation")
+	_, err := utils.Run(exec.Command(
+		"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
+	))
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "warning: could not restore manager replicas: %v\\n", err)
+	}
+}
+
+func reportProductionDiagnostics() {
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{"manager deployment", []string{"get", "deployment", managerName, "-n", managerNamespace, "-o", "wide"}},
+		{"manager pods", []string{"get", "pods", "-n", managerNamespace, "-o", "wide"}},
+		{"webhook endpoint slices", []string{
+			"get", "endpointslices.discovery.k8s.io", "-n", managerNamespace,
+			"-l", "kubernetes.io/service-name=breakglass-operator-webhook-service", "-o", "yaml",
+		}},
+		{"manager events", []string{"get", "events", "-n", managerNamespace, "--sort-by=.lastTimestamp"}},
+	}
+	for _, command := range commands {
+		output, err := utils.Run(exec.Command("kubectl", command.args...))
+		if err != nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic %s failed: %v\\n", command.name, err)
+			continue
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "diagnostic %s:\\n%s\\n", command.name, strings.TrimSpace(output))
+	}
 }
 
 func certificateSecretUID() string {
