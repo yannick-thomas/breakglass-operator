@@ -138,8 +138,18 @@ jobs:
           cache-dependency-path: go.sum
       - name: Set up Kind
         uses: ./.github/actions/setup-kind
+      - name: Capture default Kind compatibility evidence
+        run: make capture-kind-compatibility-evidence COMPATIBILITY_EVIDENCE_DIR=compatibility-evidence/default
       - name: Run E2E tests
         run: make test-e2e
+      - name: Upload default Kind compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: default-kind-compatibility-evidence-${{ github.sha }}
+          path: compatibility-evidence/default
+          if-no-files-found: error
+          retention-days: 14
 
   test-e2e-production:
     name: Production E2E on Kind workers
@@ -159,8 +169,18 @@ jobs:
           cache-dependency-path: go.sum
       - name: Set up Kind
         uses: ./.github/actions/setup-kind
+      - name: Capture production Kind compatibility evidence
+        run: make capture-kind-compatibility-evidence KIND_CLUSTER=breakglass-operator-production-e2e COMPATIBILITY_EVIDENCE_DIR=compatibility-evidence/production
       - name: Run production E2E tests
         run: make test-e2e-production
+      - name: Upload production Kind compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-kind-compatibility-evidence-${{ github.sha }}
+          path: compatibility-evidence/production
+          if-no-files-found: error
+          retention-days: 14
 
   package:
     name: Publish image and rendered installers

@@ -87,7 +87,8 @@ flowchart TD
 * [x] **Grant-Härtung**: Unveränderliche Request-Daten, authentifizierte Human-Requester, Profil-UID-Snapshot und eindeutige Binding-Ownership über Binding-UID.
 
 #### Noch vor produktivem Einsatz erforderlich
-* [ ] **Threat Model & Support-Matrix**: Vertrauensgrenzen, zulässige Cluster-/Namespace-Modelle, Ausfallverhalten und unterstützte Kubernetes-Versionen festlegen.
+* [ ] **Threat Model**: Vertrauensgrenzen, zulässige Cluster-/Namespace-Modelle und Ausfallverhalten als überprüfbare Annahmen festlegen.
+* [~] **Support-Matrix**: Required Kind/E2E-Gates erzeugen nun Artefakte mit der tatsächlich verwendeten Kind-Version, Kubernetes-Serverversion, Node-Image und cert-manager-Fixture. Nach einem grünen `main`-Lauf wird daraus ein einziger digest-gepinnter, überprüfter Matrix-Eintrag abgeleitet; bis dahin wird keine Kubernetes-Version als unterstützt behauptet.
 * [~] **Controller-Reliability-Tests**: Fake-Client-Tests injizieren einen Status-Write-Fehler zwischen Binding-Reservation und Aktivierung; Kind prüft Rolling Restart, TTL-Recovery sowie Namespace-/Session-Deletion-Rennen. Offen bleiben eine explizite versionsübergreifende Upgrade-/Rollback-Probe und Lastmessungen unter realer API-Server-Latenz.
 * [x] **Binding-Integrität & sichere Expiry**: `status.bindingRef` persistiert Kind, Namespace, Namen und Objekt-UID. Delete/Recreate, Subject-/Role-Drift, verlorene Ownership oder fehlende TTL führen fail-closed zu `Suspended`; es gibt kein automatisches Re-Granting. Cleanup nutzt eine UID-Precondition und löscht keinen Ersatz mit gleichem Namen. Expiry bleibt ein best-effort SLO, bis der Zugriff zusätzlich durch wirklich ablaufende Credentials begrenzt ist.
 * [ ] **Scale-Grenzen**: RoleBinding-/AccessProfile-Watches mit Predicates und einem Feldindex auf `spec.accessProfile` begrenzen sowie Cache-/Reconcile-Last in großen Clustern messen.

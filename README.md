@@ -311,6 +311,10 @@ UID-safe cleanup, drift suspension, TTL scheduling, and metric privacy. Some
 sandboxed environments prohibit envtest from opening loopback listeners; the
 CI/Kind pipeline should run the full webhook and lifecycle suite.
 
+The operator does not yet claim a Kubernetes version range. Required Kind/E2E
+runs capture the evidence needed to qualify one exact, digest-pinned tuple;
+see [Compatibility qualification](docs/compatibility.md).
+
 ## Current scope and next gates
 
 This is intentionally not a generic PAM replacement. It is most useful as a

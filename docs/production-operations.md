@@ -87,6 +87,11 @@ not a cross-version compatibility or downgrade guarantee. Add a pinned
 previous-version fixture and an explicit API-compatibility contract before
 claiming version-to-version upgrade or rollback support.
 
+The current Kubernetes compatibility qualification process is documented in
+[Compatibility qualification](compatibility.md). It deliberately publishes no
+support range until a successful required E2E run has produced and locked the
+exact Kind node image and API-server evidence.
+
 The API server deliberately fails new requests closed when the webhook is
 unavailable. Treat a webhook failure as an access-control incident, not as a
 reason to remove the webhook configuration or set `failurePolicy: Ignore`.
