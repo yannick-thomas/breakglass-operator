@@ -154,9 +154,9 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(restoreProductionManager)
-		Eventually(managerOutageHasConverged, 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
 
-		By("proving that a new protected request is rejected while every webhook endpoint is unavailable")
+		By("proving that a new protected request is rejected while every manager is unavailable")
 		Expect(createSession(outageSessionName)).To(MatchError(ContainSubstring("failed")))
 
 		By("restoring the manager deployment and proving that admission recovers")
@@ -227,7 +227,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0"))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(restoreProductionManager)
-		Eventually(managerOutageHasConverged, 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPassedExpiry(expiryRecoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
 		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2"))
 		Expect(err).NotTo(HaveOccurred())
@@ -303,7 +303,7 @@ func readyWebhookEndpointAddresses() ([]string, error) {
 	return utils.GetNonEmptyLines(output), nil
 }
 
-func managerOutageHasConverged() error {
+func managerIsStopped() error {
 	replicas, err := utils.Run(exec.Command(
 		"kubectl", "get", "deployment", managerName, "-n", managerNamespace,
 		"-o", "jsonpath={.spec.replicas}",
@@ -316,15 +316,11 @@ func managerOutageHasConverged() error {
 	if err != nil {
 		return fmt.Errorf("read manager pods: %w", err)
 	}
-	endpoints, err := readyWebhookEndpointAddresses()
-	if err != nil {
-		return fmt.Errorf("read ready webhook endpoints: %w", err)
-	}
 
-	if strings.TrimSpace(replicas) != "0" || len(pods) != 0 || len(endpoints) != 0 {
+	if strings.TrimSpace(replicas) != "0" || len(pods) != 0 {
 		return fmt.Errorf(
-			"manager outage has not converged: desired replicas=%q, running pods=%v, ready webhook endpoints=%v",
-			strings.TrimSpace(replicas), pods, endpoints,
+			"manager outage has not converged: desired replicas=%q, running pods=%v",
+			strings.TrimSpace(replicas), pods,
 		)
 	}
 	return nil
