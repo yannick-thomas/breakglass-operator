@@ -138,6 +138,8 @@ jobs:
           cache-dependency-path: go.sum
       - name: Set up Kind
         uses: ./.github/actions/setup-kind
+      - name: Create default Kind cluster
+        run: make setup-test-e2e
       - name: Capture default Kind compatibility evidence
         run: make capture-kind-compatibility-evidence COMPATIBILITY_EVIDENCE_DIR=compatibility-evidence/default
       - name: Run E2E tests
@@ -169,6 +171,8 @@ jobs:
           cache-dependency-path: go.sum
       - name: Set up Kind
         uses: ./.github/actions/setup-kind
+      - name: Create production Kind cluster
+        run: make setup-test-e2e-production
       - name: Capture production Kind compatibility evidence
         run: make capture-kind-compatibility-evidence KIND_CLUSTER=breakglass-operator-production-e2e COMPATIBILITY_EVIDENCE_DIR=compatibility-evidence/production
       - name: Run production E2E tests

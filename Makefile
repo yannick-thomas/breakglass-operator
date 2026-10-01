@@ -121,7 +121,7 @@ capture-kind-compatibility-evidence: ## Capture exact Kind/Kubernetes evidence f
 		dir="$(COMPATIBILITY_EVIDENCE_DIR)"; \
 		mkdir -p "$$dir"; \
 		$(KIND) version > "$$dir/kind-version.txt"; \
-		$(KUBECTL) version -o yaml > "$$dir/kubernetes-version.yaml"; \
+		$(KUBECTL) --context "kind-$(KIND_CLUSTER)" version -o yaml > "$$dir/kubernetes-version.yaml"; \
 		node="$$($(KIND) get nodes --name $(KIND_CLUSTER) | head -n 1)"; \
 		test -n "$$node"; \
 		docker inspect "$$node" > "$$dir/kind-node.json"; \
