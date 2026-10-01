@@ -51,6 +51,8 @@ const (
 	roleReuseSessionName           = "production-role-reuse-session"
 	certificateRotationSessionName = "production-certificate-rotation-session"
 	expiryRecoverySessionName      = "production-expiry-recovery-session"
+	rollingRestartSessionName      = "production-rolling-restart-session"
+	rollingRestartRecoverySession  = "production-rolling-restart-recovery-session"
 )
 
 var installedCertManager bool
@@ -109,7 +111,8 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		for _, session := range []string{
 			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
-			certificateRotationSessionName, expiryRecoverySessionName,
+			certificateRotationSessionName, expiryRecoverySessionName, rollingRestartSessionName,
+			rollingRestartRecoverySession,
 		} {
 			_, _ = utils.Run(exec.Command(
 				"kubectl", "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
@@ -209,6 +212,45 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
 	})
 
+	It("retains an active grant through a rolling manager restart", func() {
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("creating a non-expiring-during-test namespaced session")
+		Expect(createSessionWithDuration(rollingRestartSessionName, "5m")).To(Succeed())
+		Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		bindingName, bindingUID := sessionBindingReference(rollingRestartSessionName)
+		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
+		previousManagerUIDs := managerPodUIDs()
+		Expect(previousManagerUIDs).To(HaveLen(2))
+
+		By("restarting the high-availability deployment without changing the active grant")
+		_, err := utils.Run(exec.Command(
+			"kubectl", "rollout", "restart", "deployment", managerName, "-n", managerNamespace,
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			assertProductionReady(g)
+			currentManagerUIDs := managerPodUIDs()
+			g.Expect(currentManagerUIDs).To(HaveLen(2))
+			for _, previousUID := range previousManagerUIDs {
+				g.Expect(currentManagerUIDs).NotTo(ContainElement(previousUID))
+			}
+		}, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("requiring the exact session and RoleBinding identity to remain unchanged")
+		Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		currentBindingName, currentBindingUID := sessionBindingReference(rollingRestartSessionName)
+		Expect(currentBindingName).To(Equal(bindingName))
+		Expect(currentBindingUID).To(Equal(bindingUID))
+		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
+
+		By("proving that a new least-privilege request is admitted after recovery")
+		Expect(createSession(rollingRestartRecoverySession)).To(Succeed())
+		Eventually(sessionIsActive(rollingRestartRecoverySession), 2*time.Minute, time.Second).Should(Succeed())
+		revokeSession(rollingRestartRecoverySession)
+		revokeSession(rollingRestartSessionName)
+	})
+
 	It("recovers webhook certificates and expires a grant after a complete manager restart", func() {
 		By("forcing cert-manager to reissue the serving secret without weakening admission")
 		previousCertificateSecretUID := certificateSecretUID()
@@ -281,6 +323,16 @@ func managerPods() ([]string, error) {
 		return nil, err
 	}
 	return utils.GetNonEmptyLines(output), nil
+}
+
+func managerPodUIDs() []string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "get", "pods", "-n", managerNamespace,
+		"-l", "control-plane=controller-manager",
+		"-o", "jsonpath={range .items[?(@.status.phase=='Running')]}{.metadata.uid}{'\\n'}{end}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	return utils.GetNonEmptyLines(output)
 }
 
 func readyWebhookEndpointCount() (int, error) {
@@ -379,6 +431,10 @@ func certificateSecretWasReissued(previousUID string) func(Gomega) {
 }
 
 func createSession(name string) error {
+	return createSessionWithDuration(name, "1m")
+}
+
+func createSessionWithDuration(name, duration string) error {
 	_, err := applyManifestAs(requesterName, fmt.Sprintf(`
 apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
@@ -386,9 +442,9 @@ metadata:
   name: %s
 spec:
   accessProfile: %s
-  duration: "1m"
+  duration: %q
   reason: "Production HA and fail-closed admission verification"
-`, name, accessProfileName))
+`, name, accessProfileName, duration))
 	return err
 }
 
@@ -426,8 +482,26 @@ func sessionHasPassedExpiry(name string) func(Gomega) {
 }
 
 func sessionBindingName(name string) string {
+	bindingName, _ := sessionBindingReference(name)
+	return bindingName
+}
+
+func sessionBindingReference(name string) (string, string) {
 	output, err := utils.Run(exec.Command(
-		"kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.bindingRef.name}",
+		"kubectl", "get", "breakglasssession", name,
+		"-o", "jsonpath={.status.bindingRef.name},{.status.bindingRef.uid}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	parts := strings.Split(output, ",")
+	Expect(parts).To(HaveLen(2))
+	Expect(parts[0]).NotTo(BeEmpty())
+	Expect(parts[1]).NotTo(BeEmpty())
+	return parts[0], parts[1]
+}
+
+func roleBindingUID(name string) string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "get", "rolebinding", name, "-n", targetNamespace, "-o", "jsonpath={.metadata.uid}",
 	))
 	Expect(err).NotTo(HaveOccurred())
 	Expect(output).NotTo(BeEmpty())

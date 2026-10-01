@@ -61,21 +61,29 @@ make test-e2e-production
 It renders the production overlay, verifies two manager Pods, certificate and
 PDB readiness, deletes one manager Pod before a real attributed request, then
 scales all managers down to prove admission fails closed before restoring the
-deployment and successfully issuing a fresh request. It does not remove or
-weaken the webhook configuration to simulate the outage.
+deployment and successfully issuing a fresh request. It reissues the serving
+certificate and verifies that an active session keeps the exact recorded
+RoleBinding UID through a rolling manager restart. It does not remove or weaken
+the webhook configuration to simulate an outage.
 
 ## Upgrade and rollback
 
 1. Record the image digest, rendered manifest, current CRDs, active sessions,
    and the state of the webhook configurations.
 2. Run the release's Kind/E2E suite against a disposable cluster, including
-   webhook CA readiness, denied `use`, TTL/restart, binding replacement, and
-   cleanup behaviour.
+   webhook CA readiness, denied `use`, a rolling manager restart that preserves
+   the active binding UID, TTL/recovery, binding replacement, and cleanup
+   behaviour.
 3. Apply the release, wait for both manager Pods and the serving certificate to
    become ready, then perform the harmless request check above.
 4. Keep the former controller image and manifest available, but never roll
    back to an image or manifest that accepts the removed free-form session API.
    First revoke or allow expiry of grants incompatible with the target version.
+
+The Kind suite proves rollout continuity for a single rendered version. It is
+not a cross-version compatibility or downgrade guarantee. Add a pinned
+previous-version fixture and an explicit API-compatibility contract before
+claiming version-to-version upgrade or rollback support.
 
 The API server deliberately fails new requests closed when the webhook is
 unavailable. Treat a webhook failure as an access-control incident, not as a

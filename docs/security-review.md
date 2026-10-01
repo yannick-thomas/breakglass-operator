@@ -74,7 +74,7 @@ using high-impact profiles.
 | --- | --- | --- |
 | SR-01 | P0 | The generic manager ClusterRole can create/delete/read RoleBindings cluster-wide. | The `production-namespaced` overlay removes that rule and binds it only in an explicit namespace; use it (or an equivalent multi-namespace GitOps composition) for high-assurance profiles. Do not treat the generic default as a high-assurance production policy. |
 | SR-02 | P0 | A profile snapshots a curated `ClusterRole` name but not its rule set. Editing that ClusterRole can widen an already active session immediately. | Implemented: activation records role UID plus canonical rule hash; every active integrity check performs a direct named-role read and suspends on missing/recreated/rule-drifted roles. Keep roles versioned/immutable and finish Kind/E2E coverage in [issue #4](https://github.com/yannick-thomas/breakglass-operator/issues/4). |
-| SR-03 | P0 | Fail-closed admission is configured but not yet proven under webhook outage, controller restart, certificate rotation, and binding replacement in a real cluster. | Complete [issue #3](https://github.com/yannick-thomas/breakglass-operator/issues/3) with Kind/E2E and upgrade/rollback test gates before granting production requester rights. |
+| SR-03 | P0 | Fail-closed admission, certificate reissue, manager outage/rolling restart, TTL recovery, and binding replacement are exercised in disposable production Kind. A real cross-version upgrade or rollback contract is not yet defined or tested. | Keep the production Kind gate mandatory. Before claiming compatibility across releases, add a pinned prior-version fixture and test the explicitly supported upgrade/rollback paths; never downgrade into the removed free-form session API. |
 | SR-04 | P1 | “Human-only” rejects standard ServiceAccount usernames, but does not assert an OIDC issuer, verified human claim, or approved identity group. A non-standard workload identity with RBAC could appear as a user. | Define the supported identity provider and an allowlisted requester group/claim at the platform boundary. Add a policy extension only when it can be enforced and tested without duplicating IdP logic. |
 | SR-05 | P1 | `BreakGlassSession` contains requester identity and incident reason. Any principal with broad `get/list/watch` rights can read sensitive operational context. | Ship least-privilege requester/viewer RBAC examples, separate an audit-reader role, and restrict CR reads. Keep reasons and identities out of Prometheus labels. |
 | SR-06 | P1 | TTL cleanup is controller-driven. During a total controller outage an expired RoleBinding can remain effective until recovery or the audited emergency procedure runs. | Meet the HA/PDB gate, alert on past-expiry sessions, test recovery, and document an offline process that checks binding UID before action. Longer term, pair JIT RBAC with short-lived human credentials. |
@@ -96,8 +96,11 @@ using high-impact profiles.
 
 * [ ] The manager's RoleBinding privileges match only approved target namespaces.
 * [ ] Each curated role is immutable/versioned and role drift suspends active grants.
-* [ ] Webhook, controller restart, certificate rotation, TTL, replacement, and
-  rollback tests pass on a disposable Kubernetes cluster.
+* [x] Webhook outage/recovery, controller rolling restart, certificate rotation,
+  TTL recovery, and binding replacement are exercised on a disposable
+  Kubernetes cluster.
+* [ ] A documented cross-version upgrade/rollback contract has a pinned
+  previous-version fixture and compatibility tests.
 * [ ] `create`, `use`, profile authoring, revocation, audit reading, and
   controller administration are granted to distinct least-privilege groups.
 * [ ] Kubernetes audit events are exported to a durable, restricted sink.
