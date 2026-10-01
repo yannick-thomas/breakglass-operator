@@ -104,10 +104,12 @@ const (
 	bindingIssueMissing           = "missing"
 	bindingIssueUIDMismatch       = "uid_mismatch"
 	bindingIssueReference         = "binding_reference"
+	bindingIssueSubjects          = "subjects"
 	bindingReferenceInvalidReason = "BindingReferenceInvalid"
 	bindingMissingReason          = "BindingMissing"
 	bindingUIDMismatchReason      = "BindingUIDMismatch"
 	bindingMissingMessage         = "the emergency access binding no longer exists"
+	bindingUIDMismatchMessage     = "a different RBAC binding object now uses the recorded binding name"
 )
 
 // BreakGlassSessionReconciler reconciles a BreakGlassSession object
@@ -256,33 +258,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if !isRequestDenied(err) {
 			return ctrl.Result{}, err
 		}
-		// A prior reconciliation can have created the deterministic binding and
-		// then lost its status write. Resolve errors must therefore run the same
-		// strict cleanup recovery as every other terminal path before recording
-		// denial; otherwise a deleted/replaced profile could strand live access.
-		cleanup, cleanupErr := r.cleanupBindingWithResult(ctx, session)
-		if cleanupErr != nil {
-			return ctrl.Result{}, cleanupErr
-		}
-		log.Error(err, "BreakGlassSession could not be activated", "session", session.Name)
-		session.Status.Phase = accessv1alpha1.PhaseDenied
-		r.setAccessGrantedCondition(session, metav1.ConditionFalse, "InvalidSpec", err.Error())
-		if cleanup.Deleted || cleanup.IntegrityIssue != nil {
-			r.setCleanupIntegrityCondition(session, cleanup)
-		}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(session, corev1.EventTypeWarning, "AccessDenied",
-				"Emergency access request was denied: %v", err)
-			if cleanup.IntegrityIssue != nil {
-				r.Recorder.Eventf(session, corev1.EventTypeWarning, "BindingIntegrityLost", "Emergency access binding could not be safely removed: %s", cleanup.IntegrityIssue.Code)
-			}
-		}
-		if statusErr := r.Status().Update(ctx, session); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		r.recordTransition(breakglassmetrics.TransitionDenied, session)
-		r.recordCleanupIntegrityIssue(cleanup, session)
-		return ctrl.Result{}, nil
+		return r.denyActivation(ctx, session, err)
 	}
 	session.Status.Grant = grant
 
@@ -326,6 +302,34 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+}
+
+// denyActivation cleans up a reservation left by an interrupted status write
+// before making a policy denial terminal. Cleanup failures remain retryable.
+func (r *BreakGlassSessionReconciler) denyActivation(ctx context.Context, session *accessv1alpha1.BreakGlassSession, cause error) (ctrl.Result, error) {
+	cleanup, err := r.cleanupBindingWithResult(ctx, session)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	logf.FromContext(ctx).Error(cause, "BreakGlassSession could not be activated", "session", session.Name)
+	session.Status.Phase = accessv1alpha1.PhaseDenied
+	r.setAccessGrantedCondition(session, metav1.ConditionFalse, "InvalidSpec", cause.Error())
+	if cleanup.Deleted || cleanup.IntegrityIssue != nil {
+		r.setCleanupIntegrityCondition(session, cleanup)
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(session, corev1.EventTypeWarning, "AccessDenied",
+			"Emergency access request was denied: %v", cause)
+		if cleanup.IntegrityIssue != nil {
+			r.Recorder.Eventf(session, corev1.EventTypeWarning, "BindingIntegrityLost", "Emergency access binding could not be safely removed: %s", cleanup.IntegrityIssue.Code)
+		}
+	}
+	if err := r.Status().Update(ctx, session); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.recordTransition(breakglassmetrics.TransitionDenied, session)
+	r.recordCleanupIntegrityIssue(cleanup, session)
+	return ctrl.Result{}, nil
 }
 
 func (r *BreakGlassSessionReconciler) reconcileReservedSession(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (ctrl.Result, error) {
@@ -1227,7 +1231,7 @@ func (r *BreakGlassSessionReconciler) recordBindingDrift(issue *bindingIntegrity
 		reason = breakglassmetrics.DriftUIDMismatch
 	case "role_ref":
 		reason = breakglassmetrics.DriftRoleRef
-	case "subjects":
+	case bindingIssueSubjects:
 		reason = breakglassmetrics.DriftSubjects
 	case bindingIssueReference:
 		reason = breakglassmetrics.DriftBindingReference
@@ -1474,7 +1478,7 @@ func bindingMatchesExpected(session *accessv1alpha1.BreakGlassSession, obj clien
 	}
 	binding := obj.(*rbacv1.RoleBinding)
 	if !equality.Semantic.DeepEqual(binding.Subjects, []rbacv1.Subject{expectedSubject(session)}) {
-		return &bindingIntegrityIssue{Code: "subjects", ConditionReason: "BindingSubjectsDrift", Message: "the RBAC binding subjects differ from the approved session"}
+		return &bindingIntegrityIssue{Code: bindingIssueSubjects, ConditionReason: "BindingSubjectsDrift", Message: "the RBAC binding subjects differ from the approved session"}
 	}
 	return nil
 }
@@ -1485,7 +1489,7 @@ func bindingMatchesReservation(session *accessv1alpha1.BreakGlassSession, obj cl
 	}
 	binding := obj.(*rbacv1.RoleBinding)
 	if len(binding.Subjects) != 0 {
-		return &bindingIntegrityIssue{Code: "subjects", ConditionReason: "BindingSubjectsDrift", Message: "the reserved RBAC binding unexpectedly has subjects"}
+		return &bindingIntegrityIssue{Code: bindingIssueSubjects, ConditionReason: "BindingSubjectsDrift", Message: "the reserved RBAC binding unexpectedly has subjects"}
 	}
 	return nil
 }
@@ -1534,7 +1538,7 @@ func (r *BreakGlassSessionReconciler) bindingForReservedActivation(ctx context.C
 		return nil, false, nil, err
 	}
 	if string(binding.UID) != bindingRef.UID {
-		return nil, false, &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}, nil
+		return nil, false, &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: bindingUIDMismatchMessage}, nil
 	}
 	reservationIssue := bindingMatchesReservation(session, binding)
 	if reservationIssue == nil {
@@ -1581,7 +1585,7 @@ func (r *BreakGlassSessionReconciler) verifyBindingIntegrity(ctx context.Context
 		return nil, err
 	}
 	if string(obj.GetUID()) != bindingRef.UID {
-		return &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}, nil
+		return &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: bindingUIDMismatchMessage}, nil
 	}
 	return bindingMatchesExpected(session, obj), nil
 }
@@ -1677,7 +1681,7 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 	}
 	if string(obj.GetUID()) != bindingRef.UID {
 		r.recordBindingOperation(breakglassmetrics.BindingOperationCleanup, breakglassmetrics.BindingOperationError, session)
-		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: "a different RBAC binding object now uses the recorded binding name"}}, nil
+		return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueUIDMismatch, ConditionReason: bindingUIDMismatchReason, Message: bindingUIDMismatchMessage}}, nil
 	}
 
 	uid := types.UID(bindingRef.UID)
