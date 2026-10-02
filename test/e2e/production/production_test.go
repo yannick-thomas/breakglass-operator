@@ -83,15 +83,17 @@ var _ = AfterSuite(func() {
 
 var _ = Describe("Production installation", Ordered, func() {
 	BeforeAll(func() {
-		By("installing CRDs and the high-availability production overlay")
-		_, err := utils.Run(exec.Command("make", "install"))
+		By("creating the target namespace before installing the namespaced production overlay")
+		_, err := utils.Run(exec.Command("kubectl", "create", "namespace", targetNamespace))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = utils.Run(exec.Command("make", "deploy-production", fmt.Sprintf("IMG=%s", managerImage)))
+		By("installing CRDs and the high-availability namespaced production overlay")
+		_, err = utils.Run(exec.Command("make", "install"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = utils.Run(exec.Command("make", "deploy-production",
+			"PRODUCTION_OVERLAY=production-namespaced", fmt.Sprintf("IMG=%s", managerImage)))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a namespaced curated profile and a least-privilege requester")
-		_, err = utils.Run(exec.Command("kubectl", "create", "namespace", targetNamespace))
-		Expect(err).NotTo(HaveOccurred())
 		for _, path := range []string{
 			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
 			"config/samples/access_v1alpha1_accessprofile.yaml",
@@ -125,7 +127,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found"))
-		_, _ = utils.Run(exec.Command("make", "undeploy-production-test"))
+		_, _ = utils.Run(exec.Command("make", "undeploy-production-test", "PRODUCTION_OVERLAY=production-namespaced"))
 		_, _ = utils.Run(exec.Command("make", "uninstall-test"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", managerNamespace, "--ignore-not-found"))
 	})
@@ -284,8 +286,20 @@ var _ = Describe("Production installation", Ordered, func() {
 		Expect(createSessionWithDuration(namespaceDeletionSessionName, "5m")).To(Succeed())
 		Eventually(sessionIsActive(namespaceDeletionSessionName), 2*time.Minute, time.Second).Should(Succeed())
 
+		By("removing the manager's namespace permissions before namespace and session cleanup")
+		_, err := utils.Run(exec.Command("kubectl", "delete", "rolebinding",
+			"breakglass-operator-manager-rolebindings", "-n", targetNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			output, checkErr := utils.Run(exec.Command("kubectl",
+				"--as=system:serviceaccount:"+managerNamespace+":"+managerName,
+				"auth", "can-i", "delete", "rolebindings", "-n", targetNamespace))
+			g.Expect(checkErr).To(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(Equal("no"))
+		}, time.Minute, time.Second).Should(Succeed())
+
 		By("deleting the namespace and session without relying on RoleBinding delete ordering")
-		_, err := utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--wait=false"))
+		_, err = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--wait=false"))
 		Expect(err).NotTo(HaveOccurred())
 		_, err = utils.Run(exec.Command(
 			"kubectl", "delete", "breakglasssession", namespaceDeletionSessionName, "--wait=false",

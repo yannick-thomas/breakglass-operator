@@ -251,6 +251,9 @@ func verifyNamespacedRBACBoundary(objects []unstructured.Unstructured) error {
 	if !roleHasNamedClusterRoleBind(managerRole) {
 		return fmt.Errorf("manager ClusterRole must retain the scoped curated-role bind permission")
 	}
+	if !roleHasExactNamespaceObservation(managerRole) {
+		return fmt.Errorf("manager must have only get on the named production namespace for cleanup recovery")
+	}
 
 	role, err := requiredObjectInNamespace(objects, "Role", "breakglass-operator-manager-rolebindings", "production")
 	if err != nil {
@@ -289,6 +292,33 @@ func namedContainer(deployment unstructured.Unstructured, name string) (map[stri
 		}
 	}
 	return nil, false
+}
+
+func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
+	rules, _, _ := unstructured.NestedSlice(role.Object, "rules")
+	found := false
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			return false
+		}
+		groups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
+		if !slices.Contains(groups, "") && !slices.Contains(groups, "*") {
+			continue
+		}
+		resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+		if !slices.Contains(resources, "namespaces") && !slices.Contains(resources, "*") {
+			continue
+		}
+		verbs, _, _ := unstructured.NestedStringSlice(rule, "verbs")
+		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
+		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{"namespaces"}) ||
+			!slices.Equal(verbs, []string{"get"}) || !slices.Equal(names, []string{"production"}) {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func allowedTargetNamespaceArguments(container map[string]any) int {

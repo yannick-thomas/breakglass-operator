@@ -86,6 +86,12 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 		metricLabelReason: string(DriftUnknown),
 		metricLabelScope:  string(ScopeUnknown),
 	}, 1)
+	for _, operation := range []BindingOperation{BindingOperationReserve, BindingOperationRecoverReservation} {
+		recorder.RecordBindingOperation(operation, BindingOperationSuccess, ScopeNamespaced)
+		assertMetricValue(t, registry, "breakglass_binding_operations_total", map[string]string{
+			metricLabelOperation: string(operation), metricLabelResult: string(BindingOperationSuccess), metricLabelScope: string(ScopeNamespaced),
+		}, 1)
+	}
 	assertMetricValue(t, registry, "breakglass_binding_operations_total", map[string]string{
 		metricLabelOperation: string(BindingOperationGrant),
 		metricLabelResult:    string(BindingOperationSuccess),
@@ -320,12 +326,14 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(RequestSourceApprovalInvalid):     true,
 		},
 		metricLabelOperation: {
-			string(BindingOperationGrant):    true,
-			string(BindingOperationRestore):  true,
-			string(BindingOperationCleanup):  true,
-			string(BindingOperationUnknown):  true,
-			string(AdmissionOperationCreate): true,
-			string(AdmissionOperationUpdate): true,
+			string(BindingOperationReserve):            true,
+			string(BindingOperationRecoverReservation): true,
+			string(BindingOperationGrant):              true,
+			string(BindingOperationRestore):            true,
+			string(BindingOperationCleanup):            true,
+			string(BindingOperationUnknown):            true,
+			string(AdmissionOperationCreate):           true,
+			string(AdmissionOperationUpdate):           true,
 		},
 		metricLabelResult: {
 			string(BindingOperationSuccess):       true,

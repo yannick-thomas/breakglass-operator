@@ -178,12 +178,12 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 				// finalizer lets deletion complete while preserving that object
 				// for investigation.
 				log.Info("Could not safely delete untrusted RBAC binding during BreakGlassSession cleanup", "session", session.Name, "reason", cleanup.IntegrityIssue.Code)
-				r.recordCleanupIntegrityIssue(cleanup, session)
 			}
 			controllerutil.RemoveFinalizer(session, BreakGlassFinalizer)
 			if err := r.Update(ctx, session); err != nil {
 				return ctrl.Result{}, err
 			}
+			r.recordCleanupIntegrityIssue(cleanup, session)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -366,10 +366,23 @@ func (r *BreakGlassSessionReconciler) reconcileReservedSession(ctx context.Conte
 		return r.suspendForIntegrity(ctx, session, issue)
 	}
 	if !granted {
+		// Policy reads may have delayed promotion past the decision deadline.
+		// Recheck provenance immediately before the authorizing write as well.
+		if session.Spec.RequestRef != nil {
+			issue, err := r.verifyRequestSource(ctx, session)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if issue != nil {
+				return r.suspendForRequestSource(ctx, session, issue)
+			}
+		}
 		binding.Subjects = []rbacv1.Subject{expectedSubject(session)}
 		if err := r.Update(ctx, binding); err != nil {
+			r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
 			return ctrl.Result{}, err
 		}
+		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationSuccess, session)
 	}
 
 	session.Status.Phase = accessv1alpha1.PhaseActive
@@ -727,7 +740,7 @@ func validateRequestDecisionDeadline(
 			Message:         "the immutable source request has no valid positive request TTL",
 		}
 	}
-	if session.Status.ExpiresAt == nil && !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
+	if session.Status.Phase != accessv1alpha1.PhaseActive && !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
 		return &requestSourceIssue{
 			Code:            "request_expired",
 			ConditionReason: "RequestExpired",
@@ -1259,8 +1272,8 @@ func isBindingCollision(err error) bool {
 }
 
 // ensureBinding exists for focused unit tests and callers that only need the
-// binding side effect. Activation uses ensureBindingReference so it can persist
-// the server-assigned UID in status.
+// binding side effect. Production activation uses ensureReservedBindingReference
+// followed by UID-recorded subject promotion, not this direct-grant helper.
 func (r *BreakGlassSessionReconciler) ensureBinding(ctx context.Context, session *accessv1alpha1.BreakGlassSession) error {
 	bindingRef, err := r.ensureBindingReference(ctx, session)
 	if err != nil {
@@ -1332,23 +1345,23 @@ func (r *BreakGlassSessionReconciler) ensureReservedBindingReference(ctx context
 		return nil, err
 	}
 	if err := r.Create(ctx, binding); err == nil {
-		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationSuccess, session)
+		r.recordBindingOperation(breakglassmetrics.BindingOperationReserve, breakglassmetrics.BindingOperationSuccess, session)
 		return bindingReferenceFromObject(binding)
 	} else if !apierrors.IsAlreadyExists(err) {
-		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
+		r.recordBindingOperation(breakglassmetrics.BindingOperationReserve, breakglassmetrics.BindingOperationError, session)
 		return nil, err
 	}
 
 	existing := &rbacv1.RoleBinding{}
 	if err := r.Get(ctx, client.ObjectKey{Name: expected.Name, Namespace: expected.Namespace}, existing); err != nil {
-		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
+		r.recordBindingOperation(breakglassmetrics.BindingOperationReserve, breakglassmetrics.BindingOperationError, session)
 		return nil, err
 	}
 	if issue := bindingMatchesReservation(session, existing); issue != nil {
-		r.recordBindingOperation(breakglassmetrics.BindingOperationGrant, breakglassmetrics.BindingOperationError, session)
+		r.recordBindingOperation(breakglassmetrics.BindingOperationReserve, breakglassmetrics.BindingOperationError, session)
 		return nil, &bindingCollisionError{message: fmt.Sprintf("refusing to adopt existing RoleBinding %s/%s: %s", existing.Namespace, existing.Name, issue.Code)}
 	}
-	r.recordBindingOperation(breakglassmetrics.BindingOperationRestore, breakglassmetrics.BindingOperationSuccess, session)
+	r.recordBindingOperation(breakglassmetrics.BindingOperationRecoverReservation, breakglassmetrics.BindingOperationSuccess, session)
 	return bindingReferenceFromObject(existing)
 }
 
@@ -1677,6 +1690,9 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 		if apierrors.IsNotFound(err) {
 			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}}, nil
 		}
+		if apierrors.IsForbidden(err) && r.namespaceConfirmedAbsent(ctx, bindingRef.Namespace) {
+			return bindingCleanupResult{}, nil
+		}
 		return bindingCleanupResult{}, err
 	}
 	if string(obj.GetUID()) != bindingRef.UID {
@@ -1686,6 +1702,9 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 
 	uid := types.UID(bindingRef.UID)
 	if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil {
+		if apierrors.IsForbidden(err) && r.namespaceConfirmedAbsent(ctx, bindingRef.Namespace) {
+			return bindingCleanupResult{}, nil
+		}
 		if apierrors.IsNotFound(err) {
 			return bindingCleanupResult{IntegrityIssue: &bindingIntegrityIssue{Code: bindingIssueMissing, ConditionReason: bindingMissingReason, Message: bindingMissingMessage}}, nil
 		}
@@ -1698,6 +1717,20 @@ func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Conte
 	}
 	r.recordBindingOperation(breakglassmetrics.BindingOperationCleanup, breakglassmetrics.BindingOperationSuccess, session)
 	return bindingCleanupResult{Deleted: true}, nil
+}
+
+// namespaceConfirmedAbsent is a narrow recovery for namespaced RBAC disappearing
+// during namespace deletion. Forbidden alone (or a Terminating namespace) is
+// never evidence of cleanup. Only a direct API NotFound confirms that all
+// resources in the namespace are gone. A recreated namespace fails closed.
+// The namespaced overlay grants only get on explicitly allowed namespace names;
+// it does not grant namespace list/watch, writes, or wider binding access.
+func (r *BreakGlassSessionReconciler) namespaceConfirmedAbsent(ctx context.Context, namespace string) bool {
+	if _, allowed := r.AllowedTargetNamespaces[namespace]; !allowed {
+		return false
+	}
+	err := r.policyReader().Get(ctx, client.ObjectKey{Name: namespace}, &corev1.Namespace{})
+	return apierrors.IsNotFound(err)
 }
 
 // findUnrecordedBindingReference discovers only an empty-subject reservation
@@ -1735,6 +1768,9 @@ func (r *BreakGlassSessionReconciler) findUnrecordedBindingReference(ctx context
 	} else {
 		for namespace := range r.AllowedTargetNamespaces {
 			if err := listBindings(client.InNamespace(namespace)); err != nil {
+				if apierrors.IsForbidden(err) && r.namespaceConfirmedAbsent(ctx, namespace) {
+					continue
+				}
 				return nil, nil, err
 			}
 		}

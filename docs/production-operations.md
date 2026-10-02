@@ -58,15 +58,26 @@ that has two schedulable worker nodes:
 make test-e2e-production
 ```
 
-It renders the production overlay, verifies two manager Pods, certificate and
+It renders the `production-namespaced` overlay, verifies two manager Pods, certificate and
 PDB readiness, deletes one manager Pod before a real attributed request, then
 scales all managers down to prove admission fails closed before restoring the
 deployment and successfully issuing a fresh request. It reissues the serving
 certificate and verifies that an active session keeps the exact recorded
 RoleBinding UID through a rolling manager restart. It does not remove or weaken
 the webhook configuration to simulate an outage. Its final lifecycle check
-deletes a target namespace and its active session concurrently, proving that a
-vanished RoleBinding does not strand the Session finalizer.
+first removes the manager's namespaced RoleBinding permissions, then deletes
+the target namespace and active session concurrently. This covers the
+`Forbidden` cleanup race hidden by cluster-wide RoleBinding permissions.
+
+The namespaced overlay retains only `get` on the explicitly named target
+Namespace in its manager ClusterRole. If namespaced RBAC disappears, cleanup
+waits until a direct API read returns Namespace `NotFound`. A terminating,
+recreated, or unreadable namespace is not proof of cleanup; the finalizer
+remains for retry or investigation. Custom namespace overlays must update
+this `resourceNames` list along with their RoleBinding scope and
+`--allowed-target-namespaces`; no namespace writes or cluster-wide binding
+permissions are required. Never manually force namespace finalization while
+relying on normal namespace garbage-collection guarantees.
 
 ## Upgrade and rollback
 

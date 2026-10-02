@@ -246,11 +246,13 @@ deploy: manifests kustomize ## Deploy controller without changing the checked-ou
 		"$(KUSTOMIZE)" build "$$temp_dir/config/default" | "$(KUBECTL)" apply -f -
 
 .PHONY: deploy-production
+# The E2E suite can also qualify the tighter namespace-scoped installation.
+PRODUCTION_OVERLAY ?= production
 deploy-production: manifests kustomize ## Deploy the HA production overlay without modifying tracked manifests.
 	@temp_dir="$$(mktemp -d)"; trap 'rm -rf "$$temp_dir"' EXIT; \
 		cp -R config "$$temp_dir/config"; \
 		cd "$$temp_dir/config/manager" && "$(KUSTOMIZE)" edit set image controller=${IMG}; \
-		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production" | "$(KUBECTL)" apply -f -
+		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/$(PRODUCTION_OVERLAY)" | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
@@ -262,7 +264,7 @@ undeploy-test: ## Undeploy without waiting; intended only for disposable test cl
 
 .PHONY: undeploy-production
 undeploy-production: kustomize ## Undeploy the HA production overlay from the current cluster.
-	"$(KUSTOMIZE)" build config/overlays/production | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -
+	"$(KUSTOMIZE)" build config/overlays/$(PRODUCTION_OVERLAY) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -
 
 .PHONY: undeploy-production-test
 undeploy-production-test: ## Undeploy the HA overlay without waiting; intended only for disposable test clusters.

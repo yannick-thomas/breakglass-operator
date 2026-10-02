@@ -144,10 +144,12 @@ const (
 type BindingOperation string
 
 const (
-	BindingOperationGrant   BindingOperation = "grant"
-	BindingOperationRestore BindingOperation = "restore"
-	BindingOperationCleanup BindingOperation = "cleanup"
-	BindingOperationUnknown BindingOperation = "unknown"
+	BindingOperationReserve            BindingOperation = "reserve"
+	BindingOperationRecoverReservation BindingOperation = "recover_reservation"
+	BindingOperationGrant              BindingOperation = "grant"
+	BindingOperationRestore            BindingOperation = "restore"
+	BindingOperationCleanup            BindingOperation = "cleanup"
+	BindingOperationUnknown            BindingOperation = "unknown"
 )
 
 // BindingOperationResult records whether a privileged RBAC lifecycle action
@@ -478,7 +480,8 @@ func normalizeRequestSourceIntegrityReason(reason RequestSourceIntegrityReason) 
 
 func normalizeBindingOperation(operation BindingOperation) BindingOperation {
 	switch operation {
-	case BindingOperationGrant, BindingOperationRestore, BindingOperationCleanup, BindingOperationUnknown:
+	case BindingOperationGrant, BindingOperationRestore, BindingOperationCleanup, BindingOperationUnknown,
+		BindingOperationReserve, BindingOperationRecoverReservation:
 		return operation
 	default:
 		return BindingOperationUnknown
