@@ -220,6 +220,7 @@ func hasHostnameSpreadConstraint(constraints []any) bool {
 		}
 		if constraint["topologyKey"] == "kubernetes.io/hostname" &&
 			constraint["whenUnsatisfiable"] == "DoNotSchedule" &&
+			constraint["nodeTaintsPolicy"] == "Honor" &&
 			hasIntValue(constraint["maxSkew"], 1) {
 			return true
 		}
