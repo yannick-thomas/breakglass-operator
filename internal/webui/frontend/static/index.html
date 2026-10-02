@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BreakGlass Portal</title>
+  <style>
+    :root {
+      --bg-main: #0f172a;
+      --bg-card: #1e293b;
+      --bg-input: #334155;
+      --border-color: #475569;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background-color: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 700;
+      font-size: 1.25rem;
+      color: var(--text-main);
+    }
+    .brand-badge {
+      background: #dc2626;
+      color: #fff;
+      font-size: 0.75rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .user-panel {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      font-size: 0.9rem;
+    }
+    .user-info { color: var(--text-muted); }
+    .user-info strong { color: var(--text-main); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.5rem 1rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.15s ease;
+    }
+    .btn-primary { background: var(--accent); color: #0f172a; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn-outline { background: transparent; border: 1px solid var(--border-color); color: var(--text-main); }
+    .btn-outline:hover { background: var(--bg-input); }
+    .btn-sm { padding: 0.35rem 0.7rem; font-size: 0.8rem; }
+
+    nav.tabs {
+      background: #182234;
+      border-bottom: 1px solid var(--border-color);
+      padding: 0 2rem;
+      display: flex;
+      gap: 1.5rem;
+    }
+    .tab-btn {
+      padding: 0.85rem 0.25rem;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-muted);
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    main {
+      flex: 1;
+      max-width: 1000px;
+      width: 100%;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .card-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .form-group {
+      margin-bottom: 1.25rem;
+    }
+    .form-group label {
+      display: block;
+      margin-bottom: 0.35rem;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    .form-group .hint {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+    .form-control {
+      width: 100%;
+      padding: 0.65rem 0.85rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      color: var(--text-main);
+      font-size: 0.95rem;
+    }
+    .form-control:focus {
+      outline: 2px solid var(--accent);
+      border-color: transparent;
+    }
+
+    .chips {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .chip {
+      padding: 0.25rem 0.6rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      color: var(--text-muted);
+    }
+    .chip:hover, .chip.active {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .capability-box {
+      background: #131d2e;
+      border-left: 4px solid var(--accent);
+      padding: 1rem;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+    .capability-box h4 { margin-bottom: 0.3rem; color: var(--accent); }
+
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .badge-Pending { background: #64748b; color: #fff; }
+    .badge-Approved { background: #0284c7; color: #fff; }
+    .badge-Active { background: #16a34a; color: #fff; }
+    .badge-Expired { background: #475569; color: #cbd5e1; }
+    .badge-Suspended { background: #dc2626; color: #fff; }
+    .badge-Denied { background: #e11d48; color: #fff; }
+    .badge-Revoked { background: #94a3b8; color: #0f172a; }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.5rem;
+    }
+    .table th, .table td {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 0.9rem;
+    }
+    .table th {
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+    }
+    .table tr:hover { background: rgba(255,255,255,0.02); }
+
+    .countdown {
+      font-family: monospace;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--warning);
+    }
+
+    .alert {
+      padding: 0.85rem 1.25rem;
+      border-radius: var(--radius);
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+    .alert-danger { background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger); color: #fca5a5; }
+    .alert-success { background: rgba(34, 197, 94, 0.2); border: 1px solid var(--success); color: #86efac; }
+    .alert-info { background: rgba(56, 189, 248, 0.2); border: 1px solid var(--accent); color: #bae6fd; }
+
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      max-width: 500px;
+      width: 90%;
+      padding: 1.5rem;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span>BreakGlass</span>
+      <span class="brand-badge">Emergency Access</span>
+    </div>
+    <div class="user-panel">
+      <div class="user-info" id="userInfo">Lädt Benutzer...</div>
+      <div id="devSwitcher" class="hidden">
+        <select id="devUserSelect" class="form-control" style="padding:0.25rem 0.5rem; font-size:0.8rem;" onchange="switchDevUser(this.value)">
+          <option value="requester@example.com">Dev: Requester</option>
+          <option value="approver@example.com">Dev: Approver</option>
+          <option value="admin@example.com">Dev: Admin</option>
+        </select>
+      </div>
+      <a href="/auth/logout" class="btn btn-outline btn-sm">Abmelden</a>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" onclick="switchTab('requestTab')">Zugriff anfordern</button>
+    <button class="tab-btn" onclick="switchTab('myRequestsTab')">Meine Anträge</button>
+    <button class="tab-btn" onclick="switchTab('approvalsTab')">Freigabe-Inbox <span id="approvalCount" class="badge badge-Pending hidden">0</span></button>
+    <button class="tab-btn" onclick="switchTab('helpTab')">Hilfe & Runbook</button>
+  </nav>
+
+  <main>
+    <div id="globalAlert" class="alert hidden"></div>
+
+    <!-- TAB 1: Zugriff anfordern -->
+    <section id="requestTab">
+      <div class="card">
+        <h2 class="card-title">Temporären Zugriff anfordern</h2>
+        <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1.25rem;">
+          Wähle ein vordefiniertes AccessProfile. Jeder Antrag erzeugt einen nachvollziehbaren Audit-Trail und erfordert ggf. eine Freigabe.
+        </p>
+
+        <form id="requestForm" onsubmit="submitRequest(event)">
+          <div class="form-group">
+            <label for="profileSelect">Access Profile *</label>
+            <select id="profileSelect" class="form-control" required onchange="onProfileSelected(this.value)">
+              <option value="">-- Profil auswählen --</option>
+            </select>
+          </div>
+
+          <div id="capabilityPreview" class="capability-box hidden">
+            <h4>Rechte & Geltungsbereich</h4>
+            <p id="capDesc"></p>
+            <p style="margin-top:0.35rem; font-size:0.8rem; color:var(--text-muted)">
+              Ziel-Namespace: <strong id="capNs" style="color:var(--text-main)"></strong> | Max. Dauer: <strong id="capMaxDuration" style="color:var(--text-main)"></strong>
+            </p>
+          </div>
+
+          <div class="form-group">
+            <label for="durationInput">Dauer *</label>
+            <input type="text" id="durationInput" class="form-control" placeholder="z. B. 30m, 1h" required>
+            <div class="chips">
+              <span class="chip" onclick="setDuration('15m')">15m</span>
+              <span class="chip" onclick="setDuration('30m')">30m</span>
+              <span class="chip" onclick="setDuration('1h')">1h</span>
+              <span class="chip" onclick="setDuration('2h')">2h</span>
+            </div>
+            <div class="hint">Darf das Maximum des Profils nicht überschreiten.</div>
+          </div>
+
+          <div class="form-group">
+            <label for="reasonInput">Incident-Begründung / Ticket *</label>
+            <textarea id="reasonInput" class="form-control" rows="3" placeholder="z.B. INC-4091: Datenbankverbindungsausfall in Production untersuchen" required></textarea>
+            <div class="hint" style="color:#fca5a5;">⚠️ Sensibles Audit-Feld: Niemals Passwörter, API-Keys oder Secrets eingeben!</div>
+          </div>
+
+          <div style="margin-top:1.5rem; display:flex; justify-content:flex-end;">
+            <button type="submit" class="btn btn-primary" id="submitReqBtn">Antrag einreichen</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- TAB 2: Meine Anträge -->
+    <section id="myRequestsTab" class="hidden">
+      <div class="card">
+        <div class="card-title">
+          <span>Meine Anträge & Sessions</span>
+          <button class="btn btn-outline btn-sm" onclick="loadMyRequests()">Aktualisieren</button>
+        </div>
+        <div id="myRequestsContent">
+          <p style="color:var(--text-muted)">Lädt Anträge...</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: Freigabe-Inbox -->
+    <section id="approvalsTab" class="hidden">
+      <div class="card">
+        <div class="card-title">
+          <span>Ausstehende Freigaben</span>
+          <button class="btn btn-outline btn-sm" onclick="loadPendingApprovals()">Aktualisieren</button>
+        </div>
+        <div id="approvalsContent">
+          <p style="color:var(--text-muted)">Lädt ausstehende Freigaben...</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: Hilfe & Runbook -->
+    <section id="helpTab" class="hidden">
+      <div class="card">
+        <h2 class="card-title">Notfall-Runbook & Sicherheitsprinzipien</h2>
+        <div style="font-size:0.9rem; color:var(--text-muted); line-height:1.7;">
+          <p><strong>1. Fail-Closed Prinzip:</strong> Bei Webhook- oder Controller-Ausfällen werden keine neuen Zugriffe gewährt. Bestehende Sessions bleiben bis zu ihrem Expiry unverändert.</p>
+          <p style="margin-top:0.75rem;"><strong>2. Vier-Augen-Prinzip (4-Eyes):</strong> Bei Profilen mit <code>ApprovalRequired</code> kann der Antragsteller seinen eigenen Antrag nicht freigeben.</p>
+          <p style="margin-top:0.75rem;"><strong>3. Frühzeitiger Widerruf:</strong> Beende aktiven Zugriff über die Schaltfläche <em>„Zugriff widerrufen“</em>, sobald die Incident-Arbeit abgeschlossen ist.</p>
+          <p style="margin-top:0.75rem;"><strong>4. Offline-Notfallzugriff:</strong> Sollte der Operator oder das Webportal nicht erreichbar sein, verwende die dokumentierten BreakGlass-Hardware-Keys gemäß internem Runbook.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Approval Modal -->
+  <div id="approvalModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3 id="modalTitle" style="margin-bottom:0.75rem;">Antrag freigeben</h3>
+      <p id="modalReqSummary" style="font-size:0.9rem; color:var(--text-muted); margin-bottom:1rem;"></p>
+      
+      <div class="form-group">
+        <label for="approvalComment">Kommentar (optional)</label>
+        <textarea id="approvalComment" class="form-control" rows="2" placeholder="Begründung der Entscheidung"></textarea>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="closeModal()">Abbrechen</button>
+        <button id="modalActionBtn" class="btn btn-primary" onclick="confirmApprovalDecision()">Bestätigen</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentUser = null;
+    let availableProfiles = [];
+    let activeModalReq = null;
+    let activeModalDecision = 'Approved';
+
+    async function init() {
+      try {
+        const meRes = await fetch('/api/v1/me');
+        if (meRes.status === 401) {
+          window.location.href = '/auth/login';
+          return;
+        }
+        currentUser = await meRes.json();
+        document.getElementById('userInfo').innerHTML = `Angemeldet als <strong>${escapeHtml(currentUser.name || currentUser.sub)}</strong>`;
+
+        // Check if dev user switcher should show
+        if (window.location.search.includes('dev') || document.cookie.includes('dev')) {
+          document.getElementById('devSwitcher').classList.remove('hidden');
+        }
+
+        await loadProfiles();
+        await loadMyRequests();
+        await loadPendingApprovals();
+
+        // Polling interval
+        setInterval(() => {
+          if (!document.getElementById('myRequestsTab').classList.contains('hidden')) loadMyRequests();
+          if (!document.getElementById('approvalsTab').classList.contains('hidden')) loadPendingApprovals();
+        }, 15000);
+
+      } catch (err) {
+        showAlert('Fehler beim Initialisieren der Sitzung: ' + err.message, 'danger');
+      }
+    }
+
+    function switchTab(tabId) {
+      document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
+      document.querySelectorAll('nav.tabs button').forEach(b => b.classList.remove('active'));
+      document.getElementById(tabId).classList.remove('hidden');
+      event.target.classList.add('active');
+
+      if (tabId === 'myRequestsTab') loadMyRequests();
+      if (tabId === 'approvalsTab') loadPendingApprovals();
+    }
+
+    async function loadProfiles() {
+      try {
+        const res = await fetch('/api/v1/profiles');
+        availableProfiles = await res.json() || [];
+        const select = document.getElementById('profileSelect');
+        select.innerHTML = '<option value="">-- Profil auswählen --</option>';
+        availableProfiles.forEach(p => {
+          if (p.isReady) {
+            const opt = document.createElement('option');
+            opt.value = p.name;
+            opt.textContent = `${p.name} (${p.targetNamespace}) - Max: ${p.maxDuration}`;
+            select.appendChild(opt);
+          }
+        });
+      } catch (err) {
+        showAlert('Konnte Profile nicht laden', 'danger');
+      }
+    }
+
+    function onProfileSelected(profileName) {
+      const p = availableProfiles.find(x => x.name === profileName);
+      const box = document.getElementById('capabilityPreview');
+      if (!p) {
+        box.classList.add('hidden');
+        return;
+      }
+      document.getElementById('capDesc').textContent = p.description;
+      document.getElementById('capNs').textContent = p.targetNamespace;
+      document.getElementById('capMaxDuration').textContent = p.maxDuration;
+      box.classList.remove('hidden');
+    }
+
+    function setDuration(val) {
+      document.getElementById('durationInput').value = val;
+    }
+
+    async function submitRequest(e) {
+      e.preventDefault();
+      const btn = document.getElementById('submitReqBtn');
+      btn.disabled = true;
+      btn.textContent = 'Wird übermittelt...';
+
+      const body = {
+        accessProfile: document.getElementById('profileSelect').value,
+        duration: document.getElementById('durationInput').value,
+        reason: document.getElementById('reasonInput').value,
+      };
+
+      try {
+        const res = await fetch('/api/v1/requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Fehler beim Erstellen des Antrags');
+
+        showAlert(`Antrag '${data.name}' erfolgreich eingereicht!`, 'success');
+        document.getElementById('requestForm').reset();
+        document.getElementById('capabilityPreview').classList.add('hidden');
+        
+        // Switch to My Requests
+        setTimeout(() => {
+          document.querySelectorAll('nav.tabs button')[1].click();
+        }, 1000);
+      } catch (err) {
+        showAlert(err.message, 'danger');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Antrag einreichen';
+      }
+    }
+
+    async function loadMyRequests() {
+      const container = document.getElementById('myRequestsContent');
+      try {
+        const res = await fetch('/api/v1/my-requests');
+        const items = await res.json() || [];
+
+        if (items.length === 0) {
+          container.innerHTML = '<p style="color:var(--text-muted)">Bisher keine Anträge vorhanden.</p>';
+          return;
+        }
+
+        let html = `
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Referenz / Profil</th>
+                <th>Bereich</th>
+                <th>Dauer</th>
+                <th>Status</th>
+                <th>Verbleibend</th>
+                <th>Aktionen</th>
+              </tr>
+            </thead>
+            <tbody>
+        `;
+
+        items.forEach(req => {
+          let badgeClass = `badge-${req.phase || 'Pending'}`;
+          if (req.sessionPhase) badgeClass = `badge-${req.sessionPhase}`;
+
+          let countdownHtml = '-';
+          if (req.sessionExpiresAt) {
+            countdownHtml = `<span class="countdown" data-exp="${req.sessionExpiresAt}">Berechne...</span>`;
+          }
+
+          let actionHtml = '';
+          if (req.canRevoke) {
+            actionHtml = `<button class="btn btn-danger btn-sm" onclick="revokeAccess('${req.name}')">Zugriff widerrufen</button>`;
+          }
+
+          html += `
+            <tr>
+              <td>
+                <strong>${escapeHtml(req.accessProfile)}</strong><br>
+                <small style="color:var(--text-muted); font-family:monospace;">${escapeHtml(req.name)}</small>
+              </td>
+              <td><code>${escapeHtml(req.targetNamespace || 'default')}</code></td>
+              <td>${escapeHtml(req.duration)}</td>
+              <td><span class="badge ${badgeClass}">${escapeHtml(req.sessionPhase || req.phase || 'Pending')}</span></td>
+              <td>${countdownHtml}</td>
+              <td>${actionHtml}</td>
+            </tr>
+          `;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+        updateCountdowns();
+      } catch (err) {
+        container.innerHTML = '<p style="color:#ef4444;">Fehler beim Laden der Anträge.</p>';
+      }
+    }
+
+    async function revokeAccess(reqName) {
+      if (!confirm(`Möchtest du den aktiven Zugriff für '${reqName}' wirklich sofort widerrufen?`)) return;
+
+      try {
+        const res = await fetch(`/api/v1/requests/${encodeURIComponent(reqName)}/revoke`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Fehler beim Widerrufen');
+        showAlert(`Zugriff für '${reqName}' wurde widerrufen.`, 'info');
+        loadMyRequests();
+      } catch (err) {
+        showAlert(err.message, 'danger');
+      }
+    }
+
+    async function loadPendingApprovals() {
+      const container = document.getElementById('approvalsContent');
+      try {
+        const res = await fetch('/api/v1/approvals/pending');
+        const items = await res.json() || [];
+
+        const badge = document.getElementById('approvalCount');
+        if (items.length > 0) {
+          badge.textContent = items.length;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+
+        if (items.length === 0) {
+          container.innerHTML = '<p style="color:var(--text-muted)">Keine ausstehenden Freigabeanträge.</p>';
+          return;
+        }
+
+        let html = `
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Antragsteller</th>
+                <th>Profil / Namespace</th>
+                <th>Dauer</th>
+                <th>Begründung</th>
+                <th>Aktion</th>
+              </tr>
+            </thead>
+            <tbody>
+        `;
+
+        items.forEach(req => {
+          html += `
+            <tr>
+              <td><strong>${escapeHtml(req.requester)}</strong></td>
+              <td>
+                ${escapeHtml(req.accessProfile)}<br>
+                <small style="color:var(--text-muted);">Namespace: ${escapeHtml(req.targetNamespace || 'default')}</small>
+              </td>
+              <td>${escapeHtml(req.duration)}</td>
+              <td style="max-width:300px; word-break:break-word;">${escapeHtml(req.reason)}</td>
+              <td>
+                <button class="btn btn-primary btn-sm" onclick="openApprovalModal('${req.name}', 'Approved', '${req.requester}', '${req.accessProfile}')">Freigeben</button>
+                <button class="btn btn-danger btn-sm" style="margin-left:0.35rem;" onclick="openApprovalModal('${req.name}', 'Denied', '${req.requester}', '${req.accessProfile}')">Ablehnen</button>
+              </td>
+            </tr>
+          `;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = '<p style="color:#ef4444;">Fehler beim Laden der Freigaben.</p>';
+      }
+    }
+
+    function openApprovalModal(reqName, decision, requester, profile) {
+      activeModalReq = reqName;
+      activeModalDecision = decision;
+      document.getElementById('modalTitle').textContent = decision === 'Approved' ? 'Antrag freigeben' : 'Antrag ablehnen';
+      document.getElementById('modalReqSummary').textContent = `Antrag: ${reqName} | Antragsteller: ${requester} | Profil: ${profile}`;
+      const actionBtn = document.getElementById('modalActionBtn');
+      actionBtn.className = decision === 'Approved' ? 'btn btn-primary' : 'btn btn-danger';
+      actionBtn.textContent = decision === 'Approved' ? 'Verbindlich freigeben' : 'Verbindlich ablehnen';
+      document.getElementById('approvalComment').value = '';
+      document.getElementById('approvalModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('approvalModal').classList.add('hidden');
+      activeModalReq = null;
+    }
+
+    async function confirmApprovalDecision() {
+      if (!activeModalReq) return;
+      const comment = document.getElementById('approvalComment').value;
+
+      try {
+        const res = await fetch('/api/v1/approvals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestName: activeModalReq,
+            decision: activeModalDecision,
+            comment: comment,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Fehler bei der Freigabeentscheidung');
+
+        showAlert(`Entscheidung für '${activeModalReq}' gespeichert (${activeModalDecision}).`, 'success');
+        closeModal();
+        loadPendingApprovals();
+      } catch (err) {
+        showAlert(err.message, 'danger');
+      }
+    }
+
+    function updateCountdowns() {
+      document.querySelectorAll('.countdown').forEach(el => {
+        const expStr = el.getAttribute('data-exp');
+        if (!expStr) return;
+        const exp = new Date(expStr).getTime();
+        const now = new Date().getTime();
+        const diff = exp - now;
+
+        if (diff <= 0) {
+          el.textContent = 'Abgelaufen';
+          el.style.color = '#ef4444';
+          return;
+        }
+
+        const mins = Math.floor(diff / 60000);
+        const secs = Math.floor((diff % 60000) / 1000);
+        el.textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      });
+    }
+    setInterval(updateCountdowns, 1000);
+
+    function showAlert(msg, type) {
+      const alert = document.getElementById('globalAlert');
+      alert.className = `alert alert-${type}`;
+      alert.textContent = msg;
+      alert.classList.remove('hidden');
+      setTimeout(() => alert.classList.add('hidden'), 5000);
+    }
+
+    function switchDevUser(user) {
+      window.location.href = `/auth/dev-login?user=${encodeURIComponent(user)}`;
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>

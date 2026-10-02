@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: breakglass-webui-netpol
+  namespace: breakglass-operator-system
+  labels:
+    app.kubernetes.io/name: breakglass-webui
+    app.kubernetes.io/part-of: breakglass-operator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: breakglass-webui
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow incoming traffic on port 8080 (Ingress controller or port-forward)
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow connection to Kubernetes API Server
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+        - protocol: TCP
+          port: 8443

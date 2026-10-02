@@ -1,0 +1,993 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+    control-plane: controller-manager
+  name: breakglass-operator-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: accessprofiles.access.breakglass.io
+spec:
+  group: access.breakglass.io
+  names:
+    kind: AccessProfile
+    listKind: AccessProfileList
+    plural: accessprofiles
+    shortNames:
+    - ap
+    singular: accessprofile
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Pre-approved Role or ClusterRole
+      jsonPath: .spec.roleRef.name
+      name: Role
+      type: string
+    - description: Only namespace this profile can grant in
+      jsonPath: .spec.targetNamespace
+      name: Target-NS
+      type: string
+    - description: Maximum permitted session duration
+      jsonPath: .spec.maxDuration
+      name: Max-Duration
+      type: string
+    - description: Whether the manager can activate this profile
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: AccessProfile is the Schema for the accessprofiles API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of AccessProfile
+            properties:
+              maxDuration:
+                description: |-
+                  MaxDuration is the longest permitted session duration for this profile,
+                  expressed as a Go duration such as "30m" or "1h".
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              roleRef:
+                description: |-
+                  RoleRef is the pre-approved Role or ClusterRole to bind in targetNamespace.
+                  A ClusterRole is still bound with a namespaced RoleBinding; it does not make
+                  the resulting grant cluster-wide.
+                properties:
+                  kind:
+                    default: ClusterRole
+                    description: Kind of the role (ClusterRole or Role)
+                    enum:
+                    - Role
+                    - ClusterRole
+                    type: string
+                  name:
+                    description: Name of the Role or ClusterRole
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              targetNamespace:
+                description: |-
+                  TargetNamespace is the only namespace in which this profile can grant
+                  access. Cluster-wide profiles are intentionally out of scope for this API.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - maxDuration
+            - roleRef
+            - targetNamespace
+            type: object
+            x-kubernetes-validations:
+            - message: AccessProfile policy fields are immutable; create a new, versioned
+                profile instead
+              rule: self == oldSelf
+            - message: v1alpha1 AccessProfiles may reference only curated ClusterRoles
+              rule: self.roleRef.kind == 'ClusterRole'
+          status:
+            description: status reports controller-observed readiness for this profile.
+            properties:
+              conditions:
+                description: |-
+                  Conditions describe whether the role, duration, and manager namespace
+                  scope make this profile usable.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation evaluated by the
+                  AccessProfile controller.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: breakglasssessions.access.breakglass.io
+spec:
+  group: access.breakglass.io
+  names:
+    kind: BreakGlassSession
+    listKind: BreakGlassSessionList
+    plural: breakglasssessions
+    shortNames:
+    - bgs
+    singular: breakglasssession
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Authenticated requester granted access
+      jsonPath: .spec.subject.name
+      name: Subject
+      type: string
+    - description: Administrator-owned access profile
+      jsonPath: .spec.accessProfile
+      name: Profile
+      type: string
+    - description: Resolved curated role
+      jsonPath: .status.grant.roleRef.name
+      name: Role
+      type: string
+    - description: Resolved fixed target namespace
+      jsonPath: .status.grant.targetNamespace
+      name: Target-NS
+      type: string
+    - description: Session phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: Session expiry timestamp
+      jsonPath: .status.expiresAt
+      name: Expires-At
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: BreakGlassSession is the Schema for the breakglasssessions API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of BreakGlassSession
+            properties:
+              accessProfile:
+                description: |-
+                  AccessProfile is the fixed, administrator-owned access policy to use.
+                  The requester requires the custom RBAC verb "use" on this named profile.
+                maxLength: 253
+                minLength: 1
+                type: string
+              accessProfileUID:
+                description: |-
+                  AccessProfileUID is written by the mutating admission webhook from the
+                  selected profile's server-assigned UID. It prevents a delete/recreate of
+                  the same profile name from silently changing a pending request.
+                minLength: 1
+                type: string
+              duration:
+                description: Duration is the lifespan of this break-glass session
+                  (e.g. "30m", "1h", "2h30m").
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              reason:
+                description: Reason explains why this emergency access is needed (audit
+                  trail).
+                maxLength: 1024
+                minLength: 5
+                type: string
+              revoked:
+                description: Revoked allows manual revocation before the duration
+                  expires.
+                type: boolean
+              subject:
+                description: |-
+                  Subject is written by the mutating admission webhook from the
+                  authenticated API requester. Client-supplied values are overwritten and
+                  v1alpha1 supports only a self-service User grant.
+                properties:
+                  kind:
+                    description: Kind of the subject (User, Group, ServiceAccount)
+                    enum:
+                    - User
+                    - Group
+                    - ServiceAccount
+                    type: string
+                  name:
+                    description: Name of the subject (e.g. email, username, serviceaccount
+                      name)
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the subject (only relevant when Kind
+                      is ServiceAccount)
+                    maxLength: 63
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+            required:
+            - accessProfile
+            - accessProfileUID
+            - duration
+            - reason
+            - subject
+            type: object
+            x-kubernetes-validations:
+            - message: accessProfile is immutable
+              rule: self.accessProfile == oldSelf.accessProfile
+            - message: accessProfileUID is immutable
+              rule: self.accessProfileUID == oldSelf.accessProfileUID
+            - message: subject is immutable
+              rule: self.subject == oldSelf.subject
+            - message: duration is immutable
+              rule: self.duration == oldSelf.duration
+            - message: reason is immutable
+              rule: self.reason == oldSelf.reason
+            - message: revoked cannot be changed from true to false
+              rule: '!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked)
+                && self.revoked)'
+            - message: v1alpha1 self-service sessions may only grant the authenticated
+                User requester
+              rule: self.subject.kind == 'User' && (!has(self.subject.namespace) ||
+                size(self.subject.namespace) == 0)
+          status:
+            description: status defines the observed state of BreakGlassSession
+            properties:
+              bindingName:
+                description: BindingName is the name of the created RoleBinding.
+                type: string
+              bindingRef:
+                description: |-
+                  BindingRef is the authoritative identity of the RBAC binding created for
+                  this session. Once present, the controller only acts on an object that
+                  matches this kind, namespace, name, and UID exactly.
+                properties:
+                  kind:
+                    description: |-
+                      Kind is RoleBinding. ClusterRoleBinding is deliberately not supported by
+                      the AccessProfile-based v1alpha1 API.
+                    enum:
+                    - RoleBinding
+                    type: string
+                  name:
+                    description: Name is the RBAC binding name.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace is the fixed namespace of the profile's
+                      RoleBinding.
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the server-assigned UID of the created binding.
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                - namespace
+                - uid
+                type: object
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the session's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              expiresAt:
+                description: ExpiresAt is the calculated expiration time
+                format: date-time
+                type: string
+              grant:
+                description: |-
+                  Grant is the immutable profile snapshot resolved when the session became
+                  active. A missing or mismatched profile snapshot is fail-closed.
+                properties:
+                  accessProfile:
+                    description: AccessProfile is the selected policy name.
+                    type: string
+                  accessProfileUID:
+                    description: AccessProfileUID is the UID of the policy that was
+                      authorized and resolved.
+                    type: string
+                  roleRef:
+                    description: RoleRef is the profile's curated ClusterRole.
+                    properties:
+                      kind:
+                        default: ClusterRole
+                        description: Kind of the role (ClusterRole or Role)
+                        enum:
+                        - Role
+                        - ClusterRole
+                        type: string
+                      name:
+                        description: Name of the Role or ClusterRole
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - kind
+                    - name
+                    type: object
+                  roleRulesHash:
+                    description: |-
+                      RoleRulesHash is a canonical SHA-256 digest of the curated ClusterRole's
+                      rules when the grant was activated. A changed rule set suspends the grant.
+                    type: string
+                  roleUID:
+                    description: |-
+                      RoleUID is the server-assigned UID of the curated ClusterRole when the
+                      grant was activated. A role recreated under the same name is not trusted.
+                      Sessions created before this field existed are suspended fail-closed during
+                      their next integrity check.
+                    type: string
+                  targetNamespace:
+                    description: TargetNamespace is the profile's fixed namespace.
+                    type: string
+                required:
+                - accessProfile
+                - accessProfileUID
+                - roleRef
+                - targetNamespace
+                type: object
+              phase:
+                description: Phase is the current lifecycle state (Pending, Active,
+                  Suspended, Denied, Expired, Revoked)
+                enum:
+                - Pending
+                - Active
+                - Suspended
+                - Denied
+                - Expired
+                - Revoked
+                type: string
+              startTime:
+                description: StartTime is when the session became active
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-leader-election-role
+  namespace: breakglass-operator-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-manager-rolebindings
+  namespace: production
+rules:
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - access.breakglass.io
+  resources:
+  - accessprofiles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - access.breakglass.io
+  resources:
+  - accessprofiles/status
+  - breakglasssessions/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - access.breakglass.io
+  resources:
+  - breakglasssessions
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - access.breakglass.io
+  resources:
+  - breakglasssessions/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - get
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - breakglass-pod-observer
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-operator-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-operator-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-leader-election-rolebinding
+  namespace: breakglass-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: breakglass-operator-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-manager-rolebindings
+  namespace: production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: breakglass-operator-manager-rolebindings
+subjects:
+- kind: ServiceAccount
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-operator-manager-role
+subjects:
+- kind: ServiceAccount
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: breakglass-operator-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-operator-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+    control-plane: controller-manager
+  name: breakglass-operator-controller-manager-metrics-service
+  namespace: breakglass-operator-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: breakglass-operator
+    control-plane: controller-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-webhook-service
+  namespace: breakglass-operator-system
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    app.kubernetes.io/name: breakglass-operator
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+    control-plane: controller-manager
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: breakglass-operator
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: breakglass-operator
+        control-plane: controller-manager
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: breakglass-operator
+                  control-plane: controller-manager
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+        - --webhook-port=9443
+        - --allowed-target-namespaces=production
+        command:
+        - /manager
+        image: ghcr.io/yannick-thomas/breakglass-operator@sha256:8d21241063d86be54b038cb018828a4ce018fe1045bc9b8f02be09658a1b7e72
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
+          readOnly: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: breakglass-operator-controller-manager
+      terminationGracePeriodSeconds: 10
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: breakglass-operator
+            control-plane: controller-manager
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: webhook-server-cert
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-controller-manager
+  namespace: breakglass-operator-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: breakglass-operator
+      control-plane: controller-manager
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-serving-cert
+  namespace: breakglass-operator-system
+spec:
+  dnsNames:
+  - breakglass-operator-webhook-service.breakglass-operator-system.svc
+  - breakglass-operator-webhook-service.breakglass-operator-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: breakglass-operator-selfsigned-issuer
+  secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: breakglass-operator
+  name: breakglass-operator-selfsigned-issuer
+  namespace: breakglass-operator-system
+spec:
+  selfSigned: {}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: breakglass-operator-system/breakglass-operator-serving-cert
+  name: breakglass-operator-mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: breakglass-operator-webhook-service
+      namespace: breakglass-operator-system
+      path: /mutate-access-breakglass-io-v1alpha1-breakglasssession
+  failurePolicy: Fail
+  name: mbreakglasssession-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - access.breakglass.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    resources:
+    - breakglasssessions
+  sideEffects: None
+  timeoutSeconds: 5
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: breakglass-operator-system/breakglass-operator-serving-cert
+  name: breakglass-operator-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: breakglass-operator-webhook-service
+      namespace: breakglass-operator-system
+      path: /validate-access-breakglass-io-v1alpha1-breakglasssession
+  failurePolicy: Fail
+  name: vbreakglasssession-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - access.breakglass.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - breakglasssessions
+  sideEffects: None
+  timeoutSeconds: 5

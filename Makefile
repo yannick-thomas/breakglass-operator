@@ -1,5 +1,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+WEBUI_IMG ?= breakglass-webui:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -163,9 +164,17 @@ verify-manifests: manifests generate kustomize ## Render installation profiles a
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-webui
+build-webui: fmt vet ## Build WebUI binary.
+	go build -o bin/breakglass-webui cmd/webui/main.go
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
+
+.PHONY: run-webui
+run-webui: fmt vet ## Run WebUI locally in dev mode.
+	WEBUI_DEV_MODE=true go run ./cmd/webui/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -175,6 +184,10 @@ run: manifests generate fmt vet ## Run a controller from your host.
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -t ${IMG} .
+
+.PHONY: docker-build-webui
+docker-build-webui: ## Build docker image for the WebUI.
+	$(CONTAINER_TOOL) build -f Dockerfile.webui -t ${WEBUI_IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

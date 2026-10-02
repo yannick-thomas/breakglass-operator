@@ -1,0 +1,54 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-webui-role
+  labels:
+    app.kubernetes.io/name: breakglass-webui
+    app.kubernetes.io/part-of: breakglass-operator
+rules:
+  # Read access to profiles, requests, approvals, and sessions
+  - apiGroups:
+      - access.breakglass.io
+    resources:
+      - accessprofiles
+      - breakglassrequests
+      - breakglassapprovals
+      - breakglasssessions
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Write access to create requests and approvals (admission webhooks enforce validation & user identity)
+  - apiGroups:
+      - access.breakglass.io
+    resources:
+      - breakglassrequests
+      - breakglassapprovals
+    verbs:
+      - create
+
+  # Permission to update BreakGlassSession for user self-revocation (spec.revoked: true)
+  - apiGroups:
+      - access.breakglass.io
+    resources:
+      - breakglasssessions
+    verbs:
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: breakglass-webui-rolebinding
+  labels:
+    app.kubernetes.io/name: breakglass-webui
+    app.kubernetes.io/part-of: breakglass-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-webui-role
+subjects:
+  - kind: ServiceAccount
+    name: breakglass-webui
+    namespace: breakglass-operator-system
