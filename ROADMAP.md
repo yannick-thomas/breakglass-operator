@@ -87,8 +87,9 @@ flowchart TD
 * [x] **Grant-Härtung**: Unveränderliche Request-Daten, authentifizierte Human-Requester, Profil-UID-Snapshot und eindeutige Binding-Ownership über Binding-UID.
 
 #### Noch vor produktivem Einsatz erforderlich
-* [ ] **Threat Model & Support-Matrix**: Vertrauensgrenzen, zulässige Cluster-/Namespace-Modelle, Ausfallverhalten und unterstützte Kubernetes-Versionen festlegen.
-* [ ] **Controller-Reliability-Tests**: Controller-Restart nahe der TTL, Namespace-/CR-Deletion-Rennen, Binding-Kollisionen und Uhrzeitgrenzen in envtest/Kind abdecken.
+* [ ] **Threat Model**: Vertrauensgrenzen, zulässige Cluster-/Namespace-Modelle und Ausfallverhalten als überprüfbare Annahmen festlegen.
+* [~] **Support-Matrix**: Required Kind/E2E-Gates erzeugen nun Artefakte mit der tatsächlich verwendeten Kind-Version, Kubernetes-Serverversion, Node-Image und cert-manager-Fixture. Nach einem grünen `main`-Lauf wird daraus ein einziger digest-gepinnter, überprüfter Matrix-Eintrag abgeleitet; bis dahin wird keine Kubernetes-Version als unterstützt behauptet.
+* [~] **Controller-Reliability-Tests**: Fake-Client-Tests injizieren einen Status-Write-Fehler zwischen Binding-Reservation und Aktivierung; Kind prüft Rolling Restart, TTL-Recovery sowie Namespace-/Session-Deletion-Rennen. Offen bleiben eine explizite versionsübergreifende Upgrade-/Rollback-Probe und Lastmessungen unter realer API-Server-Latenz.
 * [x] **Binding-Integrität & sichere Expiry**: `status.bindingRef` persistiert Kind, Namespace, Namen und Objekt-UID. Delete/Recreate, Subject-/Role-Drift, verlorene Ownership oder fehlende TTL führen fail-closed zu `Suspended`; es gibt kein automatisches Re-Granting. Cleanup nutzt eine UID-Precondition und löscht keinen Ersatz mit gleichem Namen. Expiry bleibt ein best-effort SLO, bis der Zugriff zusätzlich durch wirklich ablaufende Credentials begrenzt ist.
 * [ ] **Scale-Grenzen**: RoleBinding-/AccessProfile-Watches mit Predicates und einem Feldindex auf `spec.accessProfile` begrenzen sowie Cache-/Reconcile-Last in großen Clustern messen.
 * [ ] **Secure Supply Chain**: Nicht-root-Image, minimale RBAC-/NetworkPolicies, SBOM, Image-Signing und abhängigkeitsspezifische Security-Scans als Release-Gate etablieren.
@@ -103,7 +104,7 @@ flowchart TD
 * [x] **Requester-Attribution & Profil-UID**: Der Mutating Webhook überschreibt den Empfänger aus dem authentifizierten API-User und snapshottet die serverseitige Profil-UID. ServiceAccounts sind im Self-Service-Slice absichtlich ausgeschlossen.
 * [x] **Profil-`use`-Autorisierung**: Der Validating Webhook führt einen `SubjectAccessReview` für `use` auf dem konkret benannten Profil aus und prüft Profil-UID sowie maximale Dauer erneut.
 * [x] **Datensparsame Betriebsmetriken**: Lifecycle, Binding-Drift, Cleanup-Lag, aktive/überfällige Sessions sowie Admission-Allow/Deny/Error sind mit festen Enum-Labels instrumentiert; Identitäten, Rollen, Namespaces, Tickets und Gründe erscheinen nicht als Labels.
-* [~] **Produktions-Installations-Gate**: Das Production-Overlay liefert zwei Manager-Replikas, Leader Election, Host-Spreading und einen PDB. Ein separater Kind-Gate mit zwei schedulierbaren Worker-Nodes prüft den gerenderten Production-Installationspfad, Pod-Ausfall, vollständigen Webhook-Ausfall (fail-closed) und Wiederherstellung. Offen bleiben Zertifikatsrotation, Upgrade-/Rollback-Proben, Supply-Chain-Gates sowie die clusterkonkrete, CA-validierte Metrics-/NetworkPolicy-Integration.
+* [~] **Produktions-Installations-Gate**: Das Production-Overlay liefert zwei Manager-Replikas, Leader Election, Host-Spreading und einen PDB. Ein separater Kind-Gate mit zwei schedulierbaren Worker-Nodes prüft den gerenderten Production-Installationspfad, Pod-Ausfall, vollständigen Webhook-Ausfall (fail-closed), Zertifikatsreissue, TTL-Recovery sowie einen Rolling Restart mit unveränderter Binding-UID. Offen bleiben echte versionsübergreifende Upgrade-/Rollback-Proben, Supply-Chain-Gates sowie die clusterkonkrete, CA-validierte Metrics-/NetworkPolicy-Integration.
 
 #### Priorität 0: kontrollierte Delegation statt Blacklist
 * **`AccessProfile` als serverseitige Policy**:

@@ -51,6 +51,9 @@ const (
 	roleReuseSessionName           = "production-role-reuse-session"
 	certificateRotationSessionName = "production-certificate-rotation-session"
 	expiryRecoverySessionName      = "production-expiry-recovery-session"
+	rollingRestartSessionName      = "production-rolling-restart-session"
+	rollingRestartRecoverySession  = "production-rolling-restart-recovery-session"
+	namespaceDeletionSessionName   = "production-namespace-deletion-session"
 )
 
 var installedCertManager bool
@@ -80,15 +83,17 @@ var _ = AfterSuite(func() {
 
 var _ = Describe("Production installation", Ordered, func() {
 	BeforeAll(func() {
-		By("installing CRDs and the high-availability production overlay")
-		_, err := utils.Run(exec.Command("make", "install"))
+		By("creating the target namespace before installing the namespaced production overlay")
+		_, err := utils.Run(exec.Command("kubectl", "create", "namespace", targetNamespace))
 		Expect(err).NotTo(HaveOccurred())
-		_, err = utils.Run(exec.Command("make", "deploy-production", fmt.Sprintf("IMG=%s", managerImage)))
+		By("installing CRDs and the high-availability namespaced production overlay")
+		_, err = utils.Run(exec.Command("make", "install"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = utils.Run(exec.Command("make", "deploy-production",
+			"PRODUCTION_OVERLAY=production-namespaced", fmt.Sprintf("IMG=%s", managerImage)))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a namespaced curated profile and a least-privilege requester")
-		_, err = utils.Run(exec.Command("kubectl", "create", "namespace", targetNamespace))
-		Expect(err).NotTo(HaveOccurred())
 		for _, path := range []string{
 			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
 			"config/samples/access_v1alpha1_accessprofile.yaml",
@@ -109,7 +114,8 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		for _, session := range []string{
 			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
-			certificateRotationSessionName, expiryRecoverySessionName,
+			certificateRotationSessionName, expiryRecoverySessionName, rollingRestartSessionName,
+			rollingRestartRecoverySession, namespaceDeletionSessionName,
 		} {
 			_, _ = utils.Run(exec.Command(
 				"kubectl", "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
@@ -121,7 +127,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found"))
-		_, _ = utils.Run(exec.Command("make", "undeploy-production-test"))
+		_, _ = utils.Run(exec.Command("make", "undeploy-production-test", "PRODUCTION_OVERLAY=production-namespaced"))
 		_, _ = utils.Run(exec.Command("make", "uninstall-test"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", managerNamespace, "--ignore-not-found"))
 	})
@@ -209,6 +215,45 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
 	})
 
+	It("retains an active grant through a rolling manager restart", func() {
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("creating a non-expiring-during-test namespaced session")
+		Expect(createSessionWithDuration(rollingRestartSessionName, "5m")).To(Succeed())
+		Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		bindingName, bindingUID := sessionBindingReference(rollingRestartSessionName)
+		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
+		previousManagerUIDs := managerPodUIDs()
+		Expect(previousManagerUIDs).To(HaveLen(2))
+
+		By("restarting the high-availability deployment without changing the active grant")
+		_, err := utils.Run(exec.Command(
+			"kubectl", "rollout", "restart", "deployment", managerName, "-n", managerNamespace,
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			assertProductionReady(g)
+			currentManagerUIDs := managerPodUIDs()
+			g.Expect(currentManagerUIDs).To(HaveLen(2))
+			for _, previousUID := range previousManagerUIDs {
+				g.Expect(currentManagerUIDs).NotTo(ContainElement(previousUID))
+			}
+		}, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("requiring the exact session and RoleBinding identity to remain unchanged")
+		Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		currentBindingName, currentBindingUID := sessionBindingReference(rollingRestartSessionName)
+		Expect(currentBindingName).To(Equal(bindingName))
+		Expect(currentBindingUID).To(Equal(bindingUID))
+		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
+
+		By("proving that a new least-privilege request is admitted after recovery")
+		Expect(createSession(rollingRestartRecoverySession)).To(Succeed())
+		Eventually(sessionIsActive(rollingRestartRecoverySession), 2*time.Minute, time.Second).Should(Succeed())
+		revokeSession(rollingRestartRecoverySession)
+		revokeSession(rollingRestartSessionName)
+	})
+
 	It("recovers webhook certificates and expires a grant after a complete manager restart", func() {
 		By("forcing cert-manager to reissue the serving secret without weakening admission")
 		previousCertificateSecretUID := certificateSecretUID()
@@ -234,6 +279,36 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPhase(expiryRecoverySessionName, "Expired"), 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
+	})
+
+	It("releases the session finalizer when its target namespace disappears", func() {
+		By("creating a final active grant before deleting its target namespace")
+		Expect(createSessionWithDuration(namespaceDeletionSessionName, "5m")).To(Succeed())
+		Eventually(sessionIsActive(namespaceDeletionSessionName), 2*time.Minute, time.Second).Should(Succeed())
+
+		By("removing the manager's namespace permissions before namespace and session cleanup")
+		_, err := utils.Run(exec.Command("kubectl", "delete", "rolebinding",
+			"breakglass-operator-manager-rolebindings", "-n", targetNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			output, checkErr := utils.Run(exec.Command("kubectl",
+				"--as=system:serviceaccount:"+managerNamespace+":"+managerName,
+				"auth", "can-i", "delete", "rolebindings", "-n", targetNamespace))
+			g.Expect(checkErr).To(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(Equal("no"))
+		}, time.Minute, time.Second).Should(Succeed())
+
+		By("deleting the namespace and session without relying on RoleBinding delete ordering")
+		_, err = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--wait=false"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = utils.Run(exec.Command(
+			"kubectl", "delete", "breakglasssession", namespaceDeletionSessionName, "--wait=false",
+		))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("requiring finalizer completion even after Kubernetes has removed the RoleBinding")
+		Eventually(sessionIsDeleted(namespaceDeletionSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(namespaceIsDeleted(targetNamespace), 2*time.Minute, time.Second).Should(Succeed())
 	})
 })
 
@@ -281,6 +356,16 @@ func managerPods() ([]string, error) {
 		return nil, err
 	}
 	return utils.GetNonEmptyLines(output), nil
+}
+
+func managerPodUIDs() []string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "get", "pods", "-n", managerNamespace,
+		"-l", "control-plane=controller-manager",
+		"-o", "jsonpath={range .items[?(@.status.phase=='Running')]}{.metadata.uid}{'\\n'}{end}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	return utils.GetNonEmptyLines(output)
 }
 
 func readyWebhookEndpointCount() (int, error) {
@@ -379,6 +464,10 @@ func certificateSecretWasReissued(previousUID string) func(Gomega) {
 }
 
 func createSession(name string) error {
+	return createSessionWithDuration(name, "1m")
+}
+
+func createSessionWithDuration(name, duration string) error {
 	_, err := applyManifestAs(requesterName, fmt.Sprintf(`
 apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
@@ -386,9 +475,9 @@ metadata:
   name: %s
 spec:
   accessProfile: %s
-  duration: "1m"
+  duration: %q
   reason: "Production HA and fail-closed admission verification"
-`, name, accessProfileName))
+`, name, accessProfileName, duration))
 	return err
 }
 
@@ -426,8 +515,26 @@ func sessionHasPassedExpiry(name string) func(Gomega) {
 }
 
 func sessionBindingName(name string) string {
+	bindingName, _ := sessionBindingReference(name)
+	return bindingName
+}
+
+func sessionBindingReference(name string) (string, string) {
 	output, err := utils.Run(exec.Command(
-		"kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.bindingRef.name}",
+		"kubectl", "get", "breakglasssession", name,
+		"-o", "jsonpath={.status.bindingRef.name},{.status.bindingRef.uid}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	parts := strings.Split(output, ",")
+	Expect(parts).To(HaveLen(2))
+	Expect(parts[0]).NotTo(BeEmpty())
+	Expect(parts[1]).NotTo(BeEmpty())
+	return parts[0], parts[1]
+}
+
+func roleBindingUID(name string) string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "get", "rolebinding", name, "-n", targetNamespace, "-o", "jsonpath={.metadata.uid}",
 	))
 	Expect(err).NotTo(HaveOccurred())
 	Expect(output).NotTo(BeEmpty())
@@ -448,6 +555,20 @@ func sessionIsSuspendedForCuratedRole(name, reason string) func(Gomega) {
 func bindingIsDeleted(name string) func(Gomega) {
 	return func(g Gomega) {
 		_, err := utils.Run(exec.Command("kubectl", "get", "rolebinding", name, "-n", targetNamespace))
+		g.Expect(err).To(HaveOccurred())
+	}
+}
+
+func sessionIsDeleted(name string) func(Gomega) {
+	return func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name))
+		g.Expect(err).To(HaveOccurred())
+	}
+}
+
+func namespaceIsDeleted(name string) func(Gomega) {
+	return func(g Gomega) {
+		_, err := utils.Run(exec.Command("kubectl", "get", "namespace", name))
 		g.Expect(err).To(HaveOccurred())
 	}
 }

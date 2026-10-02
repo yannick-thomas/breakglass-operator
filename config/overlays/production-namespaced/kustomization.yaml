@@ -24,6 +24,15 @@ patches:
         value: rolebindings
       - op: remove
         path: /rules/8
+      # Survives deletion of target-namespace RBAC; read only this namespace
+      # to distinguish confirmed absence from a generic cleanup Forbidden.
+      - op: add
+        path: /rules/-
+        value:
+          apiGroups: [""]
+          resources: ["namespaces"]
+          resourceNames: ["production"]
+          verbs: ["get"]
   - target:
       kind: Deployment
       labelSelector: control-plane=controller-manager

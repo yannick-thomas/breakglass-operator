@@ -21,6 +21,7 @@ patches:
           - maxSkew: 1
             topologyKey: kubernetes.io/hostname
             whenUnsatisfiable: DoNotSchedule
+            nodeTaintsPolicy: Honor
             labelSelector:
               matchLabels:
                 control-plane: controller-manager

@@ -75,6 +75,11 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= breakglass-operator-test-e2e
 PRODUCTION_KIND_CLUSTER ?= breakglass-operator-production-e2e
+CERT_MANAGER_VERSION ?= v1.21.1
+# Used by CI to turn an otherwise implicit Kind default into reviewable
+# qualification evidence. The first lock file is created only from an artifact
+# emitted by a successful required E2E run.
+COMPATIBILITY_EVIDENCE_DIR ?= $(CURDIR)/compatibility-evidence
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -92,7 +97,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: setup-test-e2e-production
@@ -107,8 +112,23 @@ setup-test-e2e-production: ## Set up Kind with two schedulable workers for the p
 
 .PHONY: test-e2e-production
 test-e2e-production: setup-test-e2e-production manifests generate fmt vet ## Run the HA production overlay e2e tests in Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) go test -tags=e2e ./test/e2e/production -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) go test -tags=e2e ./test/e2e/production -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e-production
+
+.PHONY: capture-kind-compatibility-evidence
+capture-kind-compatibility-evidence: ## Capture exact Kind/Kubernetes evidence for a running isolated Kind cluster.
+	@set -eu; \
+		dir="$(COMPATIBILITY_EVIDENCE_DIR)"; \
+		mkdir -p "$$dir"; \
+		$(KIND) version > "$$dir/kind-version.txt"; \
+		$(KUBECTL) --context "kind-$(KIND_CLUSTER)" version -o yaml > "$$dir/kubernetes-version.yaml"; \
+		node="$$($(KIND) get nodes --name $(KIND_CLUSTER) | head -n 1)"; \
+		test -n "$$node"; \
+		docker inspect "$$node" > "$$dir/kind-node.json"; \
+		image="$$(docker inspect --format '{{.Config.Image}}' "$$node")"; \
+		printf '%s\n' "$$image" > "$$dir/kind-node-image.txt"; \
+		docker image inspect "$$image" > "$$dir/kind-node-image.json"; \
+		printf 'CERT_MANAGER_VERSION=%s\n' "$(CERT_MANAGER_VERSION)" > "$$dir/cert-manager-version.env"
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -226,11 +246,13 @@ deploy: manifests kustomize ## Deploy controller without changing the checked-ou
 		"$(KUSTOMIZE)" build "$$temp_dir/config/default" | "$(KUBECTL)" apply -f -
 
 .PHONY: deploy-production
+# The E2E suite can also qualify the tighter namespace-scoped installation.
+PRODUCTION_OVERLAY ?= production
 deploy-production: manifests kustomize ## Deploy the HA production overlay without modifying tracked manifests.
 	@temp_dir="$$(mktemp -d)"; trap 'rm -rf "$$temp_dir"' EXIT; \
 		cp -R config "$$temp_dir/config"; \
 		cd "$$temp_dir/config/manager" && "$(KUSTOMIZE)" edit set image controller=${IMG}; \
-		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/production" | "$(KUBECTL)" apply -f -
+		"$(KUSTOMIZE)" build "$$temp_dir/config/overlays/$(PRODUCTION_OVERLAY)" | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
@@ -242,7 +264,7 @@ undeploy-test: ## Undeploy without waiting; intended only for disposable test cl
 
 .PHONY: undeploy-production
 undeploy-production: kustomize ## Undeploy the HA production overlay from the current cluster.
-	"$(KUSTOMIZE)" build config/overlays/production | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -
+	"$(KUSTOMIZE)" build config/overlays/$(PRODUCTION_OVERLAY) | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) --wait=$(delete-wait) -f -
 
 .PHONY: undeploy-production-test
 undeploy-production-test: ## Undeploy the HA overlay without waiting; intended only for disposable test clusters.

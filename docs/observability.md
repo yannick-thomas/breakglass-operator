@@ -32,7 +32,7 @@ Only bounded labels are exposed:
   `rules_hash`, `snapshot_missing`, or `unknown`. Request-source integrity
   uses a separate fixed vocabulary for request, reservation, approval, UID,
   phase, TTL, and expiry failures; it never includes an object identifier.
-* binding `operation`: `grant`, `restore`, `cleanup`, or `unknown`
+* binding `operation`: `reserve`, `recover_reservation`, `grant`, `restore`, `cleanup`, or `unknown`
 * `result`: `success`, `error`, or `unknown`
 * admission `operation`: `create`, `update`, or `unknown`
 * admission `outcome`: `allowed`, `denied`, `error`, or `unknown`
@@ -64,10 +64,18 @@ registry and implements `metrics.LifecycleRecorder`. A reconciler can keep the
 interface optional and call its methods after semantic lifecycle boundaries:
 
 * Record a transition only after the relevant status update succeeds.
+* Empty-subject creation is `reserve`; recovery of that non-authorizing object
+  is `recover_reservation`, never `grant` or `restore`. Subject-promotion
+  `Update` records `grant` success/error around the actual RBAC write. A failed
+  promotion therefore cannot appear as a successful grant. Recovery after a
+  successful promotion but failed status write does not count a second grant.
 * Record a cleanup failure or success around the actual cleanup operation, not
   for ordinary no-op reconciles.
 * Record drift only on the first transition into the corresponding integrity
   failure state; never use raw errors as a label.
+  Deletion-path drift is recorded only after finalizer removal succeeds, so
+  conflicts do not count the same cleanup incident repeatedly. Counters remain
+  best-effort across process crashes, not an exactly-once audit log.
 * Observe expiry cleanup lag immediately after a successful expiry cleanup.
 
 `RegisterSessionStateCollector(reader, resolveScope)` must be called once

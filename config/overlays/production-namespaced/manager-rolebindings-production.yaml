@@ -1,5 +1,6 @@
-# The manager receives RoleBinding CRUD only in the namespace named by the
-# overlay. Keep this resource and --allowed-target-namespaces in sync.
+# The manager receives RoleBinding CRUD plus the one subject-promotion update
+# only in the namespace named by the overlay. Keep this resource and
+# --allowed-target-namespaces in sync.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -11,7 +12,7 @@ metadata:
 rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
-    verbs: ["create", "delete", "get", "list", "watch"]
+    verbs: ["create", "delete", "get", "list", "update", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
