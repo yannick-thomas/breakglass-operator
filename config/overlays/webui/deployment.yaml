@@ -8,6 +8,8 @@ metadata:
     app.kubernetes.io/part-of: breakglass-operator
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: breakglass-webui
@@ -35,20 +37,27 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          # Sessions live in memory, so the WebUI runs as a single replica.
+          # The OIDC client must be trusted by the kube-apiserver with the
+          # same issuer and client ID as audience (see docs/WEBUI.md).
           env:
             - name: WEBUI_PORT
               value: "8080"
             - name: WEBUI_IN_CLUSTER
               value: "true"
-            - name: WEBUI_DEV_MODE
-              value: "false"
-            - name: WEBUI_OIDC_ENABLED
-              value: "false"
-            - name: WEBUI_COOKIE_SECRET
+            - name: WEBUI_PUBLIC_URL
+              value: "https://breakglass.example.com"
+            - name: WEBUI_OIDC_ISSUER_URL
+              value: "https://idp.example.com/realms/platform"
+            - name: WEBUI_OIDC_CLIENT_ID
+              value: "breakglass-webui"
+            - name: WEBUI_OIDC_REDIRECT_URL
+              value: "https://breakglass.example.com/auth/callback"
+            - name: WEBUI_OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: breakglass-webui-secret
-                  key: cookie-secret
+                  name: breakglass-webui-oidc
+                  key: client-secret
                   optional: true
           livenessProbe:
             httpGet:

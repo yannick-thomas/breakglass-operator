@@ -1,0 +1,10 @@
+/*
+ * React Aria injects this rule as an inline <style> unless an element with
+ * id="react-aria-pressable-style" exists. Shipping it as a file keeps the
+ * Content-Security-Policy free of 'unsafe-inline'.
+ */
+@layer {
+  [data-react-aria-pressable] {
+    touch-action: pan-x pan-y pinch-zoom;
+  }
+}

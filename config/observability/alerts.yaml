@@ -18,6 +18,24 @@ spec:
           annotations:
             summary: BreakGlass access remains active after expiry
             runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#controller-outage-expiry-and-emergency-recovery
+        # The two expiry-guard alerts use kube-state-metrics, so they still work
+        # while the manager (and with it the past-expiry gauge) is down.
+        - alert: BreakGlassExpiryGuardFailed
+          expr: kube_job_status_failed{namespace="breakglass-operator-system", job_name=~"breakglass-operator-expiry-guard-.*"} > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: BreakGlass expiry guard could not remove or prove an expired binding
+            runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#controller-outage-expiry-and-emergency-recovery
+        - alert: BreakGlassExpiryGuardNotRunning
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="breakglass-operator-system", cronjob="breakglass-operator-expiry-guard"} > 600
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: BreakGlass expiry guard has not completed a sweep for ten minutes
+            runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#controller-outage-expiry-and-emergency-recovery
         - alert: BreakGlassIntegrityDrift
           expr: increase(breakglass_binding_drift_total[5m]) > 0 or increase(breakglass_curated_role_drift_total[5m]) > 0 or increase(breakglass_request_source_integrity_failures_total[5m]) > 0
           for: 0m

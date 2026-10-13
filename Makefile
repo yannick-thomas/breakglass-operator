@@ -163,9 +163,24 @@ verify-manifests: manifests generate kustomize ## Render installation profiles a
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+	go build -o bin/expiry-guard ./cmd/expiry-guard
+
+WEBUI_FRONTEND_DIR := internal/webui/frontend
+
+.PHONY: webui-frontend
+webui-frontend: ## Build the WebUI React app into internal/webui/frontend/build/app (embedded into the binary).
+	cd $(WEBUI_FRONTEND_DIR) && npm ci --ignore-scripts --no-fund && npm run build
+
+.PHONY: test-webui-frontend
+test-webui-frontend: ## Typecheck and unit-test the WebUI React app.
+	cd $(WEBUI_FRONTEND_DIR) && npm ci --ignore-scripts --no-fund && npm run typecheck && npm test
+
+.PHONY: test-webui-e2e
+test-webui-e2e: webui-frontend ## Run WebUI browser tests (Playwright, mocked API).
+	cd $(WEBUI_FRONTEND_DIR) && npx playwright install chromium && npm run test:e2e
 
 .PHONY: build-webui
-build-webui: fmt vet ## Build WebUI binary.
+build-webui: webui-frontend fmt vet ## Build WebUI binary.
 	go build -o bin/breakglass-webui cmd/webui/main.go
 
 .PHONY: run
@@ -173,7 +188,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
 .PHONY: run-webui
-run-webui: fmt vet ## Run WebUI locally in dev mode.
+run-webui: webui-frontend fmt vet ## Run WebUI locally in dev mode.
 	WEBUI_DEV_MODE=true go run ./cmd/webui/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.

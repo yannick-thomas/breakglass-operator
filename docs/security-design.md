@@ -121,6 +121,33 @@ namespaces. It cannot revoke or grant access because the reservation has no
 subjects. Expiry and manual revocation remove the exact tracked object when it
 still exists.
 
+### Independent expiry guard
+
+Expiry does not depend on the manager alone. The `expiry-guard` CronJob runs
+every minute with its own ServiceAccount and permissions limited to reading
+sessions and `get`/`delete` on RoleBindings (only in the allowed target
+namespaces in the `production-namespaced` overlay). For each session past
+`status.expiresAt` plus a grace period (default two minutes), it deletes the
+RoleBinding only if its namespace, name, **and UID** match `status.bindingRef`,
+with a UID and resourceVersion precondition. It never creates, adopts, repairs,
+or extends access and never writes session state. A binding it cannot prove is
+left untouched and fails the Job (exit code 2) so a human investigates.
+
+When the controller later expires such a session and finds the binding already
+gone, it records `BindingIntegrity=True` with reason `BindingAlreadyRemoved`
+instead of reporting drift: after expiry, absence is the intended end state. A
+deletion while the session is still active is detected by the binding watch and
+suspends the session as before, and a replacement object is still an integrity
+issue. Revocation needs no guard: during a manager outage the admission
+webhook is unavailable too, so `spec.revoked` cannot be set.
+
+Manual revocation is authorized in admission, not by `patch` alone: the
+session's own subject may set `spec.revoked: true`, and anyone else needs the
+profile-scoped custom verb `revoke`, checked with a SubjectAccessReview. A
+failing authorization check rejects the update. Revocation only removes
+access, but without this check any holder of `patch` could end other people's
+emergency access during an incident.
+
 This means a security response should alert on `Suspended` and inspect the
 associated audit logs rather than assuming a destroyed binding will reappear.
 

@@ -56,6 +56,42 @@ jobs:
       - name: Run linter
         run: make lint
 
+  webui-frontend:
+    name: WebUI frontend
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: internal/webui/frontend
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: internal/webui/frontend/package-lock.json
+      # No dependency needs an install script; keep them disabled.
+      - name: Install dependencies from the lockfile
+        run: npm ci --ignore-scripts --no-fund
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: Browser and accessibility tests
+        run: npm run test:e2e
+
   test:
     name: Unit and integration tests
     needs: dependencies
@@ -188,7 +224,7 @@ jobs:
 
   package:
     name: Publish image and rendered installers
-    needs: [lint, test, security, verify-manifests, test-e2e, test-e2e-production]
+    needs: [lint, test, webui-frontend, security, verify-manifests, test-e2e, test-e2e-production]
     # Publishing is deliberately a post-gate action. Pull requests never get a
     # registry token or a Buildx cache write; manual runs are restricted to
     # main as well.

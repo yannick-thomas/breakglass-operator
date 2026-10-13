@@ -58,6 +58,7 @@ func SetupBreakGlassSessionWebhookWithManager(
 			RequestReader:             mgr.GetAPIReader(),
 			ApprovalReader:            mgr.GetAPIReader(),
 			Reviewer:                  KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+			RevocationReviewer:        KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
 			Metrics:                   breakglassmetrics.DefaultRecorder,
 			AllowedTargetNamespaces:   allowedTargetNamespaces,
 			RequestControllerUsername: requestControllerUsername,
@@ -141,6 +142,13 @@ type SubjectAccessReviewer interface {
 	CanUse(context.Context, authenticationv1.UserInfo, string) (bool, error)
 }
 
+// RevocationReviewer authorizes revoking another person's session. It is a
+// separate interface so that revocation authority is never inferred from
+// profile use.
+type RevocationReviewer interface {
+	CanRevoke(context.Context, authenticationv1.UserInfo, string) (bool, error)
+}
+
 // KubernetesSubjectAccessReviewer performs a real SubjectAccessReview through
 // the Kubernetes API.
 type KubernetesSubjectAccessReviewer struct {
@@ -156,6 +164,13 @@ func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authen
 // because they may start a direct self-service session.
 func (r KubernetesSubjectAccessReviewer) CanApprove(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
 	return r.canAccessProfile(ctx, user, profile, "approve")
+}
+
+// CanRevoke verifies the custom, profile-scoped revocation verb. It lets an
+// incident commander end someone else's access without granting them use or
+// approve on the same profile.
+func (r KubernetesSubjectAccessReviewer) CanRevoke(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
+	return r.canAccessProfile(ctx, user, profile, "revoke")
 }
 
 func (r KubernetesSubjectAccessReviewer) canAccessProfile(ctx context.Context, user authenticationv1.UserInfo, profile, verb string) (bool, error) {
@@ -197,6 +212,7 @@ type BreakGlassSessionValidator struct {
 	RequestReader             client.Reader
 	ApprovalReader            client.Reader
 	Reviewer                  SubjectAccessReviewer
+	RevocationReviewer        RevocationReviewer
 	Metrics                   breakglassmetrics.AdmissionRecorder
 	AllowedTargetNamespaces   map[string]struct{}
 	RequestControllerUsername string
@@ -257,7 +273,9 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 // ValidateUpdate permits only metadata/status activity and one-way revocation.
 // The controller itself updates finalizers and status under its own identity,
 // so profile-use authorization is intentionally a CREATE-only decision.
-func (v *BreakGlassSessionValidator) ValidateUpdate(_ context.Context, oldObj, newObj *accessv1alpha1.BreakGlassSession) (warnings admission.Warnings, err error) {
+// Revocation is authorized separately: patch on sessions alone must not let a
+// person end someone else's access.
+func (v *BreakGlassSessionValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *accessv1alpha1.BreakGlassSession) (warnings admission.Warnings, err error) {
 	defer func() {
 		recordAdmissionDecision(v.Metrics, breakglassmetrics.AdmissionOperationUpdate, admissionOutcomeForError(err))
 	}()
@@ -274,7 +292,45 @@ func (v *BreakGlassSessionValidator) ValidateUpdate(_ context.Context, oldObj, n
 	if oldSpec.Revoked && !newSpec.Revoked {
 		return nil, fmt.Errorf("revoked cannot be changed from true to false")
 	}
+	if !oldSpec.Revoked && newSpec.Revoked {
+		if err := v.authorizeRevocation(ctx, oldObj); err != nil {
+			return nil, err
+		}
+	}
 	return nil, nil
+}
+
+// authorizeRevocation allows the session's own subject to end their access
+// early. Anyone else needs the profile-scoped custom verb "revoke", checked
+// with a SubjectAccessReview for the authenticated admission user. The subject
+// is read from the stored object, which the immutability check above has
+// already proven equal to the submitted one.
+func (v *BreakGlassSessionValidator) authorizeRevocation(ctx context.Context, session *accessv1alpha1.BreakGlassSession) error {
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return apierrors.NewInternalError(fmt.Errorf("read authenticated admission requester: %w", err))
+	}
+	user := req.UserInfo
+	if user.Username == "" {
+		return fmt.Errorf("authenticated requester has no username")
+	}
+
+	subject := session.Spec.Subject
+	if subject.Kind == accessv1alpha1.SubjectKindUser && subject.Name == user.Username {
+		return nil
+	}
+
+	if v.RevocationReviewer == nil {
+		return apierrors.NewInternalError(fmt.Errorf("revocation reviewer is not configured"))
+	}
+	allowed, err := v.RevocationReviewer.CanRevoke(ctx, user, session.Spec.AccessProfile)
+	if err != nil {
+		return apierrors.NewInternalError(fmt.Errorf("evaluate AccessProfile revoke authorization: %w", err))
+	}
+	if !allowed {
+		return fmt.Errorf("only the session subject or a user authorized to revoke AccessProfile %q may revoke this session", session.Spec.AccessProfile)
+	}
+	return nil
 }
 
 // validateRequestSourcedSession is the only admission path for a workload

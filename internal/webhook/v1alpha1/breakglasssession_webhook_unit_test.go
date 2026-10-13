@@ -122,6 +122,94 @@ func TestValidatorRequiresAuthenticatedProfileUse(t *testing.T) {
 	}
 }
 
+func TestValidatorAuthorizesRevocation(t *testing.T) {
+	tests := map[string]struct {
+		ctx      context.Context
+		reviewer RevocationReviewer
+		wantErr  string
+		outcome  breakglassmetrics.AdmissionOutcome
+	}{
+		"subject revokes own session": {
+			ctx:     requestContext("engineer@example.com"),
+			outcome: breakglassmetrics.AdmissionOutcomeAllowed,
+		},
+		"other user without revoke verb": {
+			ctx:      requestContext("attacker@example.com"),
+			reviewer: fakeRevocationReviewer{allowed: false},
+			wantErr:  "only the session subject",
+			outcome:  breakglassmetrics.AdmissionOutcomeDenied,
+		},
+		"incident commander with revoke verb": {
+			ctx:      requestContext("commander@example.com"),
+			reviewer: fakeRevocationReviewer{allowed: true, wantUser: "commander@example.com"},
+			outcome:  breakglassmetrics.AdmissionOutcomeAllowed,
+		},
+		"similar username is not the subject": {
+			ctx:      requestContext("Engineer@example.com"),
+			reviewer: fakeRevocationReviewer{allowed: false},
+			wantErr:  "only the session subject",
+			outcome:  breakglassmetrics.AdmissionOutcomeDenied,
+		},
+		"authorization check fails closed": {
+			ctx:      requestContext("commander@example.com"),
+			reviewer: fakeRevocationReviewer{err: errors.New("authorization API unavailable")},
+			wantErr:  "evaluate AccessProfile revoke authorization",
+			outcome:  breakglassmetrics.AdmissionOutcomeError,
+		},
+		"missing reviewer fails closed": {
+			ctx:     requestContext("commander@example.com"),
+			wantErr: "revocation reviewer is not configured",
+			outcome: breakglassmetrics.AdmissionOutcomeError,
+		},
+		"missing admission request fails closed": {
+			ctx:     context.Background(),
+			wantErr: "read authenticated admission requester",
+			outcome: breakglassmetrics.AdmissionOutcomeError,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			recorder := &recordingAdmissionRecorder{}
+			validator := &BreakGlassSessionValidator{RevocationReviewer: tc.reviewer, Metrics: recorder}
+			oldSession := testSessionRequest()
+			newSession := oldSession.DeepCopy()
+			newSession.Spec.Revoked = true
+
+			_, err := validator.ValidateUpdate(tc.ctx, oldSession, newSession)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("ValidateUpdate() error = %v, want allowed", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("ValidateUpdate() error = %v, want %q", err, tc.wantErr)
+			}
+			want := []admissionDecision{{operation: breakglassmetrics.AdmissionOperationUpdate, outcome: tc.outcome}}
+			if len(recorder.decisions) != 1 || recorder.decisions[0] != want[0] {
+				t.Fatalf("recorded decisions = %#v, want %#v", recorder.decisions, want)
+			}
+		})
+	}
+}
+
+func TestValidatorUpdateWithoutRevocationNeedsNoAuthorization(t *testing.T) {
+	// Finalizer and metadata updates by the controller leave the spec unchanged
+	// and must not depend on the revocation check.
+	validator := &BreakGlassSessionValidator{}
+	oldSession := testSessionRequest()
+	newSession := oldSession.DeepCopy()
+	newSession.Finalizers = []string{"access.breakglass.io/cleanup"}
+	if _, err := validator.ValidateUpdate(requestContext("system:serviceaccount:breakglass-operator-system:controller-manager"), oldSession, newSession); err != nil {
+		t.Fatalf("ValidateUpdate() error = %v", err)
+	}
+
+	// An already revoked session stays revoked without a further check.
+	oldSession.Spec.Revoked = true
+	newSession = oldSession.DeepCopy()
+	if _, err := validator.ValidateUpdate(requestContext("someone@example.com"), oldSession, newSession); err != nil {
+		t.Fatalf("ValidateUpdate() error = %v", err)
+	}
+}
+
 func TestValidatorRejectsProfileOutsideAllowedNamespaces(t *testing.T) {
 	profile := testAccessProfile()
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
@@ -142,7 +230,7 @@ func TestValidatorAllowsOnlyOneWayRevocation(t *testing.T) {
 	oldSession := testSessionRequest()
 	newSession := oldSession.DeepCopy()
 	newSession.Spec.Revoked = true
-	if _, err := validator.ValidateUpdate(context.Background(), oldSession, newSession); err != nil {
+	if _, err := validator.ValidateUpdate(requestContext("engineer@example.com"), oldSession, newSession); err != nil {
 		t.Fatalf("ValidateUpdate() revocation error = %v", err)
 	}
 
@@ -365,6 +453,22 @@ func assertAdmissionDecisions(t *testing.T, recorder *recordingAdmissionRecorder
 }
 
 func (f fakeReviewer) CanUse(_ context.Context, _ authenticationv1.UserInfo, _ string) (bool, error) {
+	return f.allowed, f.err
+}
+
+type fakeRevocationReviewer struct {
+	allowed  bool
+	err      error
+	wantUser string
+}
+
+func (f fakeRevocationReviewer) CanRevoke(_ context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
+	if f.wantUser != "" && user.Username != f.wantUser {
+		return false, errors.New("reviewed unexpected user " + user.Username)
+	}
+	if profile != "production-pod-observer" {
+		return false, errors.New("reviewed unexpected profile " + profile)
+	}
 	return f.allowed, f.err
 }
 

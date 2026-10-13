@@ -1,95 +1,75 @@
 package auth
 
 import (
+	"errors"
 	"testing"
 	"time"
-
-	"github.com/yannick-thomas/breakglass-operator/internal/webui/config"
 )
 
-func TestSessionManager_EncryptDecrypt(t *testing.T) {
-	cfg := &config.Config{
-		CookieSecret: "my-very-secret-test-key-32-chars-long!",
-		CookieName:   "bg_test_session",
-		SessionTTL:   1 * time.Hour,
+func TestStore_SessionLifecycle(t *testing.T) {
+	store := NewStore()
+	a := NewSession(Identity{Username: "jane"}, "Jane", nil, time.Hour)
+	b := NewSession(Identity{Username: "max"}, "Max", nil, time.Hour)
+
+	if err := store.Add(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(b); err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == "" || a.ID == b.ID {
+		t.Fatalf("expected distinct random session IDs, got %q and %q", a.ID, b.ID)
 	}
 
-	sm, err := NewSessionManager(cfg)
-	if err != nil {
-		t.Fatalf("failed to create session manager: %v", err)
+	got, err := store.Get(a.ID)
+	if err != nil || got.Identity.Username != "jane" {
+		t.Fatalf("expected jane's session, got %+v, %v", got, err)
 	}
 
-	session := &UserSession{
-		Subject:   "test-user@example.com",
-		Email:     "test-user@example.com",
-		Name:      "Test User",
-		Groups:    []string{"on-call", "sre-team"},
-		ExpiresAt: time.Now().Add(1 * time.Hour),
+	store.Delete(a.ID)
+	if _, err := store.Get(a.ID); !errors.Is(err, ErrSessionExpired) {
+		t.Errorf("expected deleted session to be gone, got %v", err)
 	}
-
-	encrypted, err := sm.Encrypt(session)
-	if err != nil {
-		t.Fatalf("encrypt failed: %v", err)
-	}
-
-	if encrypted == "" {
-		t.Fatal("encrypted string is empty")
-	}
-
-	decrypted, err := sm.Decrypt(encrypted)
-	if err != nil {
-		t.Fatalf("decrypt failed: %v", err)
-	}
-
-	if decrypted.Subject != session.Subject {
-		t.Errorf("expected subject %q, got %q", session.Subject, decrypted.Subject)
-	}
-	if decrypted.Email != session.Email {
-		t.Errorf("expected email %q, got %q", session.Email, decrypted.Email)
-	}
-	if len(decrypted.Groups) != 2 || decrypted.Groups[0] != "on-call" {
-		t.Errorf("groups mismatch: got %v", decrypted.Groups)
+	if _, err := store.Get("unknown"); !errors.Is(err, ErrSessionExpired) {
+		t.Errorf("expected unknown session ID to be rejected, got %v", err)
 	}
 }
 
-func TestSessionManager_ExpiredSession(t *testing.T) {
-	cfg := &config.Config{
-		CookieSecret: "my-very-secret-test-key-32-chars-long!",
+func TestStore_ExpiredSession(t *testing.T) {
+	store := NewStore()
+	sess := NewSession(Identity{Username: "jane"}, "Jane", nil, time.Hour)
+	if err := store.Add(sess); err != nil {
+		t.Fatal(err)
 	}
 
-	sm, err := NewSessionManager(cfg)
-	if err != nil {
-		t.Fatalf("failed to create session manager: %v", err)
-	}
-
-	session := &UserSession{
-		Subject:   "expired@example.com",
-		ExpiresAt: time.Now().Add(-1 * time.Minute), // in past
-	}
-
-	encrypted, err := sm.Encrypt(session)
-	if err != nil {
-		t.Fatalf("encrypt failed: %v", err)
-	}
-
-	_, err = sm.Decrypt(encrypted)
-	if err != ErrSessionExpired {
-		t.Errorf("expected ErrSessionExpired, got %v", err)
+	store.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	if _, err := store.Get(sess.ID); !errors.Is(err, ErrSessionExpired) {
+		t.Errorf("expected expired session to be rejected, got %v", err)
 	}
 }
 
-func TestSessionManager_TamperedSession(t *testing.T) {
-	cfg := &config.Config{
-		CookieSecret: "my-very-secret-test-key-32-chars-long!",
+func TestStore_PendingLoginIsSingleUse(t *testing.T) {
+	store := NewStore()
+	if err := store.AddPending("state-1", PendingLogin{Nonce: "n", PKCEVerifier: "v"}); err != nil {
+		t.Fatal(err)
 	}
 
-	sm, err := NewSessionManager(cfg)
-	if err != nil {
-		t.Fatalf("failed to create session manager: %v", err)
+	p, ok := store.TakePending("state-1")
+	if !ok || p.Nonce != "n" {
+		t.Fatalf("expected pending login, got %+v, %v", p, ok)
 	}
+	if _, ok := store.TakePending("state-1"); ok {
+		t.Error("expected a state value to be redeemable only once")
+	}
+}
 
-	_, err = sm.Decrypt("invalid-base64-random-gibberish")
-	if err != ErrInvalidSession {
-		t.Errorf("expected ErrInvalidSession, got %v", err)
+func TestStore_PendingLoginExpires(t *testing.T) {
+	store := NewStore()
+	if err := store.AddPending("state-1", PendingLogin{}); err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return time.Now().Add(pendingLoginTTL + time.Minute) }
+	if _, ok := store.TakePending("state-1"); ok {
+		t.Error("expected expired pending login to be rejected")
 	}
 }

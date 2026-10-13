@@ -1,5 +1,67 @@
 ## UI/UX-Konzept: optionale WebUI für den BreakGlass Operator
 
+> **Umsetzungsstand (Oktober 2026).** Die WebUI in `cmd/webui` und
+> `internal/webui` setzt das unten beschriebene Zielmodell „OIDC-BFF mit
+> user-bound Kubernetes-Aufrufen“ zusammen mit der Read-only-UI-Facade
+> (Option 2) um:
+>
+> - **Schreiben nur als Person.** Anträge, Self-Service-Sessions, Approvals und
+>   Widerrufe werden mit dem verifizierten OIDC-ID-Token der angemeldeten Person
+>   an die Kubernetes-API gesendet. Admission, RBAC und Audit sehen die Person.
+>   Es gibt keine Impersonation und keinen Fallback auf den ServiceAccount.
+> - **Identität kommt aus Kubernetes.** Nach dem Login ermittelt ein
+>   `SelfSubjectReview` den Kubernetes-Benutzernamen. Wird das Token nicht
+>   akzeptiert, ist keine Anmeldung möglich. Filter vergleichen exakt mit diesem
+>   Namen, nie mit E-Mail- oder anderen Claims.
+> - **Lesen über die Facade.** Der ServiceAccount `breakglass-webui` darf nur
+>   `get`/`list` auf die vier CRDs. „Meine Anträge“ zeigt nur eigene Objekte.
+>   Profilkatalog und Freigabe-Inbox zeigen nur, wofür ein
+>   `SelfSubjectAccessReview` die Verben `use` bzw. `approve` erlaubt.
+> - **Browser-Sicherheit.** Authorization Code mit PKCE und Nonce. ID-Tokens
+>   werden auf Signatur, Issuer, Audience und Ablauf geprüft und bei Bedarf per
+>   Refresh-Token erneuert. Die Sitzung liegt serverseitig, der Browser hält nur
+>   eine zufällige ID (`HttpOnly`, `Secure`, `SameSite=Strict`). POSTs
+>   verlangen Same-Origin und JSON. Die CSP verbietet Inline-Skripte und
+>   Inline-Styles.
+> - **Frontend.** React mit TypeScript und Vite in `internal/webui/frontend`.
+>   React Aria Components liefern barrierefreie Dialoge, Formulare und Tabs.
+>   Das Build-Ergebnis (`build/app`) wird per `go:embed` ins Binary gepackt.
+>   Abhängigkeiten sind per Lockfile exakt gepinnt; Install-Skripte bleiben
+>   deaktiviert (`npm ci --ignore-scripts`).
+> - **Dev-Modus** (`make run-webui`) meldet mit der aktuellen
+>   kubeconfig-Identität an, nur auf Loopback und nie im Cluster. Eine
+>   Identitätsauswahl gibt es bewusst nicht.
+>
+> **Frontend entwickeln und testen:**
+>
+> - `make run-webui` baut das Frontend und startet die WebUI auf
+>   `http://localhost:8080`.
+> - Für Hot Reload zusätzlich `npm run dev` in `internal/webui/frontend`
+>   starten und `http://localhost:5173` öffnen; Vite leitet `/api` und `/auth`
+>   an die laufende WebUI weiter.
+> - `make test-webui-frontend` führt Typecheck und Komponententests (Vitest)
+>   aus, `make test-webui-e2e` die Browser-Tests (Playwright) gegen das
+>   Produktions-Build mit gemockter API. Die Browser-Tests prüfen auch WCAG 2.2
+>   AA (axe) im Hell- und Dunkelmodus, Tastaturbedienung, Handybreite und die
+>   CSP. Die CI führt beides im Job „WebUI frontend“ aus.
+>
+> **Voraussetzungen im Cluster:**
+>
+> 1. Der kube-apiserver vertraut dem OIDC-Issuer mit der Client-ID der WebUI
+>    als Audience (`AuthenticationConfiguration` oder `--oidc-*`). Username- und
+>    Gruppen-Mapping müssen zu den RBAC-Bindings der Requester- und
+>    Approver-Gruppen passen.
+> 2. Requester brauchen `use` auf ihr Profil, `create` auf
+>    `breakglassrequests` bzw. `breakglasssessions` und für den Widerruf `patch`
+>    auf `breakglasssessions`. Approver brauchen `approve` auf das Profil und
+>    `create` auf `breakglassapprovals`.
+> 3. Sitzungen liegen im Speicher. Die WebUI läuft deshalb mit einer Replica;
+>    ein Neustart erfordert eine erneute Anmeldung.
+>
+> **Noch offen:** requester-gebundene Idempotenz gegen Doppelanträge, Rate
+> Limiting, ein eigenes UI-Threat-Model in `docs/threat-model.md` und ein
+> unabhängiges Security Review vor produktiver Nutzung.
+
 **Empfehlung vorab:** Die UI sollte noch nicht implementiert werden. Sie ist fachlich wertvoll, aber erst nach zwei Voraussetzungen produktionsreif:
 
 1. `BreakGlassRequest → BreakGlassApproval → BreakGlassSession` muss vollständig, idempotent und fail-closed funktionieren.

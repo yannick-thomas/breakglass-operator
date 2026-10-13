@@ -1,0 +1,140 @@
+/*
+ * Design tokens. Dark ("mission control") is the default; light is selected
+ * with data-theme="light" on <html>. useTheme resolves the "system" choice to
+ * one of the two. Every text/background pair meets WCAG 2.2 AA (4.5:1).
+ */
+:root {
+  color-scheme: dark;
+
+  --font-sans: "Inter var", Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-hero: 3.25rem;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+
+  --header-height: 3.75rem;
+  --sidebar-width: 15rem;
+  --content-width: 70rem;
+
+  /* Graphite surfaces */
+  --color-bg: #0a0c0f;
+  --color-bg-glow: rgb(255 98 38 / 0.09);
+  --color-grid: rgb(255 255 255 / 0.028);
+  --color-surface: #12151a;
+  --color-surface-raised: #171b21;
+  --color-surface-muted: #1b2027;
+  --color-surface-hover: #212730;
+  --color-border: #262c35;
+  --color-border-strong: #39414d;
+  --color-highlight: rgb(255 255 255 / 0.05);
+  --color-text: #eef1f5;
+  --color-text-muted: #a7b0bd;
+  --color-text-subtle: #8892a0;
+
+  /* Signal orange: the break-glass colour */
+  --color-accent: #ff6a2b;
+  --color-accent-hover: #ff8148;
+  --color-accent-text: #1a0b04;
+  --color-accent-soft: rgb(255 106 43 / 0.13);
+  --color-accent-soft-text: #ffb08c;
+  --color-accent-glow: rgb(255 106 43 / 0.45);
+
+  --color-focus: #7aa7ff;
+
+  --color-success-text: #5be39a;
+  --color-success-bg: rgb(52 211 153 / 0.1);
+  --color-success-border: rgb(52 211 153 / 0.3);
+  --color-success-solid: #34d399;
+  --color-warning-text: #fbc95c;
+  --color-warning-bg: rgb(251 191 36 / 0.1);
+  --color-warning-border: rgb(251 191 36 / 0.3);
+  --color-warning-solid: #fbbf24;
+  --color-danger-text: #ff8a8a;
+  --color-danger-bg: rgb(248 113 113 / 0.1);
+  --color-danger-border: rgb(248 113 113 / 0.32);
+  --color-danger-solid: #d1343a;
+  --color-danger-solid-hover: #bb2a30;
+  --color-danger-solid-text: #ffffff;
+  --color-info-text: #9cbcff;
+  --color-info-bg: rgb(122 167 255 / 0.1);
+  --color-info-border: rgb(122 167 255 / 0.3);
+  --color-neutral-text: #b7bfca;
+  --color-neutral-bg: rgb(255 255 255 / 0.05);
+  --color-neutral-border: rgb(255 255 255 / 0.12);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.5);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 0.45), 0 1px 2px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 30px 80px rgb(0 0 0 / 0.65);
+  --overlay: rgb(4 6 9 / 0.72);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-bg: #f4f3f0;
+  --color-bg-glow: rgb(234 88 12 / 0.07);
+  --color-grid: rgb(20 20 20 / 0.035);
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-muted: #f1efeb;
+  --color-surface-hover: #ebe8e3;
+  --color-border: #e0ddd7;
+  --color-border-strong: #c7c2b9;
+  --color-highlight: rgb(255 255 255 / 0.7);
+  --color-text: #17181a;
+  --color-text-muted: #52525a;
+  --color-text-subtle: #6a6a72;
+
+  --color-accent: #c2410c;
+  --color-accent-hover: #a5370a;
+  --color-accent-text: #ffffff;
+  --color-accent-soft: #fdeee6;
+  --color-accent-soft-text: #9a3412;
+  --color-accent-glow: rgb(194 65 12 / 0.28);
+
+  --color-focus: #2563eb;
+
+  --color-success-text: #166534;
+  --color-success-bg: #e3f4e8;
+  --color-success-border: #b2dcbf;
+  --color-success-solid: #16a34a;
+  --color-warning-text: #854d0e;
+  --color-warning-bg: #fdf3dc;
+  --color-warning-border: #f0d595;
+  --color-warning-solid: #d97706;
+  --color-danger-text: #b91c1c;
+  --color-danger-bg: #fdecec;
+  --color-danger-border: #f3bcbc;
+  --color-danger-solid: #b91c1c;
+  --color-danger-solid-hover: #991b1b;
+  --color-danger-solid-text: #ffffff;
+  --color-info-text: #1e40af;
+  --color-info-bg: #e8eefc;
+  --color-info-border: #bfcff5;
+  --color-neutral-text: #52525a;
+  --color-neutral-bg: #efede9;
+  --color-neutral-border: #d9d5ce;
+
+  --shadow-sm: 0 1px 2px rgb(23 24 26 / 0.06);
+  --shadow-md: 0 8px 24px rgb(23 24 26 / 0.08), 0 1px 3px rgb(23 24 26 / 0.06);
+  --shadow-lg: 0 30px 80px rgb(23 24 26 / 0.2);
+  --overlay: rgb(23 24 26 / 0.45);
+}

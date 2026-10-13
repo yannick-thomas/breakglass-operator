@@ -1,0 +1,55 @@
+.timeline {
+  display: grid;
+}
+
+.step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.5rem 1fr;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+}
+
+.step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 1.1rem;
+  bottom: 0;
+  left: calc(0.75rem - 1px);
+  width: 2px;
+  background: var(--color-border);
+}
+
+.marker {
+  width: 0.85rem;
+  height: 0.85rem;
+  margin: 0.3rem auto 0;
+  border: 2px solid var(--color-border-strong);
+  border-radius: 50%;
+  background: var(--color-surface);
+}
+
+.step[data-state="done"] .marker {
+  border-color: var(--color-success-text);
+  background: var(--color-success-text);
+}
+
+.step[data-state="current"] .marker {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.step[data-state="failed"] .marker {
+  border-color: var(--color-danger-text);
+  background: var(--color-danger-text);
+}
+
+.title {
+  font-weight: 600;
+}
+
+.meta {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}

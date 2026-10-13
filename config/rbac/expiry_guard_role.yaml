@@ -1,0 +1,36 @@
+# Minimal permissions of the independent expiry guard: read sessions, read and
+# delete RoleBindings. No create, update, patch, escalate, bind, or session
+# writes. The namespaced production overlay replaces the cluster-wide
+# RoleBinding rule (index 1) with a Role in each allowed target namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+  name: expiry-guard-role
+rules:
+- apiGroups: ["access.breakglass.io"]
+  resources: ["breakglasssessions"]
+  verbs: ["get", "list"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["rolebindings"]
+  verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+  name: expiry-guard-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: expiry-guard-role
+subjects:
+- kind: ServiceAccount
+  name: expiry-guard
+  namespace: system

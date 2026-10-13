@@ -185,6 +185,59 @@ func TestReconcileExpiresPersistedSessionAfterControllerRestart(t *testing.T) {
 	}
 }
 
+func TestExpiryAcceptsBindingAlreadyRemovedByExpiryGuard(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	profile, role := activationPolicyObjects()
+	testClient := newTestClient(scheme, session, profile, role)
+	metrics := &recordingMetrics{}
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme, Metrics: metrics}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}
+	for range 3 {
+		if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("activation Reconcile() error = %v", err)
+		}
+	}
+
+	active := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, active); err != nil {
+		t.Fatalf("get active session: %v", err)
+	}
+	if active.Status.Phase != accessv1alpha1.PhaseActive || active.Status.BindingRef == nil {
+		t.Fatalf("activated session status = %#v, want active session with binding reference", active.Status)
+	}
+	expiredAt := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	active.Status.ExpiresAt = &expiredAt
+	if err := testClient.Status().Update(context.Background(), active); err != nil {
+		t.Fatalf("persist elapsed expiry: %v", err)
+	}
+	// The expiry guard removed the exact binding while the controller was down.
+	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: active.Status.BindingRef.Name, Namespace: active.Status.BindingRef.Namespace}}
+	if err := testClient.Delete(context.Background(), binding); err != nil {
+		t.Fatalf("delete binding: %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("expiry Reconcile() error = %v", err)
+	}
+
+	expired := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), request.NamespacedName, expired); err != nil {
+		t.Fatalf("get expired session: %v", err)
+	}
+	if expired.Status.Phase != accessv1alpha1.PhaseExpired {
+		t.Fatalf("session phase = %q, want %q", expired.Status.Phase, accessv1alpha1.PhaseExpired)
+	}
+	if !hasCondition(expired.Status.Conditions, BindingIntegrityCondition, metav1.ConditionTrue, "BindingAlreadyRemoved") {
+		t.Fatalf("session conditions = %#v, want BindingAlreadyRemoved", expired.Status.Conditions)
+	}
+	if len(metrics.driftReasons) != 0 {
+		t.Fatalf("drift recorded for a binding removed after expiry: %v", metrics.driftReasons)
+	}
+}
+
 func TestReconcileCleansUnrecordedBindingWhenPolicyDisappearsAfterStatusWriteFailure(t *testing.T) {
 	t.Parallel()
 

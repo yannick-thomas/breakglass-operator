@@ -1,5 +1,14 @@
-# Build the WebUI binary
-FROM golang:1.26 as builder
+# Build the React frontend. Install scripts stay disabled: no dependency needs
+# one, and this keeps a compromised package from running code at build time.
+FROM node:24-alpine AS frontend
+WORKDIR /frontend
+COPY internal/webui/frontend/package.json internal/webui/frontend/package-lock.json ./
+RUN npm ci --ignore-scripts --no-fund --no-audit
+COPY internal/webui/frontend/ ./
+RUN npm run build
+
+# Build the WebUI binary with the frontend embedded
+FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -14,6 +23,7 @@ RUN go mod download
 COPY api/ api/
 COPY internal/ internal/
 COPY cmd/ cmd/
+COPY --from=frontend /frontend/build/app internal/webui/frontend/build/app
 
 # Build WebUI binary
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o breakglass-webui ./cmd/webui

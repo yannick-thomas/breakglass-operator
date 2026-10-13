@@ -90,6 +90,9 @@ binding/profile snapshot, not from a raw profile or namespace label.
 ## Suggested alerts
 
 * Critical: `breakglass_sessions_past_expiry > 0`.
+* Critical (kube-state-metrics): a failed `breakglass-operator-expiry-guard-*`
+  Job, or no successful guard run for ten minutes. These alerts do not depend
+  on the manager and still fire during a total manager outage.
 * Critical: `breakglass_session_state_collection_success == 0` for more than
   one scrape interval; otherwise a zero session gauge cannot be trusted.
 * Critical: `increase(breakglass_binding_operations_total{operation="cleanup",result="error"}[5m]) > 0`.

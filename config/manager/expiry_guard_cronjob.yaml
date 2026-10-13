@@ -1,0 +1,59 @@
+# Independent expiry guard (SR-06). Runs outside the manager Deployment, so a
+# total manager outage does not keep expired access alive. Each run deletes
+# only RoleBindings whose namespace, name, and UID match status.bindingRef of
+# a session past status.expiresAt plus --grace. A failed Job (exit code 2)
+# means an expired binding could not be proven and needs a human.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: expiry-guard
+  namespace: system
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 50
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 90
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: breakglass-operator
+            app.kubernetes.io/component: expiry-guard
+        spec:
+          restartPolicy: Never
+          serviceAccountName: expiry-guard
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: expiry-guard
+            image: controller:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - /expiry-guard
+            args:
+            - --grace=2m
+            - --timeout=60s
+            securityContext:
+              readOnlyRootFilesystem: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                - "ALL"
+            resources:
+              limits:
+                cpu: 200m
+                memory: 64Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi

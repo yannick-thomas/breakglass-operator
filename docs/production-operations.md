@@ -119,10 +119,23 @@ kubectl rollout status deployment/breakglass-operator-controller-manager \
   -n breakglass-operator-system --timeout=5m
 ```
 
-During a total controller outage, an expired binding can survive longer than
-its intended TTL. This is a documented best-effort cleanup SLO, not a safe
-extension of access. Escalate through the platform emergency procedure. That
-procedure must independently match the session's persisted
+During a total controller outage, the independent `expiry-guard` CronJob still
+removes expired bindings, normally within `--grace` (two minutes) plus one
+schedule interval after `status.expiresAt`. It relies only on the API server and
+the Kubernetes CronJob controller, not on the manager. Check that it runs:
+
+```bash
+kubectl get cronjob,jobs -n breakglass-operator-system -l app.kubernetes.io/component=expiry-guard
+kubectl logs -n breakglass-operator-system -l app.kubernetes.io/component=expiry-guard --tail=50
+```
+
+A failed guard Job means an expired binding could not be proven to be the
+recorded one (for example a replacement with another UID). The guard leaves it
+untouched; investigate it like binding drift. If the guard itself cannot run
+(API server degraded, CronJob controller unavailable, quota), an expired binding
+can survive longer than its intended TTL. This is a documented best-effort
+cleanup SLO, not a safe extension of access. Escalate through the platform
+emergency procedure. That procedure must independently match the session's persisted
 `status.bindingRef` **name, namespace, and UID** against the live RoleBinding,
 record the action in the Kubernetes audit stream, and refuse to delete a
 replacement object with the same name. Do not use broad label deletes or

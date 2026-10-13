@@ -1,0 +1,16 @@
+# Bind only to an incident commander or security group. `revoke` lets the
+# holder end someone else's session for this profile early; it grants neither
+# `use` nor `approve`. A session's own subject can always revoke it without
+# this verb. The webhook checks the verb with a SubjectAccessReview.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-production-pod-observer-revoker
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer", "production-pod-observer-approval"]
+    verbs: ["get", "revoke"]

@@ -1,12 +1,18 @@
+# The WebUI ServiceAccount is a read-only facade. Kubernetes RBAC cannot
+# filter lists by requester, so the WebUI reads these CRDs and filters them
+# strictly by the signed-in person's Kubernetes identity before returning them.
+#
+# It deliberately has NO write, impersonate, bind, RoleBinding or Secret
+# permissions: every request, approval and revocation is sent with the
+# person's own OIDC token and authorized, admitted and audited as them.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: breakglass-webui-role
+  name: breakglass-webui-reader
   labels:
     app.kubernetes.io/name: breakglass-webui
     app.kubernetes.io/part-of: breakglass-operator
 rules:
-  # Read access to profiles, requests, approvals, and sessions
   - apiGroups:
       - access.breakglass.io
     resources:
@@ -17,37 +23,18 @@ rules:
     verbs:
       - get
       - list
-      - watch
-
-  # Write access to create requests and approvals (admission webhooks enforce validation & user identity)
-  - apiGroups:
-      - access.breakglass.io
-    resources:
-      - breakglassrequests
-      - breakglassapprovals
-    verbs:
-      - create
-
-  # Permission to update BreakGlassSession for user self-revocation (spec.revoked: true)
-  - apiGroups:
-      - access.breakglass.io
-    resources:
-      - breakglasssessions
-    verbs:
-      - update
-      - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: breakglass-webui-rolebinding
+  name: breakglass-webui-reader
   labels:
     app.kubernetes.io/name: breakglass-webui
     app.kubernetes.io/part-of: breakglass-operator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: breakglass-webui-role
+  name: breakglass-webui-reader
 subjects:
   - kind: ServiceAccount
     name: breakglass-webui

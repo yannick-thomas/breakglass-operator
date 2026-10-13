@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,45 +29,48 @@ func main() {
 	log := zapr.NewLogger(zapLog)
 
 	cfg := config.LoadFromEnv()
+	if err := cfg.Validate(); err != nil {
+		log.Error(err, "Invalid WebUI configuration")
+		os.Exit(1)
+	}
 	log.Info("Starting BreakGlass WebUI service",
 		"listenAddr", cfg.ListenAddr,
 		"port", cfg.Port,
 		"oidcEnabled", cfg.OIDCEnabled,
 		"devMode", cfg.DevMode,
 	)
-
-	// 1. Session Manager
-	sm, err := auth.NewSessionManager(cfg)
-	if err != nil {
-		log.Error(err, "Failed to initialize session manager")
-		os.Exit(1)
+	if cfg.DevMode {
+		log.Info("Dev mode signs in with the current kubeconfig identity; never use it for shared or in-cluster deployments")
 	}
 
-	// 2. OIDC Client
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	oidcClient, err := auth.NewOIDCClient(ctx, cfg)
-	cancel()
-	if err != nil {
-		log.Error(err, "Failed to initialize OIDC client")
-		os.Exit(1)
+	// 1. OIDC Client (absent in dev mode, where kubeconfig is the credential)
+	var oidcClient *auth.OIDCClient
+	if cfg.OIDCEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		oidcClient, err = auth.NewOIDCClient(ctx, cfg)
+		cancel()
+		if err != nil {
+			log.Error(err, "Failed to initialize OIDC client")
+			os.Exit(1)
+		}
 	}
 
-	// 3. K8s Facade
+	// 2. K8s Facade
 	k8sFacade, err := facade.NewK8sFacade(cfg)
 	if err != nil {
 		log.Error(err, "Failed to initialize Kubernetes facade")
 		os.Exit(1)
 	}
 
-	// 4. Frontend Assets
+	// 3. Frontend Assets
 	staticFS, err := frontend.GetFS()
 	if err != nil {
 		log.Error(err, "Failed to load embedded frontend assets")
 		os.Exit(1)
 	}
 
-	// 5. HTTP Handler
-	h := handler.NewHandler(cfg, sm, oidcClient, k8sFacade, staticFS)
+	// 4. HTTP Handler
+	h := handler.NewHandler(cfg, auth.NewStore(), oidcClient, k8sFacade, staticFS, log)
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.Port)
 	srv := &http.Server{
@@ -86,7 +90,7 @@ func main() {
 		} else {
 			srvErr = srv.ListenAndServe()
 		}
-		if srvErr != nil && srvErr != http.ErrServerClosed {
+		if srvErr != nil && !errors.Is(srvErr, http.ErrServerClosed) {
 			log.Error(srvErr, "HTTP server failed")
 			os.Exit(1)
 		}

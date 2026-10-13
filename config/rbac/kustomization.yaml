@@ -9,6 +9,10 @@ resources:
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
+# Independent expiry guard (SR-06): own identity, read sessions, delete only
+# the exact RoleBinding UID recorded for an expired session.
+- expiry_guard_service_account.yaml
+- expiry_guard_role.yaml
 # The following RBAC configurations are used to protect
 # the metrics endpoint with authn/authz. These configurations
 # ensure that only authorized users and service accounts

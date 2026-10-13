@@ -16,3 +16,9 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# The WebUI image builds its frontend from source in a Node stage.
+internal/webui/frontend/node_modules
+internal/webui/frontend/build/app
+internal/webui/frontend/test-results
+internal/webui/frontend/playwright-report

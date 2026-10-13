@@ -24,7 +24,7 @@ namespace, or lifetime beyond the administrator-owned profile limit.
 | Requester uses a profile not granted to them | `SubjectAccessReview` checks named custom `use` verb | Bind profile-specific requester roles, not a wildcard profile role. |
 | Profile or role is replaced under the same name | UID snapshot; active role rules hash; periodic direct role read | Curated roles remain versioned/immutable; investigate suspended sessions. |
 | Managed RoleBinding is edited, deleted, or replaced | Owner, labels, subject, role, namespace, expiry, and UID integrity checks | Controller intentionally does not repair or delete a replacement. |
-| Controller outage leaves an expired binding | HA/PDB, past-expiry alert, recovery test, UID-safe manual runbook | TTL is a cleanup SLO, not cryptographic credential expiry. |
+| Controller outage leaves an expired binding | HA/PDB, independent UID-checking expiry guard CronJob, guard and past-expiry alerts, UID-safe manual runbook | TTL is a cleanup SLO, not cryptographic credential expiry; the guard depends on the API server and CronJob controller. |
 | Webhook outage allows an unvalidated request | `failurePolicy: Fail`, multi-replica deployment, outage E2E | Availability loss blocks requests; never change policy to `Ignore`. |
 | Broad readers discover incident reasons or identities | Separate requester/auditor RBAC; no identifying metric labels | Export Kubernetes audit logs to a restricted durable sink. |
 | Workload impersonates a human requester | Standard ServiceAccount names are rejected | Supported OIDC issuer/group policy is a platform prerequisite, not yet enforced by this API. |

@@ -65,6 +65,9 @@ func validateProfile(profile string, input io.Reader) error {
 	if err := verifyManagerPodSecurity(objects); err != nil {
 		return err
 	}
+	if err := verifyExpiryGuard(objects, profile == namespacedProfile); err != nil {
+		return err
+	}
 	if profile == defaultProfile {
 		return nil
 	}
@@ -314,7 +317,7 @@ func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
 		verbs, _, _ := unstructured.NestedStringSlice(rule, "verbs")
 		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
 		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{"namespaces"}) ||
-			!slices.Equal(verbs, []string{"get"}) || !slices.Equal(names, []string{"production"}) {
+			!slices.Equal(verbs, []string{verbGet}) || !slices.Equal(names, []string{"production"}) {
 			return false
 		}
 		found = true
@@ -388,7 +391,7 @@ func roleHasNamedClusterRoleBind(role unstructured.Unstructured) bool {
 func roleHasExactRoleBindingVerbs(role unstructured.Unstructured) bool {
 	for _, item := range nestedRules(role) {
 		if containsString(item["resources"], roleBindingRule) {
-			return sameStrings(stringValues(item["verbs"]), []string{"create", "delete", "get", "list", "update", "watch"})
+			return sameStrings(stringValues(item["verbs"]), []string{"create", verbDelete, verbGet, "list", "update", "watch"})
 		}
 	}
 	return false

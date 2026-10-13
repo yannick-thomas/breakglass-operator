@@ -7,6 +7,7 @@
 resources:
   - ../production
   - manager-rolebindings-production.yaml
+  - expiry-guard-rolebindings-production.yaml
 
 patches:
   # The RoleBinding policy rule is currently the ninth generated manager rule.
@@ -39,4 +40,21 @@ patches:
     patch: |-
       - op: add
         path: /spec/template/spec/containers/0/args/-
+        value: --allowed-target-namespaces=production
+  # The expiry guard gets the same namespace restriction as the manager.
+  - target:
+      kind: ClusterRole
+      name: breakglass-operator-expiry-guard-role
+    patch: |-
+      - op: test
+        path: /rules/1/resources/0
+        value: rolebindings
+      - op: remove
+        path: /rules/1
+  - target:
+      kind: CronJob
+      name: breakglass-operator-expiry-guard
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/args/-
         value: --allowed-target-namespaces=production

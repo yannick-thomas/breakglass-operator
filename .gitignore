@@ -29,3 +29,9 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# WebUI frontend
+internal/webui/frontend/node_modules/
+internal/webui/frontend/build/app/
+internal/webui/frontend/test-results/
+internal/webui/frontend/playwright-report/

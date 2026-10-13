@@ -1,0 +1,34 @@
+# The expiry guard may read and delete RoleBindings only in the namespace
+# named by the overlay. Keep this resource and the guard's
+# --allowed-target-namespaces in sync with the manager.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: breakglass-operator-expiry-guard-rolebindings
+  namespace: production
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: breakglass-operator-expiry-guard-rolebindings
+  namespace: production
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: breakglass-operator-expiry-guard-rolebindings
+subjects:
+  - kind: ServiceAccount
+    name: breakglass-operator-expiry-guard
+    namespace: breakglass-operator-system

@@ -216,10 +216,25 @@ rules:
 
 `patch` is intentionally limited to early self-revocation: admission permits
 only the immutable request fields plus the one-way `spec.revoked: true`
-transition, and it rejects an attempt to change another requester's session.
-The repository also supplies an unbound, profile-specific requester role and
-a separate audit-reader role in `config/samples/`; bind them to distinct
-on-call and audit groups through your GitOps policy.
+transition, and it rejects a revocation of another person's session unless
+the caller holds the profile-scoped custom verb `revoke`. That verb lets an
+incident commander end access without also receiving `use` or `approve`:
+
+```yaml
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["breakglasssessions"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles"]
+    resourceNames: ["production-pod-observer"]
+    verbs: ["revoke"]
+```
+
+The repository also supplies unbound, profile-specific requester and revoker
+roles and a separate audit-reader role in `config/samples/`; bind them to
+distinct on-call, incident-commander and audit groups through your GitOps
+policy.
 
 The requester submits only intent; do not provide `subject` or
 `accessProfileUID` because the mutating webhook owns both fields:

@@ -502,12 +502,28 @@ func (r *BreakGlassSessionReconciler) expireSession(ctx context.Context, session
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// After expiry, a missing binding is the desired end state, not drift: the
+	// independent expiry guard removes it when the controller is behind or
+	// down. Deletion while the session is active is still detected by the
+	// binding watch and the periodic integrity check, and a replacement
+	// binding (UID mismatch) remains an integrity issue here.
+	alreadyRemoved := cleanup.IntegrityIssue != nil && cleanup.IntegrityIssue.Code == bindingIssueMissing
+	if alreadyRemoved {
+		cleanup.IntegrityIssue = nil
+	}
 
 	session.Status.Phase = accessv1alpha1.PhaseExpired
 	r.setAccessGrantedCondition(session, metav1.ConditionFalse, "AccessExpired", "Emergency access duration elapsed")
-	r.setCleanupIntegrityCondition(session, cleanup)
+	if alreadyRemoved {
+		r.setBindingIntegrityCondition(session, metav1.ConditionTrue, "BindingAlreadyRemoved", "The emergency access binding was already removed when expiry cleanup ran")
+	} else {
+		r.setCleanupIntegrityCondition(session, cleanup)
+	}
 	if r.Recorder != nil {
 		r.Recorder.Eventf(session, corev1.EventTypeWarning, "AccessExpired", "Emergency access expired at %s", session.Status.ExpiresAt.Format(time.RFC3339))
+		if alreadyRemoved {
+			r.Recorder.Eventf(session, corev1.EventTypeNormal, "BindingAlreadyRemoved", "Emergency access binding was already removed when expiry cleanup ran")
+		}
 		if cleanup.IntegrityIssue != nil {
 			r.Recorder.Eventf(session, corev1.EventTypeWarning, "BindingIntegrityLost", "Emergency access binding could not be safely removed: %s", cleanup.IntegrityIssue.Code)
 		}
