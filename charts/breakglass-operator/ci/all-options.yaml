@@ -1,0 +1,25 @@
+allowedTargetNamespaces: [payments, inventory]
+curatedClusterRoles: [breakglass-logs-v1, breakglass-restart-v1]
+certManager:
+  issuerRef:
+    name: platform-ca
+    kind: ClusterIssuer
+metrics:
+  serviceMonitor:
+    enabled: true
+    caSecretName: platform-metrics-ca
+  prometheusRule:
+    enabled: true
+webui:
+  enabled: true
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  publicURL: https://access.example.com
+  oidc:
+    issuerURL: https://idp.example.com/realms/platform
+    clientID: breakglass
+    existingSecret: breakglass-oidc
+  ingress:
+    enabled: true
+    host: access.example.com
+    tlsSecretName: access-tls

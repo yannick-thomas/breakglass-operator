@@ -1,0 +1,16 @@
+{{- if or (empty .Values.allowedTargetNamespaces) (empty .Values.curatedClusterRoles) -}}
+{{- fail "allowedTargetNamespaces and curatedClusterRoles must contain explicit names" -}}
+{{- end -}}
+{{- range .Values.allowedTargetNamespaces -}}
+{{- if or (gt (len .) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .)) -}}
+{{- fail "allowedTargetNamespaces must contain valid explicit namespace names" -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.curatedClusterRoles -}}
+{{- if or (gt (len .) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" .)) -}}
+{{- fail "curatedClusterRoles must contain valid explicit role names" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.availability.podDisruptionBudget.enabled (ge (int .Values.availability.podDisruptionBudget.minAvailable) (int .Values.replicaCount)) -}}
+{{- fail "availability.podDisruptionBudget.minAvailable must be smaller than replicaCount; disable the PDB explicitly for a single-node development installation" -}}
+{{- end -}}

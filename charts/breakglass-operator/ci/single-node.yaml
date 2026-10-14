@@ -1,0 +1,5 @@
+replicaCount: 1
+availability:
+  spreadAcrossHosts: false
+  podDisruptionBudget:
+    enabled: false

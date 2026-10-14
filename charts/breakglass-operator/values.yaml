@@ -1,0 +1,94 @@
+# Supply an image from a successful gated CI/release. No mutable latest default.
+image:
+  repository: ghcr.io/yannick-thomas/breakglass-operator
+  digest: ""
+  # Use a tag only for a deliberately reviewed development installation.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Application namespaces must already exist. Never grants global RoleBinding CRUD.
+allowedTargetNamespaces:
+  - production
+# Curated roles and AccessProfiles are managed separately through GitOps.
+curatedClusterRoles:
+  - breakglass-pod-observer
+
+# Two schedulable hosts are required with the default topology policy.
+replicaCount: 2
+availability:
+  spreadAcrossHosts: true
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+priorityClassName: ""
+
+# cert-manager is a prerequisite, not a chart dependency.
+# Empty issuerRef creates the same local self-signed Issuer as Kustomize.
+certManager:
+  issuerRef: {}
+
+# The independent guard is always installed and uses a separate identity.
+expiryGuard:
+  schedule: "* * * * *"
+  grace: 2m
+  timeout: 60s
+  activeDeadlineSeconds: 90
+  resources:
+    limits:
+      cpu: 200m
+      memory: 64Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    labels: {}
+    interval: 30s
+    # Existing CA Secret in the release namespace, trusted by the scraper.
+    # Required when enabling the monitor. No insecureSkipVerify option.
+    caSecretName: ""
+    caSecretKey: ca.crt
+  prometheusRule:
+    enabled: false
+    labels: {}
+
+# Optional client only: never receives operator or RBAC write credentials.
+webui:
+  enabled: false
+  image:
+    repository: ghcr.io/yannick-thomas/breakglass-webui
+    digest: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  publicURL: ""
+  oidc:
+    issuerURL: ""
+    clientID: ""
+    existingSecret: ""
+    clientSecretKey: client-secret
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tlsSecretName: ""
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi

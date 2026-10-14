@@ -1,0 +1,16 @@
+name: Set up Helm
+description: Installs the pinned Helm version used to qualify the chart.
+runs:
+  using: composite
+  steps:
+    - name: Install verified Helm binary
+      shell: bash
+      run: |
+        set -euo pipefail
+        archive="${RUNNER_TEMP}/helm-v4.3.0-linux-amd64.tar.gz"
+        curl --fail --location --retry 3 --silent --show-error \
+          --output "$archive" https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+        echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  $archive" | sha256sum --check
+        tar --extract --gzip --no-same-owner --file "$archive" --directory "$RUNNER_TEMP"
+        sudo install -m 0755 "${RUNNER_TEMP}/linux-amd64/helm" /usr/local/bin/helm
+        helm version --short

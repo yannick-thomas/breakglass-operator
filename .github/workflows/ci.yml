@@ -189,6 +189,47 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  verify-helm:
+    name: Helm chart security and packaging
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-helm
+      - name: Verify chart security and CRD synchronization
+        run: make verify-helm
+      - name: Verify immutable chart packaging
+        run: |
+          make package-helm IMG="ghcr.io/${{ github.repository_owner }}/breakglass-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          helm lint dist/breakglass-operator-0.1.0.tgz --strict
+
+  test-e2e-helm:
+    name: Helm install and upgrade on Kind workers
+    needs: dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: ./.github/actions/setup-helm
+      - uses: ./.github/actions/setup-kind
+      - name: Run the production lifecycle through Helm
+        run: make test-e2e-helm
+
   test-e2e-production:
     name: Production E2E on Kind workers
     needs: dependencies
@@ -224,7 +265,7 @@ jobs:
 
   package:
     name: Publish image and rendered installers
-    needs: [lint, test, webui-frontend, security, verify-manifests, test-e2e, test-e2e-production]
+    needs: [lint, test, webui-frontend, security, verify-manifests, verify-helm, test-e2e, test-e2e-production, test-e2e-helm]
     # Publishing is deliberately a post-gate action. Pull requests never get a
     # registry token or a Buildx cache write; manual runs are restricted to
     # main as well.
@@ -302,6 +343,11 @@ jobs:
             'Install with, for example:' \
             '`kubectl apply -f install-production-namespaced.yaml`' \
             > dist/README.md
+      - uses: ./.github/actions/setup-helm
+      - name: Package a chart with the gated image digest
+        run: |
+          make package-helm IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}" \
+            CHART_VERSION="0.1.0-dev.${GITHUB_SHA:0:12}" CHART_APP_VERSION="sha-${GITHUB_SHA}"
       - name: Upload installer bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

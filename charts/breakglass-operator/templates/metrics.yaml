@@ -1,0 +1,103 @@
+{{- $name := include "breakglass.fullname" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-controller-manager-metrics-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    control-plane: controller-manager
+spec:
+  selector:
+    {{- include "breakglass.managerSelector" . | nindent 4 }}
+  ports:
+    - {name: https, port: 8443, targetPort: https, protocol: TCP}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-metrics-reader
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+{{- if .Values.metrics.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $name }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- mustMergeOverwrite (dict) .Values.metrics.serviceMonitor.labels (include "breakglass.labels" . | fromYaml) | toYaml | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "breakglass.managerSelector" . | nindent 6 }}
+  endpoints:
+    - port: https
+      path: /metrics
+      scheme: https
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: false
+        serverName: {{ $name }}-controller-manager-metrics-service.{{ .Release.Namespace }}.svc
+        ca:
+          secret:
+            name: {{ required "metrics.serviceMonitor.caSecretName is required for CA validation" .Values.metrics.serviceMonitor.caSecretName }}
+            key: {{ .Values.metrics.serviceMonitor.caSecretKey }}
+{{- end }}
+{{- if .Values.metrics.prometheusRule.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $name }}-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- mustMergeOverwrite (dict) .Values.metrics.prometheusRule.labels (include "breakglass.labels" . | fromYaml) | toYaml | nindent 4 }}
+spec:
+  groups:
+    - name: breakglass-operator.security
+      rules:
+        - alert: BreakGlassSessionPastExpiry
+          expr: breakglass_sessions_past_expiry{scope="namespaced"} > 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: BreakGlass access remains active after expiry
+            runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#controller-outage-expiry-and-emergency-recovery
+        - alert: BreakGlassExpiryGuardFailed
+          expr: {{ printf "kube_job_status_failed{namespace=%q, job_name=~%q} > 0" .Release.Namespace (printf "%s-expiry-guard-.*" $name) | quote }}
+          for: 0m
+          labels: {severity: critical}
+          annotations:
+            summary: BreakGlass expiry guard could not remove or prove an expired binding
+        - alert: BreakGlassExpiryGuardNotRunning
+          expr: {{ printf "time() - kube_cronjob_status_last_successful_time{namespace=%q, cronjob=%q} > 600" .Release.Namespace (printf "%s-expiry-guard" $name) | quote }}
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: BreakGlass expiry guard has not completed a sweep for ten minutes
+        - alert: BreakGlassIntegrityDrift
+          expr: increase(breakglass_binding_drift_total[5m]) > 0 or increase(breakglass_curated_role_drift_total[5m]) > 0 or increase(breakglass_request_source_integrity_failures_total[5m]) > 0
+          for: 0m
+          labels: {severity: critical}
+          annotations:
+            summary: BreakGlass binding or curated-role integrity drift detected
+            runbook_url: https://github.com/yannick-thomas/breakglass-operator/blob/main/docs/production-operations.md#binding-or-profile-integrity-drift
+        - alert: BreakGlassAdmissionErrors
+          expr: increase(breakglass_admission_requests_total{outcome="error"}[5m]) > 0
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: BreakGlass admission errors can block emergency access
+        - alert: BreakGlassCleanupErrors
+          expr: increase(breakglass_binding_operations_total{operation="cleanup",result="error"}[5m]) > 0
+          for: 0m
+          labels: {severity: critical}
+          annotations:
+            summary: BreakGlass expiry or revocation cleanup failed
+{{- end }}

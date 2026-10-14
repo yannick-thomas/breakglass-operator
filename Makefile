@@ -76,6 +76,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= breakglass-operator-test-e2e
 PRODUCTION_KIND_CLUSTER ?= breakglass-operator-production-e2e
+PRODUCTION_INSTALLER ?= kustomize
 CERT_MANAGER_VERSION ?= v1.21.1
 # Used by CI to turn an otherwise implicit Kind default into reviewable
 # qualification evidence. The first lock file is created only from an artifact
@@ -113,8 +114,12 @@ setup-test-e2e-production: ## Set up Kind with two schedulable workers for the p
 
 .PHONY: test-e2e-production
 test-e2e-production: setup-test-e2e-production manifests generate fmt vet ## Run the HA production overlay e2e tests in Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) go test -tags=e2e ./test/e2e/production -v -ginkgo.v
+	HELM=$(HELM) PRODUCTION_INSTALLER=$(PRODUCTION_INSTALLER) KIND=$(KIND) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) go test -timeout=25m -tags=e2e ./test/e2e/production -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e-production
+
+.PHONY: test-e2e-helm
+test-e2e-helm: ## Run the production lifecycle suite through Helm install and upgrade on isolated Kind workers.
+	$(MAKE) test-e2e-production PRODUCTION_INSTALLER=helm PRODUCTION_KIND_CLUSTER=breakglass-operator-helm-e2e
 
 .PHONY: capture-kind-compatibility-evidence
 capture-kind-compatibility-evidence: ## Capture exact Kind/Kubernetes evidence for a running isolated Kind cluster.
@@ -157,6 +162,23 @@ verify-manifests: manifests generate kustomize ## Render installation profiles a
 	"$(KUSTOMIZE)" build config/default | go run ./test/manifestcheck --profile default
 	"$(KUSTOMIZE)" build config/overlays/production | go run ./test/manifestcheck --profile production
 	"$(KUSTOMIZE)" build config/overlays/production-namespaced | go run ./test/manifestcheck --profile production-namespaced
+
+.PHONY: helm-sync-crds
+helm-sync-crds: manifests ## Copy canonical, generated CRDs into Helm's non-templated crds directory.
+	cp config/crd/bases/*.yaml charts/breakglass-operator/crds/
+
+.PHONY: verify-helm
+verify-helm: ## Lint/render Helm and verify the shared production and configurable security boundaries.
+	$(HELM) lint charts/breakglass-operator --strict --set image.tag=test
+	$(HELM) template breakglass-operator charts/breakglass-operator --namespace breakglass-operator-system --include-crds --set image.tag=test | go run ./test/manifestcheck --profile production-namespaced
+	HELM=$(HELM) go test ./test/helmchart ./test/manifestcheck
+
+CHART_VERSION ?= 0.1.0
+CHART_APP_VERSION ?= $(CHART_VERSION)
+
+.PHONY: package-helm
+package-helm: verify-helm ## Package a chart with a digest-pinned IMG; does not publish it.
+	python3 hack/package-helm.py --helm "$(HELM)" --image "$(IMG)" --version "$(CHART_VERSION)" --app-version "$(CHART_APP_VERSION)"
 
 ##@ Build
 
@@ -308,6 +330,7 @@ $(LOCALBIN):
 ## Tool Binaries
 KUBECTL ?= kubectl
 KIND ?= kind
+HELM ?= helm
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: breakglass-operator
+description: Profile-gated, namespaced Kubernetes emergency access with fail-closed admission
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/yannick-thomas/breakglass-operator
+sources:
+  - https://github.com/yannick-thomas/breakglass-operator
+keywords:
+  - kubernetes
+  - operator
+  - rbac
+  - breakglass
+  - security

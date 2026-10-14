@@ -127,8 +127,9 @@ flowchart TD
   * **Identity Attribution**: Übernimmt den echten aufrufenden API-User aus `admissionv1.Request.UserInfo` und überschreibt jeden clientseitigen Empfängerwert.
   * **Fail-closed Betrieb**: `failurePolicy: Fail`, TLS, kurze Timeouts, keine Namespace-Ausnahmen und ein Verfügbarkeits-/Rollback-Konzept für die Webhooks.
 * **Kustomize & Helm Chart**:
-  * Offizielles Helm-Chart inklusive Cert-Manager-Integration für Webhook-Zertifikate.
-  * Installations-Checks verhindern, dass ein privilegierter Controller ohne aktivierte Admission-Konfiguration ausgerollt wird.
+  * Implementiert: [Helm-Chart](charts/breakglass-operator/README.md) mit verpflichtender Cert-Manager-/Webhook-Integration, namespaced Manager-/Guard-RBAC und optionalen Monitoring-/WebUI-Ressourcen.
+  * Gemeinsame Manifestprüfungen, CRD-Synchronisierung und Helm-Install-/Upgrade-Kind-Gate schützen dieselbe Sicherheitsgrenze wie Kustomize. Versionierte Releases paketieren das Chart mit dem bereits geprüften Image-Digest und veröffentlichen es als OCI-Artefakt.
+  * CRD-Upgrades, Scope-Änderungen und Deinstallation bleiben dokumentierte, explizite Plattformverfahren; Helm-Uninstall wird nicht als Rechteentzug dargestellt.
 
 #### Reihenfolge nach dem aktuellen Paket
 

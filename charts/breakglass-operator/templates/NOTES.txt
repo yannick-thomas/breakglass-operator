@@ -1,0 +1,17 @@
+BreakGlass Operator is installed with fail-closed admission.
+
+Before granting requester permissions:
+  kubectl rollout status deployment/{{ include "breakglass.fullname" . }}-controller-manager -n {{ .Release.Namespace }}
+  kubectl get certificate -n {{ .Release.Namespace }}
+  kubectl get validatingwebhookconfiguration {{ include "breakglass.fullname" . }}-validating-webhook-configuration
+
+Allowed target namespaces: {{ join ", " .Values.allowedTargetNamespaces }}
+Curated roles: {{ join ", " .Values.curatedClusterRoles }}
+
+The chart does not create application namespaces, profiles, curated roles or
+requester/approver group bindings. Manage those separately through GitOps.
+
+Before an upgrade, apply the release's reviewed CRDs explicitly: Helm does not
+upgrade files in crds/. Before uninstall, revoke/drain all sessions and prove
+their recorded bindings were removed while the manager and guard are still running.
+See charts/breakglass-operator/README.md for the full lifecycle procedure.

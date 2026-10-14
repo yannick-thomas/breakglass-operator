@@ -72,6 +72,26 @@ release gates and the longer-term product direction are documented in the
 
 ## Prerequisites and deployment
 
+### Helm installation
+
+The [Helm chart](charts/breakglass-operator/README.md) provides the same
+fail-closed grant path with namespace-restricted manager/guard RBAC and two
+manager replicas by default. Configure explicit target namespaces, curated role
+names and a gated image digest; cert-manager and the application namespaces must
+already exist. Profiles and human group bindings remain separate GitOps policy.
+
+```bash
+helm upgrade --install breakglass-operator ./charts/breakglass-operator \
+  --namespace breakglass-operator-system --create-namespace \
+  --values deployment-values.yaml --wait --timeout 5m
+```
+
+See the chart guide for the values example, optional monitoring/WebUI, CRD
+updates, safe removal, OCI release packaging, and `make verify-helm` /
+`make test-e2e-helm`. Install one operator per cluster using exactly one installer.
+
+### Kustomize installation
+
 The default deployment includes the admission webhooks and cert-manager
 resources. Install cert-manager in the cluster first, then deploy the operator:
 

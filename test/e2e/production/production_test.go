@@ -21,6 +21,7 @@ package production
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -61,6 +62,31 @@ const (
 
 var installedCertManager bool
 
+func usesHelm() bool {
+	return os.Getenv("PRODUCTION_INSTALLER") == "helm"
+}
+
+func helmInstallCommand(upgrade bool) *exec.Cmd {
+	helm := os.Getenv("HELM")
+	if helm == "" {
+		helm = "helm"
+	}
+	args := []string{"upgrade", "--install", "breakglass-operator", "charts/breakglass-operator",
+		"--namespace", managerNamespace, "--create-namespace", "--wait", "--timeout", "5m",
+		"--set", "image.repository=example.com/breakglass-operator", "--set", "image.tag=v0.0.1"}
+	if upgrade {
+		args = append(args, "--set", "resources.requests.cpu=15m")
+	}
+	return exec.Command(helm, args...)
+}
+
+func webhookSecretName() string {
+	if usesHelm() {
+		return "breakglass-operator-webhook-server-cert"
+	}
+	return "webhook-server-cert"
+}
+
 func TestProductionE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "production e2e suite")
@@ -89,12 +115,18 @@ var _ = Describe("Production installation", Ordered, func() {
 		By("creating the target namespace before installing the namespaced production overlay")
 		_, err := utils.Run(exec.Command("kubectl", "create", "namespace", targetNamespace))
 		Expect(err).NotTo(HaveOccurred())
-		By("installing CRDs and the high-availability namespaced production overlay")
-		_, err = utils.Run(exec.Command("make", "install"))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = utils.Run(exec.Command("make", "deploy-production",
-			"PRODUCTION_OVERLAY=production-namespaced", fmt.Sprintf("IMG=%s", managerImage)))
-		Expect(err).NotTo(HaveOccurred())
+		if usesHelm() {
+			By("installing the chart with CRDs and namespace-restricted high-availability RBAC")
+			_, err = utils.Run(helmInstallCommand(false))
+			Expect(err).NotTo(HaveOccurred())
+		} else {
+			By("installing CRDs and the high-availability namespaced production overlay")
+			_, err = utils.Run(exec.Command("make", "install"))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("make", "deploy-production",
+				"PRODUCTION_OVERLAY=production-namespaced", fmt.Sprintf("IMG=%s", managerImage)))
+			Expect(err).NotTo(HaveOccurred())
+		}
 
 		By("creating a namespaced curated profile and a least-privilege requester")
 		for _, path := range []string{
@@ -130,7 +162,15 @@ var _ = Describe("Production installation", Ordered, func() {
 		))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found"))
-		_, _ = utils.Run(exec.Command("make", "undeploy-production-test", "PRODUCTION_OVERLAY=production-namespaced"))
+		if usesHelm() {
+			helm := os.Getenv("HELM")
+			if helm == "" {
+				helm = "helm"
+			}
+			_, _ = utils.Run(exec.Command(helm, "uninstall", "breakglass-operator", "-n", managerNamespace))
+		} else {
+			_, _ = utils.Run(exec.Command("make", "undeploy-production-test", "PRODUCTION_OVERLAY=production-namespaced"))
+		}
 		_, _ = utils.Run(exec.Command("make", "uninstall-test"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", managerNamespace, "--ignore-not-found"))
 	})
@@ -229,10 +269,16 @@ var _ = Describe("Production installation", Ordered, func() {
 		previousManagerUIDs := managerPodUIDs()
 		Expect(previousManagerUIDs).To(HaveLen(2))
 
-		By("restarting the high-availability deployment without changing the active grant")
-		_, err := utils.Run(exec.Command(
-			"kubectl", "rollout", "restart", "deployment", managerName, "-n", managerNamespace,
-		))
+		var err error
+		if usesHelm() {
+			By("upgrading the Helm release without changing the active grant")
+			_, err = utils.Run(helmInstallCommand(true))
+		} else {
+			By("restarting the high-availability deployment without changing the active grant")
+			_, err = utils.Run(exec.Command(
+				"kubectl", "rollout", "restart", "deployment", managerName, "-n", managerNamespace,
+			))
+		}
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega) {
 			assertProductionReady(g)
@@ -260,7 +306,7 @@ var _ = Describe("Production installation", Ordered, func() {
 	It("recovers webhook certificates and expires a grant after a complete manager restart", func() {
 		By("forcing cert-manager to reissue the serving secret without weakening admission")
 		previousCertificateSecretUID := certificateSecretUID()
-		_, err := utils.Run(exec.Command("kubectl", "delete", "secret", "webhook-server-cert", "-n", managerNamespace))
+		_, err := utils.Run(exec.Command("kubectl", "delete", "secret", webhookSecretName(), "-n", managerNamespace))
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(certificateSecretWasReissued(previousCertificateSecretUID), 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
@@ -494,7 +540,7 @@ func reportProductionDiagnostics() {
 
 func certificateSecretUID() string {
 	output, err := utils.Run(exec.Command(
-		"kubectl", "get", "secret", "webhook-server-cert", "-n", managerNamespace, "-o", "jsonpath={.metadata.uid}",
+		"kubectl", "get", "secret", webhookSecretName(), "-n", managerNamespace, "-o", "jsonpath={.metadata.uid}",
 	))
 	Expect(err).NotTo(HaveOccurred())
 	Expect(output).NotTo(BeEmpty())
@@ -504,7 +550,7 @@ func certificateSecretUID() string {
 func certificateSecretWasReissued(previousUID string) func(Gomega) {
 	return func(g Gomega) {
 		output, err := utils.Run(exec.Command(
-			"kubectl", "get", "secret", "webhook-server-cert", "-n", managerNamespace, "-o", "jsonpath={.metadata.uid}",
+			"kubectl", "get", "secret", webhookSecretName(), "-n", managerNamespace, "-o", "jsonpath={.metadata.uid}",
 		))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(output).NotTo(Equal(previousUID))

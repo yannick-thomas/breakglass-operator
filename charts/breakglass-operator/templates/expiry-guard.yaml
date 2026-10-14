@@ -1,0 +1,113 @@
+{{- $name := include "breakglass.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-expiry-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expiry-guard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-expiry-guard-role
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [access.breakglass.io]
+    resources: [breakglasssessions]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-expiry-guard-rolebinding
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-expiry-guard-role}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-expiry-guard, namespace: {{ .Release.Namespace }}}
+{{- range .Values.allowedTargetNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-expiry-guard-rolebindings
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-expiry-guard-rolebindings
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-expiry-guard-rolebindings}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-expiry-guard, namespace: {{ $.Release.Namespace }}}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}-expiry-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expiry-guard
+spec:
+  schedule: {{ .Values.expiryGuard.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 50
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.expiryGuard.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "breakglass.labels" . | nindent 12 }}
+            app.kubernetes.io/component: expiry-guard
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $name }}-expiry-guard
+          securityContext:
+            {{- include "breakglass.podSecurity" . | nindent 12 }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.priorityClassName }}
+          priorityClassName: {{ . | quote }}
+          {{- end }}
+          containers:
+            - name: expiry-guard
+              image: {{ include "breakglass.image" .Values.image | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: [/expiry-guard]
+              args:
+                - {{ printf "--grace=%s" .Values.expiryGuard.grace | quote }}
+                - {{ printf "--timeout=%s" .Values.expiryGuard.timeout | quote }}
+                - {{ printf "--allowed-target-namespaces=%s" (join "," .Values.allowedTargetNamespaces) | quote }}
+              securityContext:
+                {{- include "breakglass.containerSecurity" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.expiryGuard.resources | nindent 16 }}

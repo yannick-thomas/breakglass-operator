@@ -1,0 +1,35 @@
+{{- $name := include "breakglass.fullname" . -}}
+{{- if not .Values.certManager.issuerRef }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $name }}-selfsigned-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+{{- end }}
+{{- range $component := list "webhook" "metrics" }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}-{{ if eq $component "webhook" }}serving-cert{{ else }}metrics-cert{{ end }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ $name }}-{{ if eq $component "webhook" }}webhook-service{{ else }}controller-manager-metrics-service{{ end }}.{{ $.Release.Namespace }}.svc
+    - {{ $name }}-{{ if eq $component "webhook" }}webhook-service{{ else }}controller-manager-metrics-service{{ end }}.{{ $.Release.Namespace }}.svc.cluster.local
+  secretName: {{ $name }}-{{ $component }}-server-cert
+  issuerRef:
+    {{- if $.Values.certManager.issuerRef }}
+    {{- toYaml $.Values.certManager.issuerRef | nindent 4 }}
+    {{- else }}
+    kind: Issuer
+    name: {{ $name }}-selfsigned-issuer
+    {{- end }}
+---
+{{- end }}
