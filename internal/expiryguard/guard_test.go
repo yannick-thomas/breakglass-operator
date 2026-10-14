@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
+	"github.com/yannick-thomas/breakglass-operator/internal/usecase/expirysweep"
 )
 
 const (
@@ -48,7 +50,7 @@ func TestSweepDeletesExactBindingAfterGrace(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-3*time.Minute))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, &Guard{Client: c, Grace: DefaultGrace})
+	report := sweep(t, New(c))
 
 	if len(report.Removed) != 1 || report.Failed() {
 		t.Fatalf("report = %#v, want one removal and no refusal", report)
@@ -63,7 +65,7 @@ func TestSweepLeavesBindingWithinGrace(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-time.Minute))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, &Guard{Client: c, Grace: DefaultGrace})
+	report := sweep(t, New(c))
 
 	if len(report.Removed) != 0 || report.Failed() {
 		t.Fatalf("report = %#v, want nothing to do", report)
@@ -79,7 +81,7 @@ func TestSweepIgnoresSessionsWithoutExpiry(t *testing.T) {
 	session.Status.ExpiresAt = nil
 	c := newClient(t, session, binding)
 
-	if report := sweep(t, &Guard{Client: c}); len(report.Removed) != 0 || report.Failed() {
+	if report := sweep(t, New(c)); len(report.Removed) != 0 || report.Failed() {
 		t.Fatalf("report = %#v, want nothing to do", report)
 	}
 }
@@ -90,7 +92,7 @@ func TestSweepRefusesReplacementBinding(t *testing.T) {
 	binding.UID = "replacement-uid"
 	c := newClient(t, session, binding)
 
-	report := sweep(t, &Guard{Client: c, Grace: DefaultGrace})
+	report := sweep(t, New(c))
 
 	if !report.Failed() || len(report.Removed) != 0 {
 		t.Fatalf("report = %#v, want refusal", report)
@@ -105,7 +107,7 @@ func TestSweepRefusesNamespaceOutsideAllowList(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-time.Hour))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, &Guard{Client: c, AllowedNamespaces: map[string]struct{}{"staging": {}}})
+	report := sweep(t, withScope(New(c), access.NamespaceScope{"staging": {}}))
 
 	if !report.Failed() {
 		t.Fatalf("report = %#v, want refusal", report)
@@ -118,7 +120,7 @@ func TestSweepRefusesNamespaceOutsideAllowList(t *testing.T) {
 func TestSweepTreatsMissingBindingAsDone(t *testing.T) {
 	t.Parallel()
 	session, _ := expiredSession("s1", now.Add(-time.Hour))
-	report := sweep(t, &Guard{Client: newClient(t, session)})
+	report := sweep(t, New(newClient(t, session)))
 	if len(report.Removed) != 0 || report.Failed() {
 		t.Fatalf("report = %#v, want nothing to do", report)
 	}
@@ -132,7 +134,7 @@ func TestSweepRefusesActiveSessionWithoutBindingIdentity(t *testing.T) {
 	expired.Status.BindingRef = nil
 	expired.Status.Phase = accessv1alpha1.PhaseExpired
 
-	report := sweep(t, &Guard{Client: newClient(t, active, expired)})
+	report := sweep(t, New(newClient(t, active, expired)))
 
 	if len(report.Refused) != 1 || report.Refused[0].Session != "active" {
 		t.Fatalf("report = %#v, want one refusal for the active session", report)
@@ -144,7 +146,7 @@ func TestSweepDryRunDeletesNothing(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-time.Hour))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, &Guard{Client: c, DryRun: true})
+	report := sweep(t, dryRun(New(c)))
 
 	if len(report.Removed) != 1 {
 		t.Fatalf("report = %#v, want one planned removal", report)
@@ -167,7 +169,7 @@ func TestSweepDeletesWithUIDPrecondition(t *testing.T) {
 		},
 	})
 
-	sweep(t, &Guard{Client: c})
+	sweep(t, New(c))
 
 	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != types.UID(bindingUID) {
 		t.Fatalf("delete preconditions = %#v, want recorded UID", preconditions)
@@ -183,7 +185,7 @@ func TestSweepReportsConflictAsRefusal(t *testing.T) {
 		},
 	})
 
-	if report := sweep(t, &Guard{Client: c}); !report.Failed() {
+	if report := sweep(t, New(c)); !report.Failed() {
 		t.Fatalf("report = %#v, want refusal", report)
 	}
 }
@@ -195,28 +197,27 @@ func TestSweepFailsWhenSessionsCannotBeListed(t *testing.T) {
 			return errors.New("unavailable")
 		},
 	})
-	guard := &Guard{Client: c, Now: func() time.Time { return now }, Log: logr.Discard()}
+	guard := New(c)
+	guard.Clock = func() time.Time { return now }
+	guard.Log = logr.Discard()
 	if _, err := guard.Sweep(context.Background()); err == nil {
 		t.Fatal("Sweep() error = nil, want error")
 	}
 }
 
-func TestParseNamespaces(t *testing.T) {
-	t.Parallel()
-	got, err := ParseNamespaces("production, staging")
-	if err != nil || len(got) != 2 {
-		t.Fatalf("ParseNamespaces() = %v, %v", got, err)
-	}
-	for _, value := range []string{"production,,staging", "Production"} {
-		if _, err := ParseNamespaces(value); err == nil {
-			t.Fatalf("ParseNamespaces(%q) error = nil", value)
-		}
-	}
+func withScope(guard *expirysweep.Sweeper, scope access.NamespaceScope) *expirysweep.Sweeper {
+	guard.Scope = scope
+	return guard
 }
 
-func sweep(t *testing.T, guard *Guard) Report {
+func dryRun(guard *expirysweep.Sweeper) *expirysweep.Sweeper {
+	guard.DryRun = true
+	return guard
+}
+
+func sweep(t *testing.T, guard *expirysweep.Sweeper) expirysweep.Report {
 	t.Helper()
-	guard.Now = func() time.Time { return now }
+	guard.Clock = func() time.Time { return now }
 	guard.Log = logr.Discard()
 	report, err := guard.Sweep(context.Background())
 	if err != nil {
@@ -234,7 +235,7 @@ func expiredSession(name string, expiresAt time.Time) (*accessv1alpha1.BreakGlas
 			Phase:     accessv1alpha1.PhaseActive,
 			ExpiresAt: &expiry,
 			BindingRef: &accessv1alpha1.BindingReference{
-				Kind: roleBindingKind, Namespace: testNamespace, Name: bindingName, UID: bindingUID,
+				Kind: access.RoleBindingKind, Namespace: testNamespace, Name: bindingName, UID: bindingUID,
 			},
 		},
 	}

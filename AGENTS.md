@@ -34,6 +34,22 @@ Multi-group layout organizes APIs by group name (e.g., `batch`, `apps`). Check t
 6. Fix `path` in `PROJECT` file for each resource
 7. Update test suite CRD paths (add one more `..` to relative paths)
 
+## Architecture (project-specific)
+
+This project uses clean architecture inside the Kubebuilder layout. Read
+`docs/adr-002-clean-architecture.md` before changing behavior.
+
+- **Security rules:** `internal/domain/access`, standard library only. Never
+  restate a rule in a controller or webhook; call the domain.
+- **Lifecycles:** `internal/usecase/*` reach Kubernetes only through their
+  ports.
+- **Adapters:**
+  - `internal/controller` and `internal/webhook` hold kubebuilder markers,
+    watches, and translation only.
+  - `internal/adapter/apiconv` maps API types to and from the domain.
+- **Enforcement:** `make test` (`test/architecture`) and `make lint` (depguard)
+  fail on inward-pointing violations.
+
 ## Critical Rules
 
 ### Never Edit These (Auto-Generated)

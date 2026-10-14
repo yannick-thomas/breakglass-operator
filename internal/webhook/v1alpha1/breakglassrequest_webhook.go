@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 )
 
@@ -105,18 +106,14 @@ func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *ac
 	if obj.Spec.Requester.Kind != accessv1alpha1.SubjectKindUser || obj.Spec.Requester.Name != req.UserInfo.Username {
 		return nil, fmt.Errorf("requester must be the authenticated requester")
 	}
-	profileValidator := &BreakGlassSessionValidator{
-		ProfileReader:           v.ProfileReader,
-		AllowedTargetNamespaces: v.AllowedTargetNamespaces,
-	}
-	p, maxDuration, err := profileValidator.loadAndValidateProfile(ctx, obj.Spec.AccessProfile)
+	p, maxDuration, err := admissibleProfiles{Reader: v.ProfileReader, Scope: v.AllowedTargetNamespaces}.load(ctx, obj.Spec.AccessProfile)
 	if err != nil {
 		return nil, err
 	}
-	if obj.Spec.AccessProfileUID != string(p.UID) {
+	if obj.Spec.AccessProfileUID != p.UID {
 		return nil, fmt.Errorf("accessProfileUID does not match the current AccessProfile")
 	}
-	if p.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+	if !p.Permits(access.ChannelApproval) {
 		return nil, fmt.Errorf("AccessProfile %q does not require the approval workflow", p.Name)
 	}
 	if v.RequestTTL <= 0 {
@@ -125,8 +122,8 @@ func (v *BreakGlassRequestValidator) ValidateCreate(ctx context.Context, obj *ac
 	if obj.Spec.RequestTTL != v.RequestTTL.String() {
 		return nil, fmt.Errorf("requestTTL does not match the current manager policy")
 	}
-	duration, err := time.ParseDuration(obj.Spec.Duration)
-	if err != nil || duration <= 0 {
+	duration, ok := access.ParsePositiveDuration(obj.Spec.Duration)
+	if !ok {
 		return nil, fmt.Errorf("duration must be a positive Go duration")
 	}
 	if duration > maxDuration {

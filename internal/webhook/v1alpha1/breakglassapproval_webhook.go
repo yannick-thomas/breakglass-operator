@@ -28,6 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/adapter/apiconv"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 )
 
@@ -147,18 +149,14 @@ func (v *BreakGlassApprovalValidator) ValidateCreate(ctx context.Context, obj *a
 	if obj.Name != accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)) {
 		return nil, fmt.Errorf("approval name does not match the deterministic slot for this BreakGlassRequest")
 	}
-	profileValidator := &BreakGlassSessionValidator{
-		ProfileReader:           v.ProfileReader,
-		AllowedTargetNamespaces: v.AllowedTargetNamespaces,
-	}
-	profile, _, err := profileValidator.loadAndValidateProfile(ctx, request.Spec.AccessProfile)
+	profile, _, err := admissibleProfiles{Reader: v.ProfileReader, Scope: v.AllowedTargetNamespaces}.load(ctx, request.Spec.AccessProfile)
 	if err != nil {
 		return nil, err
 	}
-	if string(profile.UID) != request.Spec.AccessProfileUID {
+	if profile.UID != request.Spec.AccessProfileUID {
 		return nil, fmt.Errorf("BreakGlassRequest accessProfileUID does not match the current AccessProfile")
 	}
-	if profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+	if !profile.Permits(access.ChannelApproval) {
 		return nil, fmt.Errorf("AccessProfile %q does not require the approval workflow", profile.Name)
 	}
 	if v.Reviewer == nil {
@@ -214,11 +212,11 @@ func (v *BreakGlassApprovalValidator) loadPendingRequest(ctx context.Context, re
 	if request.Status.Phase != accessv1alpha1.RequestPhasePending {
 		return nil, fmt.Errorf("BreakGlassRequest %q is not awaiting approval", request.Name)
 	}
-	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
-	if err != nil || requestTTL <= 0 {
+	decision := apiconv.ToDomainRequest(request)
+	if _, ok := decision.Deadline(); !ok {
 		return nil, fmt.Errorf("BreakGlassRequest %q has no valid immutable request TTL", request.Name)
 	}
-	if !v.now().Before(request.CreationTimestamp.Add(requestTTL)) {
+	if !decision.DecisionOpen(v.now()) {
 		return nil, fmt.Errorf("BreakGlassRequest %q has expired", request.Name)
 	}
 	return request, nil

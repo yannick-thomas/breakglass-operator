@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -30,7 +29,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -42,6 +40,7 @@ import (
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 	"github.com/yannick-thomas/breakglass-operator/internal/controller"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 	webhookv1alpha1 "github.com/yannick-thomas/breakglass-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -295,23 +294,9 @@ func main() {
 }
 
 func parseAllowedTargetNamespaces(value string) (map[string]struct{}, error) {
-	allowed := make(map[string]struct{})
-	if value == "" {
-		return allowed, nil
+	scope, err := access.ParseNamespaceScope(value)
+	if err != nil {
+		return nil, fmt.Errorf("allowed-target-namespaces %w", err)
 	}
-	for rawNamespace := range strings.SplitSeq(value, ",") {
-		namespace := strings.TrimSpace(rawNamespace)
-		if namespace == "" {
-			return nil, fmt.Errorf("allowed-target-namespaces contains an empty namespace")
-		}
-		if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
-			return nil, fmt.Errorf(
-				"allowed-target-namespaces contains invalid namespace %q: %s",
-				namespace,
-				strings.Join(errs, "; "),
-			)
-		}
-		allowed[namespace] = struct{}{}
-	}
-	return allowed, nil
+	return scope, nil
 }

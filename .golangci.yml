@@ -35,6 +35,25 @@ linters:
           deny:
             - pkg: sort
               desc: Should be replaced with slices package
+        # Clean architecture (docs/adr-002-clean-architecture.md): the domain
+        # depends on the standard library only, use cases on the domain and
+        # their own ports. test/architecture checks the transitive closure.
+        domain-is-pure:
+          list-mode: strict
+          files:
+            - "**/internal/domain/**"
+          allow:
+            - $gostd
+            - github.com/yannick-thomas/breakglass-operator/internal/domain
+        usecases-depend-inward:
+          list-mode: strict
+          files:
+            - "**/internal/usecase/**"
+          allow:
+            - $gostd
+            - github.com/go-logr/logr
+            - github.com/yannick-thomas/breakglass-operator/internal/domain
+            - github.com/yannick-thomas/breakglass-operator/internal/usecase
     revive:
       rules:
         - name: comment-spacings

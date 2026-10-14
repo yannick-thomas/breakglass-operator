@@ -1,11 +1,10 @@
 package v1alpha1
 
 import (
-	"crypto/sha256"
-	"fmt"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 )
 
 // BreakGlassRequestSpec is untrusted requester intent. Admission snapshots the
@@ -145,15 +144,15 @@ func init() {
 // name for a request. A Kubernetes create conflict therefore serializes
 // concurrent approve/deny attempts without giving the controller a
 // nondeterministic "first list result wins" policy.
+//
+// The derivation is a domain rule; this function exposes it on the API.
 func ApprovalNameForRequestUID(uid string) string {
-	sum := sha256.Sum256([]byte(uid))
-	return fmt.Sprintf("breakglass-approval-%x", sum[:8])
+	return access.ApprovalNameForRequestUID(uid)
 }
 
 // SessionNameForRequestUID returns the controller-reserved session name for a
 // request. It contains only a digest of the request UID, never a requester,
 // profile, ticket, or incident reason.
 func SessionNameForRequestUID(uid string) string {
-	sum := sha256.Sum256([]byte(uid))
-	return fmt.Sprintf("breakglass-request-%x", sum[:8])
+	return access.SessionNameForRequestUID(uid)
 }

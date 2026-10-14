@@ -18,12 +18,9 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,11 +28,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/adapter/apiconv"
+	"github.com/yannick-thomas/breakglass-operator/internal/usecase/profilereadiness"
 )
 
 const (
-	curatedClusterRoleKind = "ClusterRole"
-
 	// AccessProfileReadyCondition reports whether the configured manager can
 	// safely activate new sessions for a profile.
 	AccessProfileReadyCondition = "Ready"
@@ -46,8 +43,9 @@ const (
 	ProfileReadinessRetryInterval = time.Minute
 )
 
-// AccessProfileReconciler evaluates administrator-owned policies before an
-// incident. It does not authorize users or alter a profile's immutable spec.
+// AccessProfileReconciler adapts the profile readiness use case to
+// controller-runtime. It does not authorize users or alter a profile's
+// immutable spec.
 type AccessProfileReconciler struct {
 	client.Client
 	// APIReader bypasses the cache for the curated role check. A stale role must
@@ -79,79 +77,29 @@ func (r *AccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	status, reason, message, err := r.evaluateReadiness(ctx, profile)
+	evaluator := profilereadiness.Evaluator{Roles: apiPolicySource{Reader: r.policyReader()}, Scope: r.AllowedTargetNamespaces}
+	readiness, err := evaluator.Evaluate(ctx, apiconv.ToDomainProfile(profile))
+	r.setReadyCondition(profile, readiness)
+	if updateErr := r.updateStatusIfChanged(ctx, profile); updateErr != nil {
+		return ctrl.Result{}, updateErr
+	}
 	if err != nil {
-		r.setReadyCondition(profile, metav1.ConditionUnknown, "ClusterRoleCheckFailed", "Could not verify the referenced ClusterRole")
-		if updateErr := r.updateStatusIfChanged(ctx, profile); updateErr != nil {
-			return ctrl.Result{}, updateErr
-		}
 		return ctrl.Result{}, err
 	}
-
-	r.setReadyCondition(profile, status, reason, message)
-	if err := r.updateStatusIfChanged(ctx, profile); err != nil {
-		return ctrl.Result{}, err
-	}
-	if reason == "ClusterRoleMissing" {
+	if readiness.Reason == profilereadiness.ReasonClusterRoleMissing {
 		return ctrl.Result{RequeueAfter: ProfileReadinessRetryInterval}, nil
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *AccessProfileReconciler) evaluateReadiness(
-	ctx context.Context,
-	profile *accessv1alpha1.AccessProfile,
-) (metav1.ConditionStatus, string, string, error) {
-	if profile.Spec.RoleRef.Kind != curatedClusterRoleKind || profile.Spec.RoleRef.Name == "" {
-		return metav1.ConditionFalse, "InvalidRoleReference", "The profile must reference a named curated ClusterRole", nil
-	}
-	if profile.Spec.TargetNamespace == "" {
-		return metav1.ConditionFalse, "InvalidTargetNamespace", "The profile must specify a target namespace", nil
-	}
-	if duration, err := time.ParseDuration(profile.Spec.MaxDuration); err != nil || duration <= 0 {
-		return metav1.ConditionFalse, "InvalidDuration", "The profile must specify a positive maximum duration", nil
-	}
-	if mode := profile.Spec.EffectiveDeliveryMode(); mode != accessv1alpha1.AccessDeliveryModeSelfService && mode != accessv1alpha1.AccessDeliveryModeApprovalRequired {
-		return metav1.ConditionFalse, "InvalidDeliveryMode", "The profile must specify a supported access delivery mode", nil
-	}
-	if !r.targetNamespaceAllowed(profile.Spec.TargetNamespace) {
-		return metav1.ConditionFalse, "NamespaceOutOfScope", fmt.Sprintf("Target namespace %q is outside this manager's allowed namespace set", profile.Spec.TargetNamespace), nil
-	}
-
-	role := &rbacv1.ClusterRole{}
-	if err := r.policyReader().Get(ctx, client.ObjectKey{Name: profile.Spec.RoleRef.Name}, role); err != nil {
-		if apierrors.IsNotFound(err) {
-			return metav1.ConditionFalse, "ClusterRoleMissing", fmt.Sprintf("Referenced ClusterRole %q does not exist", profile.Spec.RoleRef.Name), nil
-		}
-		return metav1.ConditionUnknown, "ClusterRoleCheckFailed", "Could not verify the referenced ClusterRole", err
-	}
-	if role.UID == "" {
-		return metav1.ConditionFalse, "ClusterRoleNotReady", fmt.Sprintf("Referenced ClusterRole %q has no server-assigned UID", role.Name), nil
-	}
-
-	return metav1.ConditionTrue, "Ready", "The profile can be activated by this manager", nil
-}
-
-func (r *AccessProfileReconciler) targetNamespaceAllowed(namespace string) bool {
-	if len(r.AllowedTargetNamespaces) == 0 {
-		return true
-	}
-	_, allowed := r.AllowedTargetNamespaces[namespace]
-	return allowed
-}
-
-func (r *AccessProfileReconciler) setReadyCondition(
-	profile *accessv1alpha1.AccessProfile,
-	status metav1.ConditionStatus,
-	reason, message string,
-) {
+func (r *AccessProfileReconciler) setReadyCondition(profile *accessv1alpha1.AccessProfile, readiness profilereadiness.Readiness) {
 	profile.Status.ObservedGeneration = profile.Generation
 	meta.SetStatusCondition(&profile.Status.Conditions, metav1.Condition{
 		Type:               AccessProfileReadyCondition,
-		Status:             status,
+		Status:             metav1.ConditionStatus(readiness.Status),
 		ObservedGeneration: profile.Generation,
-		Reason:             reason,
-		Message:            message,
+		Reason:             readiness.Reason,
+		Message:            readiness.Message,
 	})
 }
 

@@ -54,6 +54,9 @@ const (
 	rollingRestartSessionName      = "production-rolling-restart-session"
 	rollingRestartRecoverySession  = "production-rolling-restart-recovery-session"
 	namespaceDeletionSessionName   = "production-namespace-deletion-session"
+	expiryGuardSessionName         = "production-expiry-guard-session"
+
+	expiryGuardName = "breakglass-operator-expiry-guard"
 )
 
 var installedCertManager bool
@@ -115,7 +118,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		for _, session := range []string{
 			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
 			certificateRotationSessionName, expiryRecoverySessionName, rollingRestartSessionName,
-			rollingRestartRecoverySession, namespaceDeletionSessionName,
+			rollingRestartRecoverySession, namespaceDeletionSessionName, expiryGuardSessionName,
 		} {
 			_, _ = utils.Run(exec.Command(
 				"kubectl", "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
@@ -279,6 +282,51 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPhase(expiryRecoverySessionName, "Expired"), 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
+	})
+
+	It("removes an expired grant through the independent expiry guard while every manager is stopped", func() {
+		By("verifying that the guard runs with its own identity, not the manager's")
+		serviceAccount, err := utils.Run(exec.Command(
+			"kubectl", "get", "cronjob", expiryGuardName, "-n", managerNamespace,
+			"-o", "jsonpath={.spec.jobTemplate.spec.template.spec.serviceAccountName}",
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(serviceAccount).To(Equal(expiryGuardName))
+
+		By("activating a short grant and stopping every manager before it expires")
+		Expect(createSession(expiryGuardSessionName)).To(Succeed())
+		Eventually(sessionIsActive(expiryGuardSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		bindingName, bindingUID := sessionBindingReference(expiryGuardSessionName)
+		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
+		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(restoreProductionManager)
+		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
+
+		By("requiring the guard to delete exactly the recorded binding without any manager")
+		// Expiry, the two-minute grace period, the one-minute schedule, and
+		// Job start-up bound this wait.
+		Eventually(bindingIsDeleted(bindingName), 6*time.Minute, 5*time.Second).Should(Succeed())
+		Expect(managerIsStopped()).To(Succeed(), "the binding must have been removed while no manager ran")
+		phase, err := utils.Run(exec.Command(
+			"kubectl", "get", "breakglasssession", expiryGuardSessionName, "-o", "jsonpath={.status.phase}",
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(phase).To(Equal("Active"), "no controller may have processed the expiry yet")
+		Eventually(expiryGuardRemovedBinding(bindingName), time.Minute, 5*time.Second).Should(Succeed())
+
+		By("restoring the managers and requiring a clean expiry without a drift incident")
+		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2"))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+		Eventually(func(g Gomega) {
+			output, err := utils.Run(exec.Command(
+				"kubectl", "get", "breakglasssession", expiryGuardSessionName,
+				"-o", "jsonpath={.status.phase},{.status.conditions[?(@.type=='BindingIntegrity')].reason}",
+			))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(Equal("Expired,BindingAlreadyRemoved"))
+		}, 2*time.Minute, time.Second).Should(Succeed())
 	})
 
 	It("releases the session finalizer when its target namespace disappears", func() {
@@ -549,6 +597,20 @@ func sessionIsSuspendedForCuratedRole(name, reason string) func(Gomega) {
 		))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(output).To(Equal("Suspended," + reason))
+	}
+}
+
+// expiryGuardRemovedBinding requires a successful guard Job whose log names
+// the binding, so the removal is attributable to the guard.
+func expiryGuardRemovedBinding(bindingName string) func(Gomega) {
+	return func(g Gomega) {
+		logs, err := utils.Run(exec.Command(
+			"kubectl", "logs", "-n", managerNamespace, "-l", "app.kubernetes.io/component=expiry-guard",
+			"--tail=-1", "--prefix", "--max-log-requests=10",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(logs).To(ContainSubstring("Deleted RoleBinding of expired BreakGlassSession"))
+		g.Expect(logs).To(ContainSubstring(bindingName))
 	}
 }
 

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -32,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/adapter/apiconv"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 )
 
@@ -240,18 +241,18 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 		return nil, fmt.Errorf("subject must be the authenticated requester")
 	}
 
-	profile, maxDuration, err := v.loadAndValidateProfile(ctx, obj.Spec.AccessProfile)
+	profile, maxDuration, err := v.profiles().load(ctx, obj.Spec.AccessProfile)
 	if err != nil {
 		return nil, err
 	}
-	if string(profile.UID) != obj.Spec.AccessProfileUID {
+	if profile.UID != obj.Spec.AccessProfileUID {
 		return nil, fmt.Errorf("accessProfileUID does not match the current AccessProfile")
 	}
-	if profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeSelfService {
+	if !profile.Permits(access.ChannelDirect) {
 		return nil, fmt.Errorf("AccessProfile %q requires the approval workflow", profile.Name)
 	}
-	duration, err := time.ParseDuration(obj.Spec.Duration)
-	if err != nil || duration <= 0 {
+	duration, ok := access.ParsePositiveDuration(obj.Spec.Duration)
+	if !ok {
 		return nil, fmt.Errorf("duration must be a positive Go duration")
 	}
 	if duration > maxDuration {
@@ -349,17 +350,20 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 	if err != nil {
 		return err
 	}
-	if err := validateRequestSessionReservation(request, obj); err != nil {
-		return err
+	if !request.ReservesForProvisioning(obj.Name) {
+		return fmt.Errorf("BreakGlassRequest %q has not reserved this session for provisioning", request.Name)
 	}
-	if err := validateRequestTTL(request); err != nil {
-		return err
+	if _, ok := request.Deadline(); !ok {
+		return fmt.Errorf("BreakGlassRequest %q has no valid immutable request TTL", request.Name)
+	}
+	if !request.DecisionOpen(time.Now()) {
+		return fmt.Errorf("BreakGlassRequest %q has expired", request.Name)
 	}
 	if err := v.validateRequestApproval(ctx, request); err != nil {
 		return err
 	}
-	if err := validateSessionMatchesRequest(obj, request); err != nil {
-		return err
+	if !request.MatchesSession(apiconv.ToDomainSession(obj).Spec) {
+		return fmt.Errorf("controller-sourced session fields must exactly match the approved BreakGlassRequest")
 	}
 	return v.validateRequestProfile(ctx, request)
 }
@@ -367,47 +371,30 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 func (v *BreakGlassSessionValidator) loadRequestForSourcedSession(
 	ctx context.Context,
 	ref *accessv1alpha1.BreakGlassRequestReference,
-) (*accessv1alpha1.BreakGlassRequest, error) {
+) (access.Request, error) {
 	if ref == nil || ref.Name == "" || ref.UID == "" {
-		return nil, fmt.Errorf("requestRef name and UID are required for a controller-sourced session")
+		return access.Request{}, fmt.Errorf("requestRef name and UID are required for a controller-sourced session")
 	}
 	if v.RequestReader == nil || v.ApprovalReader == nil {
-		return nil, apierrors.NewInternalError(fmt.Errorf("request or approval reader is not configured"))
+		return access.Request{}, apierrors.NewInternalError(fmt.Errorf("request or approval reader is not configured"))
 	}
 	request := &accessv1alpha1.BreakGlassRequest{}
 	if err := v.RequestReader.Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
+			return access.Request{}, fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
 		}
-		return nil, apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for session admission: %w", err))
+		return access.Request{}, apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for session admission: %w", err))
 	}
 	if string(request.UID) != ref.UID {
-		return nil, fmt.Errorf("requestRef UID does not match the current BreakGlassRequest")
+		return access.Request{}, fmt.Errorf("requestRef UID does not match the current BreakGlassRequest")
 	}
-	return request, nil
+	return apiconv.ToDomainRequest(request), nil
 }
 
-func validateRequestSessionReservation(request *accessv1alpha1.BreakGlassRequest, session *accessv1alpha1.BreakGlassSession) error {
-	if request.Status.Phase != accessv1alpha1.RequestPhaseProvisioning || request.Status.SessionRef == nil ||
-		request.Status.SessionRef.Name != session.Name || request.Status.SessionRef.UID != "" {
-		return fmt.Errorf("BreakGlassRequest %q has not reserved this session for provisioning", request.Name)
-	}
-	return nil
-}
-
-func validateRequestTTL(request *accessv1alpha1.BreakGlassRequest) error {
-	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
-	if err != nil || requestTTL <= 0 {
-		return fmt.Errorf("BreakGlassRequest %q has no valid immutable request TTL", request.Name)
-	}
-	if !time.Now().Before(request.CreationTimestamp.Add(requestTTL)) {
-		return fmt.Errorf("BreakGlassRequest %q has expired", request.Name)
-	}
-	return nil
-}
-
-func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) error {
-	if request.Status.ApprovalRef == nil || request.Status.ApprovalRef.Name == "" || request.Status.ApprovalRef.UID == "" {
+// validateRequestApproval requires an independent approval of exactly this
+// request in its deterministic slot.
+func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context, request access.Request) error {
+	if access.SourceApprovalRefIssue(request) != nil {
 		return fmt.Errorf("BreakGlassRequest %q has no verified approval reference", request.Name)
 	}
 	approval := &accessv1alpha1.BreakGlassApproval{}
@@ -417,40 +404,25 @@ func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context
 		}
 		return apierrors.NewInternalError(fmt.Errorf("read BreakGlassApproval for session admission: %w", err))
 	}
-	if string(approval.UID) != request.Status.ApprovalRef.UID ||
-		approval.Spec.Decision != accessv1alpha1.ApprovalDecisionApproved ||
-		approval.Spec.RequestRef.Name != request.Name || approval.Spec.RequestRef.UID != string(request.UID) ||
-		approval.Spec.Approver.Kind != accessv1alpha1.SubjectKindUser ||
-		approval.Spec.Approver.Name == request.Spec.Requester.Name {
+	if access.SourceApprovalIssue(request, apiconv.ToDomainApproval(approval)) != nil {
 		return fmt.Errorf("BreakGlassRequest %q approval reference is not a valid independent approval", request.Name)
 	}
 	return nil
 }
 
-func validateSessionMatchesRequest(session *accessv1alpha1.BreakGlassSession, request *accessv1alpha1.BreakGlassRequest) error {
-	if session.Spec.AccessProfile != request.Spec.AccessProfile ||
-		session.Spec.AccessProfileUID != request.Spec.AccessProfileUID ||
-		session.Spec.Subject != request.Spec.Requester ||
-		session.Spec.Duration != request.Spec.Duration ||
-		session.Spec.Reason != request.Spec.Reason {
-		return fmt.Errorf("controller-sourced session fields must exactly match the approved BreakGlassRequest")
-	}
-	return nil
-}
-
-func (v *BreakGlassSessionValidator) validateRequestProfile(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) error {
-	profile, maxDuration, err := v.loadAndValidateProfile(ctx, request.Spec.AccessProfile)
+func (v *BreakGlassSessionValidator) validateRequestProfile(ctx context.Context, request access.Request) error {
+	profile, maxDuration, err := v.profiles().load(ctx, request.AccessProfile)
 	if err != nil {
 		return err
 	}
-	if string(profile.UID) != request.Spec.AccessProfileUID {
+	if profile.UID != request.AccessProfileUID {
 		return fmt.Errorf("BreakGlassRequest accessProfileUID does not match the current AccessProfile")
 	}
-	if profile.Spec.EffectiveDeliveryMode() != accessv1alpha1.AccessDeliveryModeApprovalRequired {
+	if !profile.Permits(access.ChannelApproval) {
 		return fmt.Errorf("AccessProfile %q does not require the approval workflow", profile.Name)
 	}
-	duration, err := time.ParseDuration(request.Spec.Duration)
-	if err != nil || duration <= 0 || duration > maxDuration {
+	duration, ok := access.ParsePositiveDuration(request.Duration)
+	if !ok || duration > maxDuration {
 		return fmt.Errorf("BreakGlassRequest duration is no longer valid for the current AccessProfile")
 	}
 	return nil
@@ -470,52 +442,50 @@ func (v *BreakGlassSessionValidator) ValidateDelete(_ context.Context, _ *access
 	return nil, nil
 }
 
-func (v *BreakGlassSessionValidator) loadAndValidateProfile(ctx context.Context, name string) (*accessv1alpha1.AccessProfile, time.Duration, error) {
+// admissibleProfiles loads the profile an admission decision refers to. It is
+// shared by the session, request, and approval webhooks.
+type admissibleProfiles struct {
+	Reader client.Reader
+	Scope  access.NamespaceScope
+}
+
+// load reads the profile directly from the API server and applies the domain
+// profile rules. A profile with an unsupported delivery mode is returned;
+// callers reject it through Profile.Permits.
+func (p admissibleProfiles) load(ctx context.Context, name string) (access.Profile, time.Duration, error) {
 	if name == "" {
-		return nil, 0, fmt.Errorf("accessProfile is required")
+		return access.Profile{}, 0, fmt.Errorf("accessProfile is required")
 	}
-	if v.ProfileReader == nil {
-		return nil, 0, apierrors.NewInternalError(fmt.Errorf("AccessProfile reader is not configured"))
+	if p.Reader == nil {
+		return access.Profile{}, 0, apierrors.NewInternalError(fmt.Errorf("AccessProfile reader is not configured"))
 	}
-	profile := &accessv1alpha1.AccessProfile{}
-	if err := v.ProfileReader.Get(ctx, client.ObjectKey{Name: name}, profile); err != nil {
+	stored := &accessv1alpha1.AccessProfile{}
+	if err := p.Reader.Get(ctx, client.ObjectKey{Name: name}, stored); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, 0, fmt.Errorf("AccessProfile %q does not exist", name)
+			return access.Profile{}, 0, fmt.Errorf("AccessProfile %q does not exist", name)
 		}
-		return nil, 0, apierrors.NewInternalError(fmt.Errorf("read AccessProfile for admission: %w", err))
+		return access.Profile{}, 0, apierrors.NewInternalError(fmt.Errorf("read AccessProfile for admission: %w", err))
 	}
-	if profile.Spec.RoleRef.Kind != "ClusterRole" || profile.Spec.RoleRef.Name == "" || profile.Spec.TargetNamespace == "" {
-		return nil, 0, fmt.Errorf("AccessProfile %q is not a valid curated namespaced policy", name)
+	profile := apiconv.ToDomainProfile(stored)
+	maxDuration, defect := profile.Check()
+	if defect == access.ProfileRoleRefInvalid || defect == access.ProfileTargetNamespaceMissing {
+		return access.Profile{}, 0, fmt.Errorf("AccessProfile %q is not a valid curated namespaced policy", name)
 	}
-	if !targetNamespaceAllowed(profile.Spec.TargetNamespace, v.AllowedTargetNamespaces) {
-		return nil, 0, fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", name, profile.Spec.TargetNamespace)
+	if !p.Scope.Allows(profile.TargetNamespace) {
+		return access.Profile{}, 0, fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", name, profile.TargetNamespace)
 	}
-	maxDuration, err := time.ParseDuration(profile.Spec.MaxDuration)
-	if err != nil || maxDuration <= 0 {
-		return nil, 0, fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", name)
+	if defect == access.ProfileMaxDurationInvalid {
+		return access.Profile{}, 0, fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", name)
 	}
 	return profile, maxDuration, nil
 }
 
-func targetNamespaceAllowed(namespace string, allowed map[string]struct{}) bool {
-	if len(allowed) == 0 {
-		return true
-	}
-	_, found := allowed[namespace]
-	return found
+func (v *BreakGlassSessionValidator) profiles() admissibleProfiles {
+	return admissibleProfiles{Reader: v.ProfileReader, Scope: v.AllowedTargetNamespaces}
 }
 
 func validateHumanRequester(user authenticationv1.UserInfo) error {
-	if user.Username == "" {
-		return fmt.Errorf("authenticated requester has no username")
-	}
-	if strings.HasPrefix(user.Username, "system:serviceaccount:") {
-		return fmt.Errorf("service account requesters are not supported by self-service BreakGlassSession")
-	}
-	if user.Username == "system:anonymous" || user.Username == "system:unauthenticated" {
-		return fmt.Errorf("anonymous requesters are not supported")
-	}
-	return nil
+	return access.ValidateHumanRequester(user.Username)
 }
 
 // admissionInternalError marks errors caused by the admission transport or

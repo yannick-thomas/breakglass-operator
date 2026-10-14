@@ -315,6 +315,17 @@ cluster-scoped request resource: it can reveal other incidents. See the
 
 ## Development and verification
 
+The code follows a clean architecture inside the Kubebuilder layout:
+
+- The security rules live in `internal/domain/access`, which uses the standard
+  library only.
+- The lifecycles live in `internal/usecase/…` and reach Kubernetes through
+  ports.
+- Reconcilers and webhooks are thin adapters.
+
+See [ADR-002](docs/adr-002-clean-architecture.md) for the layers and where new
+code belongs.
+
 ```bash
 make generate manifests
 make build

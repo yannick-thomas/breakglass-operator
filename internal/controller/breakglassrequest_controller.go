@@ -18,12 +18,10 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,20 +29,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/adapter/apiconv"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
+	"github.com/yannick-thomas/breakglass-operator/internal/usecase/requestlifecycle"
 )
 
 const (
-	RequestAwaitingApprovalCondition = "AwaitingApproval"
-	RequestProvisionedCondition      = "Provisioned"
+	RequestAwaitingApprovalCondition = requestlifecycle.ConditionAwaitingApproval
+	RequestProvisionedCondition      = requestlifecycle.ConditionProvisioned
 	approvalRequestNameField         = ".spec.requestRef.name"
-	requestTransitionRequeueDelay    = time.Nanosecond
 )
 
-// BreakGlassRequestReconciler establishes the fail-closed lifecycle boundary
-// for untrusted access intent and the sole controller-created session path.
-// It never creates a RoleBinding directly; the existing Session controller is
-// still the only component that turns a validated session into a grant.
+// BreakGlassRequestReconciler adapts the request lifecycle use case to
+// controller-runtime. It never creates a RoleBinding directly; the session
+// controller remains the only component that turns a session into a grant.
 type BreakGlassRequestReconciler struct {
 	client.Client
 	Clock                     func() time.Time
@@ -57,225 +56,100 @@ type BreakGlassRequestReconciler struct {
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassapprovals,verbs=get;list;watch
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglasssessions,verbs=get;list;create
 
-// Reconcile writes the deadline derived from the server creation timestamp and
-// admission-snapshotted request TTL. It does not trust status as the deadline
-// source and marks all unconsumed requests expired once that deadline passes.
+// Reconcile hands one BreakGlassRequest to the request lifecycle use case.
 func (r *BreakGlassRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	request := &accessv1alpha1.BreakGlassRequest{}
-	if err := r.Get(ctx, req.NamespacedName, request); err != nil {
+	obj := &accessv1alpha1.BreakGlassRequest{}
+	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	requestTTL, err := time.ParseDuration(request.Spec.RequestTTL)
-	if err != nil || requestTTL <= 0 {
-		return r.fail(ctx, request, "InvalidRequestTTL", "The immutable request TTL is not a positive duration")
+	var telemetry requestlifecycle.Telemetry
+	if r.Metrics != nil {
+		telemetry = requestTelemetry{recorder: r.Metrics}
 	}
-
-	now := r.now()
-	expiresAt := request.CreationTimestamp.Add(requestTTL)
-	if requestTerminal(request.Status.Phase) {
-		return ctrl.Result{}, nil
+	lifecycle := &requestlifecycle.Lifecycle{
+		Approvals:                 cachedApprovalSource{Reader: r.Client},
+		Sessions:                  sessionGateway{Client: r.Client},
+		Telemetry:                 telemetry,
+		RequestControllerUsername: r.RequestControllerUsername,
+		Clock:                     r.Clock,
 	}
-	previousPhase := request.Status.Phase
-	if request.Status.ExpiresAt == nil || !request.Status.ExpiresAt.Time.Equal(expiresAt) {
-		request.Status.ExpiresAt = &metav1.Time{Time: expiresAt}
-	}
-
-	if !now.Before(expiresAt) {
-		request.Status.Phase = accessv1alpha1.RequestPhaseExpired
-		meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-			Type:               RequestAwaitingApprovalCondition,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: request.Generation,
-			Reason:             "RequestExpired",
-			Message:            "The request expired before it was consumed by a session",
-		})
-	} else if request.Status.Phase == "" {
-		request.Status.Phase = accessv1alpha1.RequestPhasePending
-		meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-			Type:               RequestAwaitingApprovalCondition,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: request.Generation,
-			Reason:             "AwaitingApproval",
-			Message:            "The request is valid and awaits an approval decision",
-		})
-	} else if request.Status.Phase == accessv1alpha1.RequestPhasePending {
-		approval, err := r.approvalForRequest(ctx, request)
-		if err != nil {
-			return r.fail(ctx, request, "InvalidApproval", "The deterministic approval slot is not a valid independent decision")
-		}
-		if approval != nil {
-			request.Status.ApprovalRef = &accessv1alpha1.BreakGlassObjectReference{Name: approval.Name, UID: string(approval.UID)}
-			switch approval.Spec.Decision {
-			case accessv1alpha1.ApprovalDecisionDenied:
-				request.Status.Phase = accessv1alpha1.RequestPhaseDenied
-				meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-					Type:               RequestAwaitingApprovalCondition,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: request.Generation,
-					Reason:             "Denied",
-					Message:            "An authorized approver denied this request",
-				})
-			case accessv1alpha1.ApprovalDecisionApproved:
-				request.Status.Phase = accessv1alpha1.RequestPhaseApproved
-				meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-					Type:               RequestAwaitingApprovalCondition,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: request.Generation,
-					Reason:             "Approved",
-					Message:            "An authorized approver accepted this request",
-				})
-			}
-		}
-	} else if request.Status.Phase == accessv1alpha1.RequestPhaseApproved {
-		if r.RequestControllerUsername == "" {
-			return r.fail(ctx, request, "ControllerIdentityNotConfigured", "The request controller identity is not configured")
-		}
-		request.Status.Phase = accessv1alpha1.RequestPhaseProvisioning
-		request.Status.SessionRef = &accessv1alpha1.BreakGlassObjectReference{Name: accessv1alpha1.SessionNameForRequestUID(string(request.UID))}
-		meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-			Type:               RequestProvisionedCondition,
-			Status:             metav1.ConditionUnknown,
-			ObservedGeneration: request.Generation,
-			Reason:             "SessionReserved",
-			Message:            "The controller reserved the one session name for this request",
-		})
-	} else if request.Status.Phase == accessv1alpha1.RequestPhaseProvisioning {
-		if err := r.provisionSession(ctx, request); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-	request.Status.ObservedGeneration = request.Generation
-
-	updated, err := r.updateStatusIfChanged(ctx, request)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if updated && previousPhase != request.Status.Phase && r.Metrics != nil {
-		r.Metrics.RecordRequestTransition(requestTransitionForPhase(request.Status.Phase))
-	}
-	if request.Status.Phase == accessv1alpha1.RequestPhaseExpired {
-		return ctrl.Result{}, nil
-	}
-	// Do not rely solely on the cache delivering this controller's own status
-	// update. Approval and provisioning are deliberately persisted one step at
-	// a time for crash safety, so those intermediate transitions must also cause
-	// an immediate continuation of the deterministic state machine. Pending is
-	// intentionally event-driven: an approval watch will wake the controller.
-	if updated && previousPhase != request.Status.Phase &&
-		(request.Status.Phase == accessv1alpha1.RequestPhaseApproved || request.Status.Phase == accessv1alpha1.RequestPhaseProvisioning) {
-		return ctrl.Result{RequeueAfter: requestTransitionRequeueDelay}, nil
-	}
-	return ctrl.Result{RequeueAfter: expiresAt.Sub(now)}, nil
+	request := apiconv.ToDomainRequest(obj)
+	result, err := lifecycle.Reconcile(ctx, &request, requestStore{Client: r.Client, Key: client.ObjectKeyFromObject(obj)})
+	return ctrl.Result{RequeueAfter: result.RequeueAfter}, err
 }
 
-func (r *BreakGlassRequestReconciler) approvalForRequest(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) (*accessv1alpha1.BreakGlassApproval, error) {
+// cachedApprovalSource reads approvals from the cache. The session lifecycle
+// re-verifies the decision with a direct read before any grant.
+type cachedApprovalSource struct {
+	Reader client.Reader
+}
+
+func (s cachedApprovalSource) Approval(ctx context.Context, name string) (access.Approval, error) {
 	approval := &accessv1alpha1.BreakGlassApproval{}
-	name := accessv1alpha1.ApprovalNameForRequestUID(string(request.UID))
-	if err := r.Get(ctx, client.ObjectKey{Name: name}, approval); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
+	if err := s.Reader.Get(ctx, client.ObjectKey{Name: name}, approval); err != nil {
+		return access.Approval{}, apiconv.Classify(err)
 	}
-	if approval.Spec.RequestRef.Name != request.Name || approval.Spec.RequestRef.UID != string(request.UID) ||
-		approval.Spec.Approver.Kind != accessv1alpha1.SubjectKindUser || approval.Spec.Approver.Name == request.Spec.Requester.Name ||
-		(approval.Spec.Decision != accessv1alpha1.ApprovalDecisionApproved && approval.Spec.Decision != accessv1alpha1.ApprovalDecisionDenied) {
-		return nil, apierrors.NewInvalid(accessv1alpha1.GroupVersion.WithKind("BreakGlassApproval").GroupKind(), approval.Name, nil)
-	}
-	return approval, nil
+	return apiconv.ToDomainApproval(approval), nil
 }
 
-func (r *BreakGlassRequestReconciler) provisionSession(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) error {
-	if request.Status.SessionRef == nil || request.Status.SessionRef.Name == "" || request.Status.SessionRef.UID != "" {
-		return r.markFailed(ctx, request, "InvalidSessionReservation", "The request has no valid controller-reserved session name")
-	}
+type sessionGateway struct {
+	Client client.Client
+}
+
+func (g sessionGateway) Get(ctx context.Context, name string) (requestlifecycle.SessionRecord, error) {
 	session := &accessv1alpha1.BreakGlassSession{}
-	if err := r.Get(ctx, client.ObjectKey{Name: request.Status.SessionRef.Name}, session); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-		session = &accessv1alpha1.BreakGlassSession{
-			ObjectMeta: metav1.ObjectMeta{Name: request.Status.SessionRef.Name},
-			Spec: accessv1alpha1.BreakGlassSessionSpec{
-				AccessProfile:    request.Spec.AccessProfile,
-				AccessProfileUID: request.Spec.AccessProfileUID,
-				Subject:          request.Spec.Requester,
-				Duration:         request.Spec.Duration,
-				Reason:           request.Spec.Reason,
-				RequestRef: &accessv1alpha1.BreakGlassRequestReference{
-					Name: request.Name,
-					UID:  string(request.UID),
-				},
+	if err := g.Client.Get(ctx, client.ObjectKey{Name: name}, session); err != nil {
+		return requestlifecycle.SessionRecord{}, apiconv.Classify(err)
+	}
+	return sessionRecord(session), nil
+}
+
+func (g sessionGateway) Create(ctx context.Context, name string, spec access.SessionSpec) (requestlifecycle.SessionRecord, error) {
+	session := &accessv1alpha1.BreakGlassSession{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: accessv1alpha1.BreakGlassSessionSpec{
+			AccessProfile:    spec.AccessProfile,
+			AccessProfileUID: spec.AccessProfileUID,
+			Subject: accessv1alpha1.SubjectReference{
+				Kind: accessv1alpha1.SubjectKind(spec.Subject.Kind), Name: spec.Subject.Name, Namespace: spec.Subject.Namespace,
 			},
-		}
-		if err := r.Create(ctx, session); err != nil {
-			return err
-		}
+			Duration: spec.Duration,
+			Reason:   spec.Reason,
+		},
 	}
-	if session.Spec.RequestRef == nil || session.Spec.RequestRef.Name != request.Name || session.Spec.RequestRef.UID != string(request.UID) {
-		return r.markFailed(ctx, request, "SessionSourceMismatch", "The reserved session name belongs to a different request")
+	if spec.RequestRef != nil {
+		session.Spec.RequestRef = &accessv1alpha1.BreakGlassRequestReference{Name: spec.RequestRef.Name, UID: spec.RequestRef.UID}
 	}
-	if session.UID == "" {
-		return apierrors.NewInternalError(fmt.Errorf("created BreakGlassSession %q has no server-assigned UID", session.Name))
+	if err := g.Client.Create(ctx, session); err != nil {
+		return requestlifecycle.SessionRecord{}, apiconv.Classify(err)
 	}
-	request.Status.SessionRef.UID = string(session.UID)
-	request.Status.Phase = accessv1alpha1.RequestPhaseSessionCreated
-	meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-		Type:               RequestProvisionedCondition,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: request.Generation,
-		Reason:             "SessionCreated",
-		Message:            "The controller created the reserved session object",
-	})
-	return nil
+	return sessionRecord(session), nil
 }
 
-func (r *BreakGlassRequestReconciler) fail(ctx context.Context, request *accessv1alpha1.BreakGlassRequest, reason, message string) (ctrl.Result, error) {
-	if err := r.markFailed(ctx, request, reason, message); err != nil {
-		return ctrl.Result{}, err
+func sessionRecord(session *accessv1alpha1.BreakGlassSession) requestlifecycle.SessionRecord {
+	return requestlifecycle.SessionRecord{
+		Name:       session.Name,
+		UID:        string(session.UID),
+		RequestRef: apiconv.ToDomainRequestRef(session.Spec.RequestRef),
 	}
-	return ctrl.Result{}, nil
 }
 
-func (r *BreakGlassRequestReconciler) markFailed(ctx context.Context, request *accessv1alpha1.BreakGlassRequest, reason, message string) error {
-	previousPhase := request.Status.Phase
-	request.Status.Phase = accessv1alpha1.RequestPhaseFailed
-	request.Status.ObservedGeneration = request.Generation
-	meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
-		Type:               RequestProvisionedCondition,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: request.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-	updated, err := r.updateStatusIfChanged(ctx, request)
-	if err != nil {
-		return err
-	}
-	if updated && previousPhase != request.Status.Phase && r.Metrics != nil {
-		r.Metrics.RecordRequestTransition(breakglassmetrics.RequestTransitionFailed)
-	}
-	return nil
+type requestStore struct {
+	Client client.Client
+	Key    client.ObjectKey
 }
 
-func (r *BreakGlassRequestReconciler) now() time.Time {
-	if r.Clock != nil {
-		return r.Clock()
-	}
-	return time.Now()
-}
-
-func (r *BreakGlassRequestReconciler) updateStatusIfChanged(ctx context.Context, request *accessv1alpha1.BreakGlassRequest) (bool, error) {
+func (s requestStore) UpdateStatusIfChanged(ctx context.Context, request *access.Request) (bool, error) {
 	stored := &accessv1alpha1.BreakGlassRequest{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(request), stored); err != nil {
+	if err := s.Client.Get(ctx, s.Key, stored); err != nil {
 		return false, err
 	}
-	if equality.Semantic.DeepEqual(stored.Status, request.Status) {
+	status := apiconv.ToAPIRequestStatus(request.Status)
+	if equality.Semantic.DeepEqual(stored.Status, status) {
 		return false, nil
 	}
-	stored.Status = request.Status
-	if err := r.Status().Update(ctx, stored); err != nil {
+	stored.Status = status
+	if err := s.Client.Status().Update(ctx, stored); err != nil {
 		if apierrors.IsConflict(err) {
 			return false, nil
 		}
@@ -284,33 +158,29 @@ func (r *BreakGlassRequestReconciler) updateStatusIfChanged(ctx context.Context,
 	return true, nil
 }
 
-func requestTerminal(phase accessv1alpha1.RequestPhase) bool {
-	switch phase {
-	case accessv1alpha1.RequestPhaseDenied,
-		accessv1alpha1.RequestPhaseExpired,
-		accessv1alpha1.RequestPhaseSessionCreated,
-		accessv1alpha1.RequestPhaseFailed:
-		return true
-	default:
-		return false
-	}
+type requestTelemetry struct {
+	recorder breakglassmetrics.RequestLifecycleRecorder
 }
 
-func requestTransitionForPhase(phase accessv1alpha1.RequestPhase) breakglassmetrics.RequestTransition {
+func (t requestTelemetry) Transition(phase access.RequestPhase) {
+	t.recorder.RecordRequestTransition(requestTransitionForPhase(phase))
+}
+
+func requestTransitionForPhase(phase access.RequestPhase) breakglassmetrics.RequestTransition {
 	switch phase {
-	case accessv1alpha1.RequestPhasePending:
+	case access.RequestPhasePending:
 		return breakglassmetrics.RequestTransitionPending
-	case accessv1alpha1.RequestPhaseApproved:
+	case access.RequestPhaseApproved:
 		return breakglassmetrics.RequestTransitionApproved
-	case accessv1alpha1.RequestPhaseDenied:
+	case access.RequestPhaseDenied:
 		return breakglassmetrics.RequestTransitionDenied
-	case accessv1alpha1.RequestPhaseExpired:
+	case access.RequestPhaseExpired:
 		return breakglassmetrics.RequestTransitionExpired
-	case accessv1alpha1.RequestPhaseProvisioning:
+	case access.RequestPhaseProvisioning:
 		return breakglassmetrics.RequestTransitionProvisioning
-	case accessv1alpha1.RequestPhaseSessionCreated:
+	case access.RequestPhaseSessionCreated:
 		return breakglassmetrics.RequestTransitionSessionCreated
-	case accessv1alpha1.RequestPhaseFailed:
+	case access.RequestPhaseFailed:
 		return breakglassmetrics.RequestTransitionFailed
 	default:
 		return breakglassmetrics.RequestTransitionUnknown

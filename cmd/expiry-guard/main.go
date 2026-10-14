@@ -38,7 +38,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	"github.com/yannick-thomas/breakglass-operator/internal/expiryguard"
+	"github.com/yannick-thomas/breakglass-operator/internal/usecase/expirysweep"
 )
 
 const (
@@ -50,7 +52,7 @@ func main() {
 	var grace, timeout time.Duration
 	var allowedNamespaces string
 	var dryRun bool
-	flag.DurationVar(&grace, "grace", expiryguard.DefaultGrace,
+	flag.DurationVar(&grace, "grace", expirysweep.DefaultGrace,
 		"Time after a session's expiry before the guard removes its binding. Leaves the controller time to clean up first.")
 	flag.DurationVar(&timeout, "timeout", time.Minute, "Maximum duration of one sweep.")
 	flag.StringVar(&allowedNamespaces, "allowed-target-namespaces", "",
@@ -67,7 +69,7 @@ func main() {
 		log.Info("Invalid flags: grace must not be negative and timeout must be positive")
 		os.Exit(exitError)
 	}
-	namespaces, err := expiryguard.ParseNamespaces(allowedNamespaces)
+	scope, err := access.ParseNamespaceScope(allowedNamespaces)
 	if err != nil {
 		log.Error(err, "Invalid allowed-target-namespaces")
 		os.Exit(exitError)
@@ -93,7 +95,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctrl.SetupSignalHandler(), timeout)
 	defer cancel()
 
-	guard := &expiryguard.Guard{Client: c, Grace: grace, AllowedNamespaces: namespaces, DryRun: dryRun, Log: log}
+	guard := expiryguard.New(c)
+	guard.Grace, guard.Scope, guard.DryRun, guard.Log = grace, scope, dryRun, log
 	report, err := guard.Sweep(ctx)
 	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused), "dryRun", dryRun)
 	if err != nil {
