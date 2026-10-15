@@ -23,12 +23,19 @@ limitations under the License.
 // recorded in the session's status, and only after the expiry plus a grace
 // period. A binding that does not match that identity is reported, never
 // touched.
+//
+// A session lives in a control namespace and its binding in a target
+// namespace, so no owner reference lets the garbage collector remove a
+// binding whose session is gone (ADR-004). The sweep therefore also deletes
+// managed bindings whose labelled session no longer exists. Such a binding
+// cannot be the recorded binding of any live session.
 package expirysweep
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -41,15 +48,20 @@ import (
 // cleanup, so the sweep only acts when the controller is behind or down.
 const DefaultGrace = 2 * time.Minute
 
-// SessionSource lists sessions as stored by the API server.
+// SessionSource reads sessions as stored by the API server.
 type SessionSource interface {
 	List(ctx context.Context) ([]access.Session, error)
+	// Get returns port.ErrNotFound if the session does not exist.
+	Get(ctx context.Context, namespace, name string) (access.Session, error)
 }
 
 // BindingGateway reads and deletes bindings.
 type BindingGateway interface {
 	// Get returns port.ErrNotFound if the binding does not exist.
 	Get(ctx context.Context, namespace, name string) (access.Binding, error)
+	// ListManaged lists the bindings carrying the operator's managed-by
+	// label. An empty namespace lists all namespaces.
+	ListManaged(ctx context.Context, namespace string) ([]access.Binding, error)
 	// Delete deletes exactly the observed binding: its UID and version must
 	// still match. port.ErrNotFound or port.ErrConflict otherwise.
 	Delete(ctx context.Context, binding access.Binding) error
@@ -63,6 +75,9 @@ type Sweeper struct {
 	Grace time.Duration
 	// Scope restricts the namespaces the sweep acts in.
 	Scope access.NamespaceScope
+	// Control is the set of namespaces in which sessions may exist. A binding
+	// labelled for a session elsewhere cannot belong to a live session.
+	Control access.NamespaceScope
 	// DryRun reports what would be removed without deleting anything.
 	DryRun bool
 	Clock  func() time.Time
@@ -79,7 +94,8 @@ type Finding struct {
 
 // Report is the result of one sweep.
 type Report struct {
-	// Removed lists bindings deleted (or, in dry-run mode, due for deletion).
+	// Removed lists bindings deleted (or, in dry-run mode, due for deletion),
+	// both of expired sessions and of sessions that no longer exist.
 	Removed []Finding
 	// Refused lists expired sessions whose binding could not be proven to be
 	// the recorded one. They need a human; the sweep never resolves them.
@@ -111,15 +127,96 @@ func (s *Sweeper) Sweep(ctx context.Context) (Report, error) {
 		if err != nil {
 			return report, err
 		}
-		switch {
-		case finding == nil:
-		case removed:
-			report.Removed = append(report.Removed, *finding)
-		default:
-			report.Refused = append(report.Refused, *finding)
-		}
+		report.add(finding, removed)
+	}
+	if err := s.sweepOrphans(ctx, &report); err != nil {
+		return report, err
 	}
 	return report, nil
+}
+
+func (r *Report) add(finding *Finding, removed bool) {
+	switch {
+	case finding == nil:
+	case removed:
+		r.Removed = append(r.Removed, *finding)
+	default:
+		r.Refused = append(r.Refused, *finding)
+	}
+}
+
+// sweepOrphans deletes managed bindings whose labelled session no longer
+// exists, or exists only as a different object under the same name.
+func (s *Sweeper) sweepOrphans(ctx context.Context, report *Report) error {
+	namespaces := []string{""}
+	if s.Scope.Explicit() {
+		namespaces = namespaces[:0]
+		for namespace := range s.Scope {
+			namespaces = append(namespaces, namespace)
+		}
+		slices.Sort(namespaces)
+	}
+	for _, namespace := range namespaces {
+		bindings, err := s.Bindings.ListManaged(ctx, namespace)
+		if err != nil {
+			return fmt.Errorf("list managed RoleBindings: %w", err)
+		}
+		for _, binding := range bindings {
+			finding, removed, err := s.enforceOrphan(ctx, binding)
+			if err != nil {
+				return err
+			}
+			report.add(finding, removed)
+		}
+	}
+	return nil
+}
+
+func (s *Sweeper) enforceOrphan(ctx context.Context, binding access.Binding) (*Finding, bool, error) {
+	if !s.Scope.Allows(binding.Namespace) {
+		return nil, false, nil
+	}
+	claimed, ok := binding.ManagedSession()
+	if !ok {
+		// Without a complete session identity the binding proves nothing about
+		// which session it belongs to, so it is reported, never deleted.
+		return s.refuseOrphan(binding, "", "managed binding has no complete session identity"), false, nil
+	}
+	if s.Control.Allows(claimed.Namespace) {
+		session, err := s.Sessions.Get(ctx, claimed.Namespace, claimed.Name)
+		switch {
+		case err == nil && session.UID == claimed.UID:
+			return nil, false, nil
+		case err != nil && !errors.Is(err, port.ErrNotFound):
+			return nil, false, fmt.Errorf("get BreakGlassSession %s/%s: %w", claimed.Namespace, claimed.Name, err)
+		}
+	}
+
+	finding := &Finding{Session: claimed.Name, Namespace: binding.Namespace, Binding: binding.Name, Reason: "session no longer exists"}
+	log := s.Log.WithValues("session", claimed.Name, "sessionNamespace", claimed.Namespace,
+		"namespace", binding.Namespace, "roleBinding", binding.Name, "uid", binding.UID)
+	if s.DryRun {
+		log.Info("Would delete RoleBinding of missing BreakGlassSession")
+		return finding, true, nil
+	}
+	err := s.Bindings.Delete(ctx, binding)
+	switch {
+	case err == nil:
+		log.Info("Deleted RoleBinding of missing BreakGlassSession")
+		return finding, true, nil
+	case errors.Is(err, port.ErrNotFound):
+		return nil, false, nil
+	case errors.Is(err, port.ErrConflict):
+		return s.refuseOrphan(binding, claimed.Name, "binding changed before it could be deleted"), false, nil
+	default:
+		return nil, false, fmt.Errorf("delete RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+	}
+}
+
+func (s *Sweeper) refuseOrphan(binding access.Binding, session, reason string) *Finding {
+	s.Log.Info("Refused to delete managed RoleBinding",
+		"namespace", binding.Namespace, "roleBinding", binding.Name, "reason", reason)
+	return &Finding{Session: session, Namespace: binding.Namespace, Binding: binding.Name, Reason: reason}
 }
 
 // enforce returns a nil finding when there is nothing left to do, for example

@@ -38,6 +38,10 @@ const (
 // selects a profile; they never select a role, a target namespace, or another
 // subject.  Granting the custom RBAC verb "use" on a particular AccessProfile
 // is therefore the authorization boundary for a self-service session.
+//
+// A profile lives in a control namespace (ADR-004). Requests and sessions
+// resolve it by name in their own namespace; the control namespace is never a
+// target namespace.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="AccessProfile policy fields are immutable; create a new, versioned profile instead"
 // +kubebuilder:validation:XValidation:rule="self.roleRef.kind == 'ClusterRole'",message="v1alpha1 AccessProfiles may reference only curated ClusterRoles"
 type AccessProfileSpec struct {
@@ -96,7 +100,7 @@ type AccessProfileStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=ap
+// +kubebuilder:resource:scope=Namespaced,shortName=ap
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.roleRef.name",description="Pre-approved Role or ClusterRole"
 // +kubebuilder:printcolumn:name="Target-NS",type="string",JSONPath=".spec.targetNamespace",description="Only namespace this profile can grant in"

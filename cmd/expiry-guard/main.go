@@ -50,13 +50,15 @@ const (
 
 func main() {
 	var grace, timeout time.Duration
-	var allowedNamespaces string
+	var allowedNamespaces, controlNamespaces string
 	var dryRun bool
 	flag.DurationVar(&grace, "grace", expirysweep.DefaultGrace,
 		"Time after a session's expiry before the guard removes its binding. Leaves the controller time to clean up first.")
 	flag.DurationVar(&timeout, "timeout", time.Minute, "Maximum duration of one sweep.")
 	flag.StringVar(&allowedNamespaces, "allowed-target-namespaces", "",
 		"Comma-separated namespaces the guard may act in. Keep in sync with the manager. Empty permits all namespaces.")
+	flag.StringVar(&controlNamespaces, "control-namespaces", "",
+		"Comma-separated namespaces in which sessions live. Keep in sync with the manager. Empty reads all namespaces.")
 	flag.BoolVar(&dryRun, "dry-run", false, "Report what would be removed without deleting anything.")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
@@ -72,6 +74,15 @@ func main() {
 	scope, err := access.ParseNamespaceScope(allowedNamespaces)
 	if err != nil {
 		log.Error(err, "Invalid allowed-target-namespaces")
+		os.Exit(exitError)
+	}
+	control, err := access.ParseNamespaceScope(controlNamespaces)
+	if err != nil {
+		log.Error(err, "Invalid control-namespaces")
+		os.Exit(exitError)
+	}
+	if err := (access.Placement{Control: control, Target: scope}).Validate(); err != nil {
+		log.Error(err, "Invalid namespace placement")
 		os.Exit(exitError)
 	}
 
@@ -95,7 +106,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctrl.SetupSignalHandler(), timeout)
 	defer cancel()
 
-	guard := expiryguard.New(c)
+	guard := expiryguard.New(c, control)
 	guard.Grace, guard.Scope, guard.DryRun, guard.Log = grace, scope, dryRun, log
 	report, err := guard.Sweep(ctx)
 	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused), "dryRun", dryRun)

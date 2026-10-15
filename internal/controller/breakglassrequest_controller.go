@@ -67,8 +67,8 @@ func (r *BreakGlassRequestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		telemetry = requestTelemetry{recorder: r.Metrics}
 	}
 	lifecycle := &requestlifecycle.Lifecycle{
-		Approvals:                 cachedApprovalSource{Reader: r.Client},
-		Sessions:                  sessionGateway{Client: r.Client},
+		Approvals:                 cachedApprovalSource{Reader: r.Client, Namespace: obj.Namespace},
+		Sessions:                  sessionGateway{Client: r.Client, Namespace: obj.Namespace},
 		Telemetry:                 telemetry,
 		RequestControllerUsername: r.RequestControllerUsername,
 		Clock:                     r.Clock,
@@ -81,24 +81,27 @@ func (r *BreakGlassRequestReconciler) Reconcile(ctx context.Context, req ctrl.Re
 // cachedApprovalSource reads approvals from the cache. The session lifecycle
 // re-verifies the decision with a direct read before any grant.
 type cachedApprovalSource struct {
-	Reader client.Reader
+	Reader    client.Reader
+	Namespace string
 }
 
 func (s cachedApprovalSource) Approval(ctx context.Context, name string) (access.Approval, error) {
 	approval := &accessv1alpha1.BreakGlassApproval{}
-	if err := s.Reader.Get(ctx, client.ObjectKey{Name: name}, approval); err != nil {
+	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: name}, approval); err != nil {
 		return access.Approval{}, apiconv.Classify(err)
 	}
 	return apiconv.ToDomainApproval(approval), nil
 }
 
+// sessionGateway reads and creates sessions in the request's own namespace.
 type sessionGateway struct {
-	Client client.Client
+	Client    client.Client
+	Namespace string
 }
 
 func (g sessionGateway) Get(ctx context.Context, name string) (requestlifecycle.SessionRecord, error) {
 	session := &accessv1alpha1.BreakGlassSession{}
-	if err := g.Client.Get(ctx, client.ObjectKey{Name: name}, session); err != nil {
+	if err := g.Client.Get(ctx, client.ObjectKey{Namespace: g.Namespace, Name: name}, session); err != nil {
 		return requestlifecycle.SessionRecord{}, apiconv.Classify(err)
 	}
 	return sessionRecord(session), nil
@@ -106,7 +109,7 @@ func (g sessionGateway) Get(ctx context.Context, name string) (requestlifecycle.
 
 func (g sessionGateway) Create(ctx context.Context, name string, spec access.SessionSpec) (requestlifecycle.SessionRecord, error) {
 	session := &accessv1alpha1.BreakGlassSession{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: g.Namespace, Name: name},
 		Spec: accessv1alpha1.BreakGlassSessionSpec{
 			AccessProfile:    spec.AccessProfile,
 			AccessProfileUID: spec.AccessProfileUID,
@@ -187,8 +190,9 @@ func requestTransitionForPhase(phase access.RequestPhase) breakglassmetrics.Requ
 	}
 }
 
-// SetupWithManager configures the request lifecycle reconciler. The request is
-// cluster-scoped, so no namespace watch may be used as a security filter.
+// SetupWithManager configures the request lifecycle reconciler. The watched
+// namespaces are a cache optimization; admission, not the watch, keeps
+// requests out of other namespaces.
 func (r *BreakGlassRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.BreakGlassApproval{}, approvalRequestNameField, func(obj client.Object) []string {
 		approval := obj.(*accessv1alpha1.BreakGlassApproval)
@@ -211,5 +215,5 @@ func (r *BreakGlassRequestReconciler) requestsForApproval(_ context.Context, obj
 	if approval.Spec.RequestRef.Name == "" {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: approval.Spec.RequestRef.Name}}}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: approval.Namespace, Name: approval.Spec.RequestRef.Name}}}
 }

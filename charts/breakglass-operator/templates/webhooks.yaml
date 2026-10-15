@@ -47,6 +47,8 @@ webhooks:
           {{- end }}
           {{- end }}
         resources: [{{ $resource }}s]
-        scope: Cluster
+        # Access objects are namespaced (ADR-004). A Cluster scope here would
+        # silently exempt every one of them from admission.
+        scope: Namespaced
   {{- end }}
 {{- end }}

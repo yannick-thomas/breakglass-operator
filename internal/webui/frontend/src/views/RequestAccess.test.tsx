@@ -61,6 +61,7 @@ describe('RequestAccess', () => {
 
     expect(api.createAccess).toHaveBeenCalledTimes(1);
     expect(api.createAccess).toHaveBeenCalledWith({
+      namespace: 'breakglass-access',
       accessProfile: 'production-pod-observer-approval',
       duration: '45m',
       reason: 'INC-1092 Datenbank prüfen',

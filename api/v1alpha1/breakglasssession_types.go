@@ -99,8 +99,9 @@ type RoleReference struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked) && self.revoked)",message="revoked cannot be changed from true to false"
 // +kubebuilder:validation:XValidation:rule="self.subject.kind == 'User' && (!has(self.subject.namespace) || size(self.subject.namespace) == 0)",message="v1alpha1 self-service sessions may only grant the authenticated User requester"
 type BreakGlassSessionSpec struct {
-	// AccessProfile is the fixed, administrator-owned access policy to use.
-	// The requester requires the custom RBAC verb "use" on this named profile.
+	// AccessProfile is the fixed, administrator-owned access policy to use, in
+	// the session's own namespace. The requester requires the custom RBAC verb
+	// "use" on this named profile in that namespace.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
@@ -232,7 +233,7 @@ type BreakGlassSessionStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster,shortName=bgs
+// +kubebuilder:resource:scope=Namespaced,shortName=bgs
 // +kubebuilder:printcolumn:name="Subject",type="string",JSONPath=".spec.subject.name",description="Authenticated requester granted access"
 // +kubebuilder:printcolumn:name="Profile",type="string",JSONPath=".spec.accessProfile",description="Administrator-owned access profile"
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.grant.roleRef.name",description="Resolved curated role"

@@ -98,9 +98,8 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	esac
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+test-e2e: manifests generate fmt vet ## Run default E2E with a private kubeconfig and disposable Kind cluster.
+	KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) bash hack/run-kind-e2e.sh default
 
 .PHONY: setup-test-e2e-production
 setup-test-e2e-production: ## Set up Kind with two schedulable workers for the production e2e tests.
@@ -113,9 +112,8 @@ setup-test-e2e-production: ## Set up Kind with two schedulable workers for the p
 	esac
 
 .PHONY: test-e2e-production
-test-e2e-production: setup-test-e2e-production manifests generate fmt vet ## Run the HA production overlay e2e tests in Kind.
-	HELM=$(HELM) PRODUCTION_INSTALLER=$(PRODUCTION_INSTALLER) KIND=$(KIND) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) go test -timeout=25m -tags=e2e ./test/e2e/production -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e-production
+test-e2e-production: manifests generate fmt vet ## Run HA production E2E with a private kubeconfig and disposable Kind workers.
+	HELM=$(HELM) KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_CLUSTER=$(PRODUCTION_KIND_CLUSTER) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION) bash hack/run-kind-e2e.sh $(if $(filter helm,$(PRODUCTION_INSTALLER)),helm,production)
 
 .PHONY: test-e2e-helm
 test-e2e-helm: ## Run the production lifecycle suite through Helm install and upgrade on isolated Kind workers.
@@ -172,13 +170,14 @@ verify-helm: ## Lint/render Helm and verify the shared production and configurab
 	$(HELM) lint charts/breakglass-operator --strict --set image.tag=test
 	$(HELM) template breakglass-operator charts/breakglass-operator --namespace breakglass-operator-system --include-crds --set image.tag=test | go run ./test/manifestcheck --profile production-namespaced
 	HELM=$(HELM) go test ./test/helmchart ./test/manifestcheck
+	python3 -m unittest discover -s hack/tests -v
 
 CHART_VERSION ?= 0.1.0
 CHART_APP_VERSION ?= $(CHART_VERSION)
 
 .PHONY: package-helm
-package-helm: verify-helm ## Package a chart with a digest-pinned IMG; does not publish it.
-	python3 hack/package-helm.py --helm "$(HELM)" --image "$(IMG)" --version "$(CHART_VERSION)" --app-version "$(CHART_APP_VERSION)"
+package-helm: verify-helm ## Package a chart with digest-pinned IMG and WEBUI_IMG; does not publish it.
+	python3 hack/package-helm.py --helm "$(HELM)" --image "$(IMG)" --webui-image "$(WEBUI_IMG)" --version "$(CHART_VERSION)" --app-version "$(CHART_APP_VERSION)" $(if $(SOURCE_REVISION),--source-revision "$(SOURCE_REVISION)")
 
 ##@ Build
 

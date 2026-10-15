@@ -3,6 +3,7 @@ package helmchart
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -111,27 +112,36 @@ func TestCRDsStayInSync(t *testing.T) {
 }
 
 func TestRenderedSecurityBoundary(t *testing.T) {
+	defaultControl := []string{"breakglass-access"}
 	for _, tc := range []struct {
-		name, release, namespace string
-		targets, roles, flags    []string
+		name, release, namespace        string
+		targets, controls, roles, flags []string
 	}{
 		{"default", "breakglass-operator", "breakglass-operator-system",
-			[]string{"production"}, []string{"breakglass-pod-observer"}, nil},
+			[]string{"production"}, defaultControl, []string{"breakglass-pod-observer"}, nil},
 		{"all-options", "emergency", "platform-access",
-			[]string{"payments", "inventory"}, []string{"breakglass-logs-v1", "breakglass-restart-v1"},
+			[]string{"payments", "inventory"}, []string{"payments-access", "inventory-access"},
+			[]string{"breakglass-logs-v1", "breakglass-restart-v1"},
 			[]string{"-f", chartPath + "/ci/all-options.yaml"}},
 		{"single-node", "dev", "access-system",
-			[]string{"production"}, []string{"breakglass-pod-observer"},
+			[]string{"production"}, defaultControl, []string{"breakglass-pod-observer"},
 			[]string{"-f", chartPath + "/ci/single-node.yaml"}},
+		{"local-example", "local", "access-system",
+			[]string{"production"}, defaultControl, []string{"breakglass-pod-observer"},
+			[]string{"-f", chartPath + "/examples/values-local.yaml"}},
+		{"production-example", "prod", "access-system",
+			[]string{"production"}, defaultControl, []string{"breakglass-pod-observer"},
+			[]string{"-f", chartPath + "/examples/values-production.yaml", "--set", "webui.image.tag=test"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objects := render(t, tc.release, tc.namespace, tc.flags...)
 			verifyRoleBoundary(t, objects, tc.release, tc.namespace, tc.targets, tc.roles)
+			verifyControlBoundary(t, objects, tc.release, tc.namespace, tc.controls)
 			verifyAdmission(t, objects, tc.release, tc.namespace)
-			verifySourceParity(t, objects, tc.release, tc.targets, tc.roles)
+			verifySourceParity(t, objects, tc.release, tc.controls, tc.targets, tc.roles)
 			manager := object(t, objects, "Deployment", tc.release+"-controller-manager", tc.namespace)
 			managerPod := field(t, manager, "spec", "template", "spec").(map[string]any)
-			verifyPod(t, managerPod, tc.release+"-controller-manager", tc.targets)
+			verifyPod(t, managerPod, tc.release+"-controller-manager", tc.targets, tc.controls)
 			container := field(t, managerPod, "containers").([]any)[0].(map[string]any)
 			args, _, _ := unstructured.NestedStringSlice(container, "args")
 			identity := "--request-controller-username=system:serviceaccount:" +
@@ -141,7 +151,7 @@ func TestRenderedSecurityBoundary(t *testing.T) {
 			}
 			guard := object(t, objects, "CronJob", tc.release+"-expiry-guard", tc.namespace)
 			guardPod := field(t, guard, "spec", "jobTemplate", "spec", "template", "spec").(map[string]any)
-			verifyPod(t, guardPod, tc.release+"-expiry-guard", tc.targets)
+			verifyPod(t, guardPod, tc.release+"-expiry-guard", tc.targets, tc.controls)
 			if field(t, guard, "spec", "concurrencyPolicy") != "Forbid" {
 				t.Fatal("expiry guard must not overlap")
 			}
@@ -201,7 +211,7 @@ func verifyRoleBoundary(
 			verbs []string
 		}{
 			{"manager", []string{"create", "delete", "get", "list", "update", "watch"}},
-			{"expiry-guard", []string{"get", "delete"}},
+			{"expiry-guard", []string{"get", "list", "delete"}},
 		} {
 			name := release + "-" + component.name + "-rolebindings"
 			role := object(t, objects, "Role", name, target)
@@ -224,6 +234,55 @@ func verifyRoleBoundary(
 			want := map[string]any{"kind": "ServiceAccount", "name": sa, "namespace": namespace}
 			if len(subjects) != 1 || !reflect.DeepEqual(subjects[0], want) {
 				t.Fatal("namespace permissions bound to wrong identity")
+			}
+		}
+	}
+}
+
+// verifyControlBoundary checks that the manager and the expiry guard reach
+// access objects only through Roles in the control namespaces (ADR-004).
+func verifyControlBoundary(
+	t *testing.T, objects []unstructured.Unstructured, release, namespace string, controls []string,
+) {
+	t.Helper()
+	for _, name := range []string{release + "-manager-role", release + "-expiry-guard-role"} {
+		for _, item := range objects {
+			if item.GetKind() != "ClusterRole" || item.GetName() != name {
+				continue
+			}
+			for _, raw := range field(t, item.Object, "rules").([]any) {
+				groups, _, _ := unstructured.NestedStringSlice(raw.(map[string]any), "apiGroups")
+				if slices.Contains(groups, "access.breakglass.io") {
+					t.Fatalf("%s grants access objects cluster-wide", name)
+				}
+			}
+		}
+	}
+	for _, item := range objects {
+		if item.GetKind() == "Role" && (strings.HasSuffix(item.GetName(), "-manager-access") ||
+			strings.HasSuffix(item.GetName(), "-expiry-guard-sessions")) && !slices.Contains(controls, item.GetNamespace()) {
+			t.Fatal("access object permissions outside configured control namespaces")
+		}
+	}
+	for _, control := range controls {
+		guard := object(t, objects, "Role", release+"-expiry-guard-sessions", control)
+		rules := field(t, guard, "rules").([]any)
+		verbs, _, _ := unstructured.NestedStringSlice(rules[0].(map[string]any), "verbs")
+		resources, _, _ := unstructured.NestedStringSlice(rules[0].(map[string]any), "resources")
+		if len(rules) != 1 || !sameSet(verbs, []string{"get", "list"}) ||
+			!reflect.DeepEqual(resources, []string{"breakglasssessions"}) {
+			t.Fatal("expiry guard may only read sessions in a control namespace")
+		}
+		for _, component := range []struct{ role, sa string }{
+			{release + "-manager-access", release + "-controller-manager"},
+			{release + "-expiry-guard-sessions", release + "-expiry-guard"},
+		} {
+			object(t, objects, "Role", component.role, control)
+			binding := object(t, objects, "RoleBinding", component.role, control)
+			subjects := field(t, binding, "subjects").([]any)
+			want := map[string]any{"kind": "ServiceAccount", "name": component.sa, "namespace": namespace}
+			if len(subjects) != 1 || !reflect.DeepEqual(subjects[0], want) {
+				t.Fatal("control namespace permissions bound to wrong identity")
 			}
 		}
 	}
@@ -255,6 +314,11 @@ func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release,
 			if _, exists := webhook["objectSelector"]; exists {
 				t.Fatal("object selector may bypass admission")
 			}
+			for _, rule := range field(t, webhook, "rules").([]any) {
+				if rule.(map[string]any)["scope"] != "Namespaced" {
+					t.Fatal("admission must match the namespaced access objects")
+				}
+			}
 			service := field(t, webhook, "clientConfig", "service").(map[string]any)
 			if service["name"] != release+"-webhook-service" || service["namespace"] != namespace {
 				t.Fatal("webhook points at the wrong Service")
@@ -263,7 +327,7 @@ func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release,
 	}
 }
 
-func verifyPod(t *testing.T, pod map[string]any, serviceAccount string, targets []string) {
+func verifyPod(t *testing.T, pod map[string]any, serviceAccount string, targets, controls []string) {
 	t.Helper()
 	if pod["serviceAccountName"] != serviceAccount {
 		t.Fatal("pod uses the wrong ServiceAccount")
@@ -286,7 +350,8 @@ func verifyPod(t *testing.T, pod map[string]any, serviceAccount string, targets 
 		t.Fatal("container must drop all capabilities")
 	}
 	args, _, _ := unstructured.NestedStringSlice(container, "args")
-	if !slices.Contains(args, "--allowed-target-namespaces="+strings.Join(targets, ",")) {
+	if !slices.Contains(args, "--allowed-target-namespaces="+strings.Join(targets, ",")) ||
+		!slices.Contains(args, "--control-namespaces="+strings.Join(controls, ",")) {
 		t.Fatal("pod namespace scope disagrees with its RBAC")
 	}
 }
@@ -324,7 +389,9 @@ func sameSet(a, b []string) bool {
 
 // Keep the two installers on the same controller/admission API contract. The
 // chart deliberately replaces global RBAC reads/CRUD with explicit names.
-func verifySourceParity(t *testing.T, objects []unstructured.Unstructured, release string, targets, roles []string) {
+func verifySourceParity(
+	t *testing.T, objects []unstructured.Unstructured, release string, controls, targets, roles []string,
+) {
 	t.Helper()
 	read := func(path string) []unstructured.Unstructured {
 		data, err := os.ReadFile(filepath.Join(repoRoot(t), path))
@@ -334,13 +401,19 @@ func verifySourceParity(t *testing.T, objects []unstructured.Unstructured, relea
 		return decode(t, data)
 	}
 	sourceRole := read("config/rbac/role.yaml")[0]
-	var expectedRules []any
+	var expectedRules, expectedControlRules []any
 	for _, raw := range field(t, sourceRole.Object, "rules").([]any) {
 		rule := raw.(map[string]any)
 		resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
 		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
+		groups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
 		if slices.Equal(resources, []string{"rolebindings"}) ||
 			(slices.Equal(resources, []string{"clusterroles"}) && len(names) == 0) {
+			continue
+		}
+		// Access objects and their events live in the control namespaces.
+		if slices.Equal(groups, []string{"access.breakglass.io"}) || slices.Equal(resources, []string{"events"}) {
+			expectedControlRules = append(expectedControlRules, rule)
 			continue
 		}
 		if slices.Equal(resources, []string{"clusterroles"}) {
@@ -356,6 +429,12 @@ func verifySourceParity(t *testing.T, objects []unstructured.Unstructured, relea
 	if !reflect.DeepEqual(field(t, managerRole, "rules"), expectedRules) {
 		t.Fatal("manager RBAC has drifted from the generated controller contract")
 	}
+	for _, control := range controls {
+		access := object(t, objects, "Role", release+"-manager-access", control)
+		if !reflect.DeepEqual(field(t, access, "rules"), expectedControlRules) {
+			t.Fatal("manager control-namespace RBAC has drifted from the generated controller contract")
+		}
+	}
 	for _, source := range read("config/webhook/manifests.yaml") {
 		rendered := object(t, objects, source.GetKind(), release+"-"+source.GetName(), "")
 		expected := field(t, source.Object, "webhooks").([]any)
@@ -368,7 +447,7 @@ func verifySourceParity(t *testing.T, objects []unstructured.Unstructured, relea
 			chartWebhook := actual[i].(map[string]any)
 			rules := field(t, sourceWebhook, "rules").([]any)
 			for _, rule := range rules {
-				rule.(map[string]any)["scope"] = "Cluster"
+				rule.(map[string]any)["scope"] = "Namespaced"
 			}
 			if !reflect.DeepEqual(field(t, chartWebhook, "rules"), rules) ||
 				field(t, sourceWebhook, "clientConfig", "service", "path") !=
@@ -406,5 +485,90 @@ func TestUnsafeValuesAreRejected(t *testing.T) {
 	}
 	if output, err := helmCommand(t, "template", "test", chartPath); err == nil {
 		t.Fatalf("missing image accepted: %s", output)
+	}
+}
+
+func TestReleasePackagePinsBothImages(t *testing.T) {
+	helm := os.Getenv("HELM")
+	if helm == "" {
+		var err error
+		helm, err = exec.LookPath("helm")
+		if err != nil {
+			t.Skip("Helm is required; run make verify-helm")
+		}
+	}
+	destination := t.TempDir()
+	managerImage := "registry.example.com/operator@sha256:" + strings.Repeat("a", 64)
+	webuiImage := "registry.example.com/webui@sha256:" + strings.Repeat("b", 64)
+	revision := strings.Repeat("c", 40)
+	cmd := exec.Command("python3", "hack/package-helm.py", "--helm", helm,
+		"--image", managerImage, "--webui-image", webuiImage, "--source-revision", revision,
+		"--version", "0.1.0", "--app-version", "test", "--destination", destination)
+	cmd.Dir = repoRoot(t)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("packaging failed: %v\n%s", err, output)
+	}
+	output, err := helmCommand(t, "template", "release", filepath.Join(destination, "breakglass-operator-0.1.0.tgz"),
+		"--namespace", "release-system", "-f", chartPath+"/examples/values-production.yaml")
+	if err != nil {
+		t.Fatalf("packaged chart cannot enable WebUI without overriding images: %v\n%s", err, output)
+	}
+	objects := decode(t, output)
+	for _, component := range []struct{ suffix, image string }{
+		{"controller-manager", managerImage}, {"webui", webuiImage},
+	} {
+		deployment := object(t, objects, "Deployment", "release-"+component.suffix, "release-system")
+		containers := field(t, deployment, "spec", "template", "spec", "containers").([]any)
+		if field(t, containers[0].(map[string]any), "image") != component.image {
+			t.Fatal("packaged chart does not run the exact reviewed image digest")
+		}
+	}
+	metadata, err := os.ReadFile(filepath.Join(destination, "release.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		SourceRevision string            `json:"sourceRevision"`
+		Images         map[string]string `json:"images"`
+	}
+	if err := json.Unmarshal(metadata, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SourceRevision != revision || manifest.Images["operator"] != managerImage ||
+		manifest.Images["webui"] != webuiImage {
+		t.Fatal("release metadata disagrees with packaged image defaults")
+	}
+}
+
+func TestReleaseRequiresSuccessfulCIForExactRevision(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	for _, tc := range []struct {
+		name, sha, event, status, conclusion string
+		allowed                              bool
+	}{
+		{"passed", revision, "push", "completed", "success", true},
+		{"manual", revision, "workflow_dispatch", "completed", "success", true},
+		{"failed", revision, "push", "completed", "failure", false},
+		{"running", revision, "push", "in_progress", "", false},
+		{"different-source", strings.Repeat("b", 40), "push", "completed", "success", false},
+		{"pr-only", revision, "pull_request", "completed", "success", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{"workflow_runs": []map[string]string{{
+				"head_sha": tc.sha, "head_branch": "main", "event": tc.event,
+				"status": tc.status, "conclusion": tc.conclusion,
+			}}}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("python3", "hack/require-release-ci.py", revision)
+			cmd.Dir = repoRoot(t)
+			cmd.Stdin = bytes.NewReader(data)
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != tc.allowed {
+				t.Fatalf("unexpected release authorization: %v\n%s", err, output)
+			}
+		})
 	}
 }

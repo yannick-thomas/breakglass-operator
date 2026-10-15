@@ -50,7 +50,7 @@ var breakglasssessionlog = logf.Log.WithName("breakglasssession-resource")
 // server, not a stale cache entry.
 func SetupBreakGlassSessionWebhookWithManager(
 	mgr ctrl.Manager,
-	allowedTargetNamespaces map[string]struct{},
+	placement access.Placement,
 	requestControllerUsername string,
 ) error {
 	return ctrl.NewWebhookManagedBy(mgr, &accessv1alpha1.BreakGlassSession{}).
@@ -61,12 +61,13 @@ func SetupBreakGlassSessionWebhookWithManager(
 			Reviewer:                  KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
 			RevocationReviewer:        KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
 			Metrics:                   breakglassmetrics.DefaultRecorder,
-			AllowedTargetNamespaces:   allowedTargetNamespaces,
+			Placement:                 placement,
 			RequestControllerUsername: requestControllerUsername,
 		}).
 		WithDefaulter(&BreakGlassSessionDefaulter{
 			ProfileReader:             mgr.GetAPIReader(),
 			Metrics:                   breakglassmetrics.DefaultRecorder,
+			Placement:                 placement,
 			RequestControllerUsername: requestControllerUsername,
 		}).
 		Complete()
@@ -80,6 +81,7 @@ func SetupBreakGlassSessionWebhookWithManager(
 type BreakGlassSessionDefaulter struct {
 	ProfileReader             client.Reader
 	Metrics                   breakglassmetrics.AdmissionRecorder
+	Placement                 access.Placement
 	RequestControllerUsername string
 }
 
@@ -99,6 +101,9 @@ func (d *BreakGlassSessionDefaulter) Default(ctx context.Context, obj *accessv1a
 	if err != nil {
 		return &admissionInternalError{err: fmt.Errorf("read authenticated admission requester: %w", err)}
 	}
+	if err := checkControlNamespace(d.Placement, "BreakGlassSession", obj.Namespace); err != nil {
+		return err
+	}
 	if obj.Spec.RequestRef != nil {
 		if d.RequestControllerUsername == "" || req.UserInfo.Username != d.RequestControllerUsername {
 			return fmt.Errorf("request-sourced sessions may only be created by the configured request controller")
@@ -116,7 +121,7 @@ func (d *BreakGlassSessionDefaulter) Default(ctx context.Context, obj *accessv1a
 	}
 
 	profile := &accessv1alpha1.AccessProfile{}
-	if err := d.ProfileReader.Get(ctx, client.ObjectKey{Name: obj.Spec.AccessProfile}, profile); err != nil {
+	if err := d.ProfileReader.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.AccessProfile}, profile); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("AccessProfile %q does not exist", obj.Spec.AccessProfile)
 		}
@@ -139,15 +144,16 @@ func (d *BreakGlassSessionDefaulter) Default(ctx context.Context, obj *accessv1a
 // SubjectAccessReviewer makes profile-use authorization independently
 // testable. It must authorize the original requester, not the manager Service
 // Account that executes the webhook.
+// The namespace is the profile's control namespace.
 type SubjectAccessReviewer interface {
-	CanUse(context.Context, authenticationv1.UserInfo, string) (bool, error)
+	CanUse(ctx context.Context, user authenticationv1.UserInfo, namespace, profile string) (bool, error)
 }
 
 // RevocationReviewer authorizes revoking another person's session. It is a
 // separate interface so that revocation authority is never inferred from
 // profile use.
 type RevocationReviewer interface {
-	CanRevoke(context.Context, authenticationv1.UserInfo, string) (bool, error)
+	CanRevoke(ctx context.Context, user authenticationv1.UserInfo, namespace, profile string) (bool, error)
 }
 
 // KubernetesSubjectAccessReviewer performs a real SubjectAccessReview through
@@ -156,27 +162,33 @@ type KubernetesSubjectAccessReviewer struct {
 	Client client.Client
 }
 
-func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
-	return r.canAccessProfile(ctx, user, profile, "use")
+func (r KubernetesSubjectAccessReviewer) CanUse(ctx context.Context, user authenticationv1.UserInfo, namespace, profile string) (bool, error) {
+	return r.canAccessProfile(ctx, user, namespace, profile, "use")
 }
 
 // CanApprove verifies the custom, profile-scoped approval verb. Keeping this
 // distinct from use prevents a requester from approving their own access just
 // because they may start a direct self-service session.
-func (r KubernetesSubjectAccessReviewer) CanApprove(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
-	return r.canAccessProfile(ctx, user, profile, "approve")
+func (r KubernetesSubjectAccessReviewer) CanApprove(ctx context.Context, user authenticationv1.UserInfo, namespace, profile string) (bool, error) {
+	return r.canAccessProfile(ctx, user, namespace, profile, "approve")
 }
 
 // CanRevoke verifies the custom, profile-scoped revocation verb. It lets an
 // incident commander end someone else's access without granting them use or
 // approve on the same profile.
-func (r KubernetesSubjectAccessReviewer) CanRevoke(ctx context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
-	return r.canAccessProfile(ctx, user, profile, "revoke")
+func (r KubernetesSubjectAccessReviewer) CanRevoke(ctx context.Context, user authenticationv1.UserInfo, namespace, profile string) (bool, error) {
+	return r.canAccessProfile(ctx, user, namespace, profile, "revoke")
 }
 
-func (r KubernetesSubjectAccessReviewer) canAccessProfile(ctx context.Context, user authenticationv1.UserInfo, profile, verb string) (bool, error) {
+// canAccessProfile asks whether the user holds the verb on the named profile
+// in its namespace, so a Role in a control namespace is enough to authorize
+// people for that namespace's profiles (ADR-004).
+func (r KubernetesSubjectAccessReviewer) canAccessProfile(ctx context.Context, user authenticationv1.UserInfo, namespace, profile, verb string) (bool, error) {
 	if r.Client == nil {
 		return false, fmt.Errorf("SubjectAccessReview client is not configured")
+	}
+	if namespace == "" {
+		return false, fmt.Errorf("SubjectAccessReview requires the AccessProfile namespace")
 	}
 	extra := make(map[string]authorizationv1.ExtraValue, len(user.Extra))
 	for key, value := range user.Extra {
@@ -189,11 +201,12 @@ func (r KubernetesSubjectAccessReviewer) canAccessProfile(ctx context.Context, u
 			Groups: user.Groups,
 			Extra:  extra,
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Group:    accessv1alpha1.GroupVersion.Group,
-				Version:  accessv1alpha1.GroupVersion.Version,
-				Resource: "accessprofiles",
-				Verb:     verb,
-				Name:     profile,
+				Namespace: namespace,
+				Group:     accessv1alpha1.GroupVersion.Group,
+				Version:   accessv1alpha1.GroupVersion.Version,
+				Resource:  "accessprofiles",
+				Verb:      verb,
+				Name:      profile,
 			},
 		},
 	}
@@ -215,7 +228,7 @@ type BreakGlassSessionValidator struct {
 	Reviewer                  SubjectAccessReviewer
 	RevocationReviewer        RevocationReviewer
 	Metrics                   breakglassmetrics.AdmissionRecorder
-	AllowedTargetNamespaces   map[string]struct{}
+	Placement                 access.Placement
 	RequestControllerUsername string
 }
 
@@ -231,6 +244,9 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 	if err != nil {
 		return nil, apierrors.NewInternalError(fmt.Errorf("read authenticated admission requester: %w", err))
 	}
+	if err := checkControlNamespace(v.Placement, "BreakGlassSession", obj.Namespace); err != nil {
+		return nil, err
+	}
 	if obj.Spec.RequestRef != nil {
 		return nil, v.validateRequestSourcedSession(ctx, req.UserInfo, obj)
 	}
@@ -241,7 +257,7 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 		return nil, fmt.Errorf("subject must be the authenticated requester")
 	}
 
-	profile, maxDuration, err := v.profiles().load(ctx, obj.Spec.AccessProfile)
+	profile, maxDuration, err := v.profiles().load(ctx, obj.Namespace, obj.Spec.AccessProfile)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +277,7 @@ func (v *BreakGlassSessionValidator) ValidateCreate(ctx context.Context, obj *ac
 	if v.Reviewer == nil {
 		return nil, apierrors.NewInternalError(fmt.Errorf("SubjectAccessReview reviewer is not configured"))
 	}
-	allowed, err := v.Reviewer.CanUse(ctx, req.UserInfo, profile.Name)
+	allowed, err := v.Reviewer.CanUse(ctx, req.UserInfo, profile.Namespace, profile.Name)
 	if err != nil {
 		return nil, apierrors.NewInternalError(fmt.Errorf("evaluate AccessProfile use authorization: %w", err))
 	}
@@ -324,7 +340,7 @@ func (v *BreakGlassSessionValidator) authorizeRevocation(ctx context.Context, se
 	if v.RevocationReviewer == nil {
 		return apierrors.NewInternalError(fmt.Errorf("revocation reviewer is not configured"))
 	}
-	allowed, err := v.RevocationReviewer.CanRevoke(ctx, user, session.Spec.AccessProfile)
+	allowed, err := v.RevocationReviewer.CanRevoke(ctx, user, session.Namespace, session.Spec.AccessProfile)
 	if err != nil {
 		return apierrors.NewInternalError(fmt.Errorf("evaluate AccessProfile revoke authorization: %w", err))
 	}
@@ -346,7 +362,7 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 	if v.RequestControllerUsername == "" || user.Username != v.RequestControllerUsername {
 		return fmt.Errorf("request-sourced sessions may only be created by the configured request controller")
 	}
-	request, err := v.loadRequestForSourcedSession(ctx, obj.Spec.RequestRef)
+	request, err := v.loadRequestForSourcedSession(ctx, obj.Namespace, obj.Spec.RequestRef)
 	if err != nil {
 		return err
 	}
@@ -359,17 +375,18 @@ func (v *BreakGlassSessionValidator) validateRequestSourcedSession(
 	if !request.DecisionOpen(time.Now()) {
 		return fmt.Errorf("BreakGlassRequest %q has expired", request.Name)
 	}
-	if err := v.validateRequestApproval(ctx, request); err != nil {
+	if err := v.validateRequestApproval(ctx, obj.Namespace, request); err != nil {
 		return err
 	}
 	if !request.MatchesSession(apiconv.ToDomainSession(obj).Spec) {
 		return fmt.Errorf("controller-sourced session fields must exactly match the approved BreakGlassRequest")
 	}
-	return v.validateRequestProfile(ctx, request)
+	return v.validateRequestProfile(ctx, obj.Namespace, request)
 }
 
 func (v *BreakGlassSessionValidator) loadRequestForSourcedSession(
 	ctx context.Context,
+	namespace string,
 	ref *accessv1alpha1.BreakGlassRequestReference,
 ) (access.Request, error) {
 	if ref == nil || ref.Name == "" || ref.UID == "" {
@@ -379,7 +396,7 @@ func (v *BreakGlassSessionValidator) loadRequestForSourcedSession(
 		return access.Request{}, apierrors.NewInternalError(fmt.Errorf("request or approval reader is not configured"))
 	}
 	request := &accessv1alpha1.BreakGlassRequest{}
-	if err := v.RequestReader.Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
+	if err := v.RequestReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, request); err != nil {
 		if apierrors.IsNotFound(err) {
 			return access.Request{}, fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
 		}
@@ -393,12 +410,12 @@ func (v *BreakGlassSessionValidator) loadRequestForSourcedSession(
 
 // validateRequestApproval requires an independent approval of exactly this
 // request in its deterministic slot.
-func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context, request access.Request) error {
+func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context, namespace string, request access.Request) error {
 	if access.SourceApprovalRefIssue(request) != nil {
 		return fmt.Errorf("BreakGlassRequest %q has no verified approval reference", request.Name)
 	}
 	approval := &accessv1alpha1.BreakGlassApproval{}
-	if err := v.ApprovalReader.Get(ctx, client.ObjectKey{Name: request.Status.ApprovalRef.Name}, approval); err != nil {
+	if err := v.ApprovalReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: request.Status.ApprovalRef.Name}, approval); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("BreakGlassApproval %q does not exist", request.Status.ApprovalRef.Name)
 		}
@@ -410,8 +427,8 @@ func (v *BreakGlassSessionValidator) validateRequestApproval(ctx context.Context
 	return nil
 }
 
-func (v *BreakGlassSessionValidator) validateRequestProfile(ctx context.Context, request access.Request) error {
-	profile, maxDuration, err := v.profiles().load(ctx, request.AccessProfile)
+func (v *BreakGlassSessionValidator) validateRequestProfile(ctx context.Context, namespace string, request access.Request) error {
+	profile, maxDuration, err := v.profiles().load(ctx, namespace, request.AccessProfile)
 	if err != nil {
 		return err
 	}
@@ -445,14 +462,15 @@ func (v *BreakGlassSessionValidator) ValidateDelete(_ context.Context, _ *access
 // admissibleProfiles loads the profile an admission decision refers to. It is
 // shared by the session, request, and approval webhooks.
 type admissibleProfiles struct {
-	Reader client.Reader
-	Scope  access.NamespaceScope
+	Reader    client.Reader
+	Placement access.Placement
 }
 
-// load reads the profile directly from the API server and applies the domain
-// profile rules. A profile with an unsupported delivery mode is returned;
-// callers reject it through Profile.Permits.
-func (p admissibleProfiles) load(ctx context.Context, name string) (access.Profile, time.Duration, error) {
+// load reads the profile from the given namespace directly from the API
+// server and applies the domain profile and placement rules. A profile with
+// an unsupported delivery mode is returned; callers reject it through
+// Profile.Permits.
+func (p admissibleProfiles) load(ctx context.Context, namespace, name string) (access.Profile, time.Duration, error) {
 	if name == "" {
 		return access.Profile{}, 0, fmt.Errorf("accessProfile is required")
 	}
@@ -460,7 +478,7 @@ func (p admissibleProfiles) load(ctx context.Context, name string) (access.Profi
 		return access.Profile{}, 0, apierrors.NewInternalError(fmt.Errorf("AccessProfile reader is not configured"))
 	}
 	stored := &accessv1alpha1.AccessProfile{}
-	if err := p.Reader.Get(ctx, client.ObjectKey{Name: name}, stored); err != nil {
+	if err := p.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, stored); err != nil {
 		if apierrors.IsNotFound(err) {
 			return access.Profile{}, 0, fmt.Errorf("AccessProfile %q does not exist", name)
 		}
@@ -468,11 +486,11 @@ func (p admissibleProfiles) load(ctx context.Context, name string) (access.Profi
 	}
 	profile := apiconv.ToDomainProfile(stored)
 	maxDuration, defect := profile.Check()
-	if defect == access.ProfileRoleRefInvalid || defect == access.ProfileTargetNamespaceMissing {
+	if defect == access.ProfileRoleRefInvalid || defect == access.ProfileTargetNamespaceMissing || defect == access.ProfileTargetIsControlNamespace {
 		return access.Profile{}, 0, fmt.Errorf("AccessProfile %q is not a valid curated namespaced policy", name)
 	}
-	if !p.Scope.Allows(profile.TargetNamespace) {
-		return access.Profile{}, 0, fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", name, profile.TargetNamespace)
+	if err := p.Placement.CheckProfile(profile); err != nil {
+		return access.Profile{}, 0, err
 	}
 	if defect == access.ProfileMaxDurationInvalid {
 		return access.Profile{}, 0, fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", name)
@@ -481,7 +499,16 @@ func (p admissibleProfiles) load(ctx context.Context, name string) (access.Profi
 }
 
 func (v *BreakGlassSessionValidator) profiles() admissibleProfiles {
-	return admissibleProfiles{Reader: v.ProfileReader, Scope: v.AllowedTargetNamespaces}
+	return admissibleProfiles{Reader: v.ProfileReader, Placement: v.Placement}
+}
+
+// checkControlNamespace rejects an access object outside the control
+// namespaces before any other policy is evaluated (ADR-004).
+func checkControlNamespace(placement access.Placement, kind, namespace string) error {
+	if !placement.AllowsControl(namespace) {
+		return fmt.Errorf("%s must be created in a control namespace of this manager", kind)
+	}
+	return nil
 }
 
 func validateHumanRequester(user authenticationv1.UserInfo) error {

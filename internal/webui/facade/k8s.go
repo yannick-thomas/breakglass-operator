@@ -38,8 +38,11 @@ var (
 const descriptionAnnotation = "description"
 
 // ProfileDTO is a capability-oriented view of an AccessProfile the person may use.
+// Namespace is the profile's control namespace; it identifies the profile
+// together with Name (ADR-004).
 type ProfileDTO struct {
 	Name            string `json:"name"`
+	Namespace       string `json:"namespace"`
 	TargetNamespace string `json:"targetNamespace"`
 	MaxDuration     string `json:"maxDuration"`
 	DeliveryMode    string `json:"deliveryMode"`
@@ -61,6 +64,7 @@ const (
 type RequestDTO struct {
 	Kind              AccessKind `json:"kind"`
 	Name              string     `json:"name"`
+	Namespace         string     `json:"namespace"`
 	AccessProfile     string     `json:"accessProfile"`
 	TargetNamespace   string     `json:"targetNamespace"`
 	Requester         string     `json:"requester"`
@@ -84,6 +88,7 @@ type RequestDTO struct {
 
 // CreateAccessInput defines user input for requesting access.
 type CreateAccessInput struct {
+	Namespace     string `json:"namespace"`
 	AccessProfile string `json:"accessProfile"`
 	Duration      string `json:"duration"`
 	Reason        string `json:"reason"`
@@ -91,6 +96,7 @@ type CreateAccessInput struct {
 
 // CreateApprovalInput defines approver input for approving or denying a request.
 type CreateApprovalInput struct {
+	Namespace   string `json:"namespace"`
 	RequestName string `json:"requestName"`
 	Decision    string `json:"decision"`
 	Comment     string `json:"comment,omitempty"`
@@ -219,7 +225,7 @@ func (f *K8sFacade) ListProfiles(ctx context.Context, actor Actor) ([]ProfileDTO
 
 	profiles := []ProfileDTO{}
 	for _, p := range profileList.Items {
-		allowed, err := canAccessProfile(ctx, actor, "use", p.Name)
+		allowed, err := canAccessProfile(ctx, actor, "use", p.Namespace, p.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -234,6 +240,7 @@ func (f *K8sFacade) ListProfiles(ctx context.Context, actor Actor) ([]ProfileDTO
 
 		profiles = append(profiles, ProfileDTO{
 			Name:            p.Name,
+			Namespace:       p.Namespace,
 			TargetNamespace: p.Spec.TargetNamespace,
 			MaxDuration:     p.Spec.MaxDuration,
 			DeliveryMode:    string(p.Spec.EffectiveDeliveryMode()),
@@ -244,7 +251,7 @@ func (f *K8sFacade) ListProfiles(ctx context.Context, actor Actor) ([]ProfileDTO
 	}
 
 	slices.SortFunc(profiles, func(a, b ProfileDTO) int {
-		return cmp.Compare(a.Name, b.Name)
+		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Namespace, b.Namespace))
 	})
 	return profiles, nil
 }
@@ -255,15 +262,15 @@ func (f *K8sFacade) ListProfiles(ctx context.Context, actor Actor) ([]ProfileDTO
 // request and remains the only authority on profile use and duration.
 func (f *K8sFacade) CreateAccess(ctx context.Context, actor Actor, input CreateAccessInput) (*RequestDTO, error) {
 	input.Reason = strings.TrimSpace(input.Reason)
-	if input.AccessProfile == "" || input.Duration == "" || input.Reason == "" {
-		return nil, fmt.Errorf("%w: accessProfile, duration and reason are required", ErrInvalidInput)
+	if input.Namespace == "" || input.AccessProfile == "" || input.Duration == "" || input.Reason == "" {
+		return nil, fmt.Errorf("%w: namespace, accessProfile, duration and reason are required", ErrInvalidInput)
 	}
 	if d, err := time.ParseDuration(input.Duration); err != nil || d <= 0 {
 		return nil, fmt.Errorf("%w: duration must be a positive duration such as 30m", ErrInvalidInput)
 	}
 
 	var profile v1alpha1.AccessProfile
-	if err := f.reader.Get(ctx, types.NamespacedName{Name: input.AccessProfile}, &profile); err != nil {
+	if err := f.reader.Get(ctx, types.NamespacedName{Namespace: input.Namespace, Name: input.AccessProfile}, &profile); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, ErrNotFound
 		}
@@ -273,7 +280,7 @@ func (f *K8sFacade) CreateAccess(ctx context.Context, actor Actor, input CreateA
 
 	if profile.Spec.EffectiveDeliveryMode() == v1alpha1.AccessDeliveryModeSelfService {
 		sess := &v1alpha1.BreakGlassSession{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "bgs-"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: profile.Namespace, GenerateName: "bgs-"},
 			Spec: v1alpha1.BreakGlassSessionSpec{
 				AccessProfile: profile.Name,
 				Subject:       subject,
@@ -289,7 +296,7 @@ func (f *K8sFacade) CreateAccess(ctx context.Context, actor Actor, input CreateA
 	}
 
 	req := &v1alpha1.BreakGlassRequest{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "bgr-"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: profile.Namespace, GenerateName: "bgr-"},
 		Spec: v1alpha1.BreakGlassRequestSpec{
 			AccessProfile: profile.Name,
 			Requester:     subject,
@@ -333,7 +340,7 @@ func (f *K8sFacade) ListMine(ctx context.Context, username string) ([]RequestDTO
 			continue
 		}
 		if isOwnSubject(s.Spec.Subject, username) {
-			results = append(results, sessionDTO(s, namespaces[s.Spec.AccessProfile]))
+			results = append(results, sessionDTO(s, namespaces[profileKey(s.Namespace, s.Spec.AccessProfile)]))
 		}
 	}
 	approvalsByRequestUID := make(map[string]*v1alpha1.BreakGlassApproval)
@@ -347,7 +354,7 @@ func (f *K8sFacade) ListMine(ctx context.Context, username string) ([]RequestDTO
 		if !isOwnSubject(r.Spec.Requester, username) {
 			continue
 		}
-		dto := requestDTO(r, namespaces[r.Spec.AccessProfile])
+		dto := requestDTO(r, namespaces[profileKey(r.Namespace, r.Spec.AccessProfile)])
 		if a, ok := approvalsByRequestUID[string(r.UID)]; ok {
 			dto.ApprovalDecision = string(a.Spec.Decision)
 			dto.Approver = a.Spec.Approver.Name
@@ -374,9 +381,9 @@ func (f *K8sFacade) ListMine(ctx context.Context, username string) ([]RequestDTO
 // RevokeSession sets the one-way spec.revoked flag as the signed-in person.
 // A session that does not belong to them is reported as not found, so the
 // endpoint cannot be used to probe for other people's sessions.
-func (f *K8sFacade) RevokeSession(ctx context.Context, actor Actor, sessionName string) error {
+func (f *K8sFacade) RevokeSession(ctx context.Context, actor Actor, namespace, sessionName string) error {
 	var sess v1alpha1.BreakGlassSession
-	if err := f.reader.Get(ctx, types.NamespacedName{Name: sessionName}, &sess); err != nil {
+	if err := f.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sessionName}, &sess); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ErrNotFound
 		}
@@ -423,18 +430,19 @@ func (f *K8sFacade) ListPendingApprovals(ctx context.Context, actor Actor) ([]Re
 		if !isPending(r, now) || isOwnSubject(r.Spec.Requester, actor.Username) {
 			continue
 		}
-		allowed, seen := canApprove[r.Spec.AccessProfile]
+		key := profileKey(r.Namespace, r.Spec.AccessProfile)
+		allowed, seen := canApprove[key]
 		if !seen {
-			allowed, err = canAccessProfile(ctx, actor, "approve", r.Spec.AccessProfile)
+			allowed, err = canAccessProfile(ctx, actor, "approve", r.Namespace, r.Spec.AccessProfile)
 			if err != nil {
 				return nil, err
 			}
-			canApprove[r.Spec.AccessProfile] = allowed
+			canApprove[key] = allowed
 		}
 		if !allowed {
 			continue
 		}
-		dto := requestDTO(r, namespaces[r.Spec.AccessProfile])
+		dto := requestDTO(r, namespaces[key])
 		dto.CanApprove = true
 		results = append(results, dto)
 	}
@@ -460,8 +468,11 @@ func (f *K8sFacade) CreateApproval(ctx context.Context, actor Actor, input Creat
 		return fmt.Errorf("%w: decision must be Approved or Denied", ErrInvalidInput)
 	}
 
+	if input.Namespace == "" || input.RequestName == "" {
+		return fmt.Errorf("%w: namespace and requestName are required", ErrInvalidInput)
+	}
 	var req v1alpha1.BreakGlassRequest
-	if err := f.reader.Get(ctx, types.NamespacedName{Name: input.RequestName}, &req); err != nil {
+	if err := f.reader.Get(ctx, types.NamespacedName{Namespace: input.Namespace, Name: input.RequestName}, &req); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ErrNotFound
 		}
@@ -475,7 +486,7 @@ func (f *K8sFacade) CreateApproval(ctx context.Context, actor Actor, input Creat
 	}
 
 	approval := &v1alpha1.BreakGlassApproval{
-		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ApprovalNameForRequestUID(string(req.UID))},
+		ObjectMeta: metav1.ObjectMeta{Namespace: req.Namespace, Name: v1alpha1.ApprovalNameForRequestUID(string(req.UID))},
 		Spec: v1alpha1.BreakGlassApprovalSpec{
 			RequestRef: v1alpha1.BreakGlassRequestReference{Name: req.Name, UID: string(req.UID)},
 			Decision:   decision,
@@ -489,6 +500,8 @@ func (f *K8sFacade) CreateApproval(ctx context.Context, actor Actor, input Creat
 	return nil
 }
 
+// profileNamespaces maps each profile, keyed by profileKey, to its target
+// namespace.
 func (f *K8sFacade) profileNamespaces(ctx context.Context) (map[string]string, error) {
 	var profileList v1alpha1.AccessProfileList
 	if err := f.reader.List(ctx, &profileList); err != nil {
@@ -496,23 +509,29 @@ func (f *K8sFacade) profileNamespaces(ctx context.Context) (map[string]string, e
 	}
 	namespaces := make(map[string]string, len(profileList.Items))
 	for _, p := range profileList.Items {
-		namespaces[p.Name] = p.Spec.TargetNamespace
+		namespaces[profileKey(p.Namespace, p.Name)] = p.Spec.TargetNamespace
 	}
 	return namespaces, nil
+}
+
+// profileKey identifies a profile across control namespaces.
+func profileKey(namespace, name string) string {
+	return namespace + "/" + name
 }
 
 // canAccessProfile asks the API server, with the person's own credential,
 // whether they hold a profile-scoped custom verb. It mirrors the
 // SubjectAccessReview that admission performs and is purely informative.
-func canAccessProfile(ctx context.Context, actor Actor, verb, profile string) (bool, error) {
+func canAccessProfile(ctx context.Context, actor Actor, verb, namespace, profile string) (bool, error) {
 	review := &authorizationv1.SelfSubjectAccessReview{
 		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Group:    v1alpha1.GroupVersion.Group,
-				Version:  v1alpha1.GroupVersion.Version,
-				Resource: "accessprofiles",
-				Verb:     verb,
-				Name:     profile,
+				Namespace: namespace,
+				Group:     v1alpha1.GroupVersion.Group,
+				Version:   v1alpha1.GroupVersion.Version,
+				Resource:  "accessprofiles",
+				Verb:      verb,
+				Name:      profile,
 			},
 		},
 	}
@@ -549,6 +568,7 @@ func requestDTO(r *v1alpha1.BreakGlassRequest, namespace string) RequestDTO {
 	dto := RequestDTO{
 		Kind:            AccessKindRequest,
 		Name:            r.Name,
+		Namespace:       r.Namespace,
 		AccessProfile:   r.Spec.AccessProfile,
 		TargetNamespace: namespace,
 		Requester:       r.Spec.Requester.Name,
@@ -568,6 +588,7 @@ func sessionDTO(s *v1alpha1.BreakGlassSession, namespace string) RequestDTO {
 	dto := RequestDTO{
 		Kind:            AccessKindSession,
 		Name:            s.Name,
+		Namespace:       s.Namespace,
 		AccessProfile:   s.Spec.AccessProfile,
 		TargetNamespace: namespace,
 		Requester:       s.Spec.Subject.Name,

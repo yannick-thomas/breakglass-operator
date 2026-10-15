@@ -34,8 +34,9 @@ spec:
   deliveryMode: SelfService
 ```
 
-Profiles are cluster-scoped because they are platform policy, but every
-`v1alpha1` grant is a **namespaced RoleBinding**. A referenced `ClusterRole`
+Profiles live in a control namespace, never in the namespace they grant
+access in (ADR-004), and every `v1alpha1` grant is a **namespaced
+RoleBinding**. A referenced `ClusterRole`
 provides reusable rules; it does not create a ClusterRoleBinding.
 
 ## Trust and authorization flow

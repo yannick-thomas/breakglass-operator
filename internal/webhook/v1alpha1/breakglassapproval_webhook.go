@@ -36,7 +36,7 @@ import (
 // ProfileApprovalReviewer performs the profile-scoped authorization decision
 // for an authenticated approver.
 type ProfileApprovalReviewer interface {
-	CanApprove(context.Context, authenticationUserInfo, string) (bool, error)
+	CanApprove(ctx context.Context, user authenticationUserInfo, namespace, profile string) (bool, error)
 }
 
 // authenticationUserInfo aliases the Kubernetes admission identity used by
@@ -50,15 +50,19 @@ type authenticationUserInfo = authenticationv1.UserInfo
 // SetupBreakGlassApprovalWebhookWithManager installs the append-only human
 // approval boundary. The request controller later consumes only an admission-
 // verified approval; it never treats an arbitrary CR as a grant command.
-func SetupBreakGlassApprovalWebhookWithManager(mgr ctrl.Manager, allowedTargetNamespaces map[string]struct{}) error {
+func SetupBreakGlassApprovalWebhookWithManager(mgr ctrl.Manager, placement access.Placement) error {
 	return ctrl.NewWebhookManagedBy(mgr, &accessv1alpha1.BreakGlassApproval{}).
-		WithDefaulter(&BreakGlassApprovalDefaulter{RequestReader: mgr.GetAPIReader(), Metrics: breakglassmetrics.DefaultRecorder}).
+		WithDefaulter(&BreakGlassApprovalDefaulter{
+			RequestReader: mgr.GetAPIReader(),
+			Metrics:       breakglassmetrics.DefaultRecorder,
+			Placement:     placement,
+		}).
 		WithValidator(&BreakGlassApprovalValidator{
-			RequestReader:           mgr.GetAPIReader(),
-			ProfileReader:           mgr.GetAPIReader(),
-			Reviewer:                KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
-			Metrics:                 breakglassmetrics.DefaultRecorder,
-			AllowedTargetNamespaces: allowedTargetNamespaces,
+			RequestReader: mgr.GetAPIReader(),
+			ProfileReader: mgr.GetAPIReader(),
+			Reviewer:      KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+			Metrics:       breakglassmetrics.DefaultRecorder,
+			Placement:     placement,
 		}).
 		Complete()
 }
@@ -67,6 +71,7 @@ func SetupBreakGlassApprovalWebhookWithManager(mgr ctrl.Manager, allowedTargetNa
 type BreakGlassApprovalDefaulter struct {
 	RequestReader client.Reader
 	Metrics       breakglassmetrics.AdmissionRecorder
+	Placement     access.Placement
 }
 
 // Default overwrites the user-controlled approver reference. The validator
@@ -85,6 +90,9 @@ func (d *BreakGlassApprovalDefaulter) Default(ctx context.Context, obj *accessv1
 	if err := validateHumanRequester(req.UserInfo); err != nil {
 		return err
 	}
+	if err := checkControlNamespace(d.Placement, "BreakGlassApproval", obj.Namespace); err != nil {
+		return err
+	}
 	if obj.Spec.RequestRef.Name == "" {
 		return fmt.Errorf("requestRef.name is required")
 	}
@@ -92,7 +100,7 @@ func (d *BreakGlassApprovalDefaulter) Default(ctx context.Context, obj *accessv1
 		return &admissionInternalError{err: fmt.Errorf("BreakGlassRequest reader is not configured")}
 	}
 	request := &accessv1alpha1.BreakGlassRequest{}
-	if err := d.RequestReader.Get(ctx, client.ObjectKey{Name: obj.Spec.RequestRef.Name}, request); err != nil {
+	if err := d.RequestReader.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.RequestRef.Name}, request); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("BreakGlassRequest %q does not exist", obj.Spec.RequestRef.Name)
 		}
@@ -113,12 +121,12 @@ func (d *BreakGlassApprovalDefaulter) Default(ctx context.Context, obj *accessv1
 
 // +kubebuilder:webhook:path=/validate-access-breakglass-io-v1alpha1-breakglassapproval,mutating=false,failurePolicy=fail,sideEffects=None,timeoutSeconds=5,groups=access.breakglass.io,resources=breakglassapprovals,verbs=create;update;delete,versions=v1alpha1,name=vbreakglassapproval-v1alpha1.kb.io,admissionReviewVersions=v1
 type BreakGlassApprovalValidator struct {
-	RequestReader           client.Reader
-	ProfileReader           client.Reader
-	Reviewer                ProfileApprovalReviewer
-	Metrics                 breakglassmetrics.AdmissionRecorder
-	AllowedTargetNamespaces map[string]struct{}
-	Clock                   func() time.Time
+	RequestReader client.Reader
+	ProfileReader client.Reader
+	Reviewer      ProfileApprovalReviewer
+	Metrics       breakglassmetrics.AdmissionRecorder
+	Placement     access.Placement
+	Clock         func() time.Time
 }
 
 func (v *BreakGlassApprovalValidator) ValidateCreate(ctx context.Context, obj *accessv1alpha1.BreakGlassApproval) (warnings admission.Warnings, err error) {
@@ -139,7 +147,10 @@ func (v *BreakGlassApprovalValidator) ValidateCreate(ctx context.Context, obj *a
 	if obj.Spec.Decision != accessv1alpha1.ApprovalDecisionApproved && obj.Spec.Decision != accessv1alpha1.ApprovalDecisionDenied {
 		return nil, fmt.Errorf("decision must be Approved or Denied")
 	}
-	request, err := v.loadPendingRequest(ctx, obj.Spec.RequestRef)
+	if err := checkControlNamespace(v.Placement, "BreakGlassApproval", obj.Namespace); err != nil {
+		return nil, err
+	}
+	request, err := v.loadPendingRequest(ctx, obj.Namespace, obj.Spec.RequestRef)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +160,7 @@ func (v *BreakGlassApprovalValidator) ValidateCreate(ctx context.Context, obj *a
 	if obj.Name != accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)) {
 		return nil, fmt.Errorf("approval name does not match the deterministic slot for this BreakGlassRequest")
 	}
-	profile, _, err := admissibleProfiles{Reader: v.ProfileReader, Scope: v.AllowedTargetNamespaces}.load(ctx, request.Spec.AccessProfile)
+	profile, _, err := admissibleProfiles{Reader: v.ProfileReader, Placement: v.Placement}.load(ctx, obj.Namespace, request.Spec.AccessProfile)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +173,7 @@ func (v *BreakGlassApprovalValidator) ValidateCreate(ctx context.Context, obj *a
 	if v.Reviewer == nil {
 		return nil, apierrors.NewInternalError(fmt.Errorf("SubjectAccessReview reviewer is not configured"))
 	}
-	allowed, err := v.Reviewer.CanApprove(ctx, req.UserInfo, profile.Name)
+	allowed, err := v.Reviewer.CanApprove(ctx, req.UserInfo, profile.Namespace, profile.Name)
 	if err != nil {
 		return nil, apierrors.NewInternalError(fmt.Errorf("evaluate AccessProfile approval authorization: %w", err))
 	}
@@ -182,17 +193,33 @@ func (v *BreakGlassApprovalValidator) ValidateUpdate(_ context.Context, oldObj, 
 	return nil, nil
 }
 
-// ValidateDelete makes decisions append-only. Retention policy may later add a
-// controller-owned archival path; a requester or approver must not be able to
-// erase the object that the controller used for a grant decision.
-func (v *BreakGlassApprovalValidator) ValidateDelete(_ context.Context, _ *accessv1alpha1.BreakGlassApproval) (warnings admission.Warnings, err error) {
+// ValidateDelete makes decisions append-only while their request exists: a
+// requester or approver must not be able to erase the object that the
+// controller used for a grant decision. Once the request is gone, the approval
+// backs no grant, and deleting it lets a control namespace be deleted.
+func (v *BreakGlassApprovalValidator) ValidateDelete(ctx context.Context, obj *accessv1alpha1.BreakGlassApproval) (warnings admission.Warnings, err error) {
 	defer func() {
 		recordAdmissionDecision(v.Metrics, breakglassmetrics.AdmissionOperationUpdate, admissionOutcomeForError(err))
 	}()
-	return nil, fmt.Errorf("BreakGlassApproval is append-only and cannot be deleted")
+	if v.RequestReader == nil {
+		return nil, apierrors.NewInternalError(fmt.Errorf("BreakGlassRequest reader is not configured"))
+	}
+	var request *access.Request
+	stored := &accessv1alpha1.BreakGlassRequest{}
+	switch err := v.RequestReader.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.RequestRef.Name}, stored); {
+	case err == nil:
+		decided := apiconv.ToDomainRequest(stored)
+		request = &decided
+	case !apierrors.IsNotFound(err):
+		return nil, apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for approval deletion: %w", err))
+	}
+	if apiconv.ToDomainApproval(obj).RetainedBy(request) {
+		return nil, fmt.Errorf("BreakGlassApproval is append-only while its BreakGlassRequest exists")
+	}
+	return nil, nil
 }
 
-func (v *BreakGlassApprovalValidator) loadPendingRequest(ctx context.Context, ref accessv1alpha1.BreakGlassRequestReference) (*accessv1alpha1.BreakGlassRequest, error) {
+func (v *BreakGlassApprovalValidator) loadPendingRequest(ctx context.Context, namespace string, ref accessv1alpha1.BreakGlassRequestReference) (*accessv1alpha1.BreakGlassRequest, error) {
 	if ref.Name == "" || ref.UID == "" {
 		return nil, fmt.Errorf("requestRef name and UID are required")
 	}
@@ -200,7 +227,7 @@ func (v *BreakGlassApprovalValidator) loadPendingRequest(ctx context.Context, re
 		return nil, apierrors.NewInternalError(fmt.Errorf("BreakGlassRequest reader is not configured"))
 	}
 	request := &accessv1alpha1.BreakGlassRequest{}
-	if err := v.RequestReader.Get(ctx, client.ObjectKey{Name: ref.Name}, request); err != nil {
+	if err := v.RequestReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, request); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("BreakGlassRequest %q does not exist", ref.Name)
 		}

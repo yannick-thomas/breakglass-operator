@@ -127,6 +127,10 @@ jobs:
       # that weakens this gate.
       - name: Scan source, Kubernetes manifests, and tracked secrets
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # Source charts require an explicit image; this allows Trivy to
+          # render it instead of silently omitting its Kubernetes resources.
+          TRIVY_HELM_SET: image.tag=ci-scan
         with:
           scan-type: fs
           scan-ref: .
@@ -174,10 +178,6 @@ jobs:
           cache-dependency-path: go.sum
       - name: Set up Kind
         uses: ./.github/actions/setup-kind
-      - name: Create default Kind cluster
-        run: make setup-test-e2e
-      - name: Capture default Kind compatibility evidence
-        run: make capture-kind-compatibility-evidence COMPATIBILITY_EVIDENCE_DIR=compatibility-evidence/default
       - name: Run E2E tests
         run: make test-e2e
       - name: Upload default Kind compatibility evidence
@@ -185,7 +185,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: default-kind-compatibility-evidence-${{ github.sha }}
-          path: compatibility-evidence/default
+          path: e2e-artifacts/default
           if-no-files-found: error
           retention-days: 14
 
@@ -208,7 +208,10 @@ jobs:
         run: make verify-helm
       - name: Verify immutable chart packaging
         run: |
-          make package-helm IMG="ghcr.io/${{ github.repository_owner }}/breakglass-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          make package-helm \
+            IMG="ghcr.io/${{ github.repository_owner }}/breakglass-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+            WEBUI_IMG="ghcr.io/${{ github.repository_owner }}/breakglass-webui@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+            SOURCE_REVISION="${GITHUB_SHA}"
           helm lint dist/breakglass-operator-0.1.0.tgz --strict
 
   test-e2e-helm:
@@ -229,6 +232,14 @@ jobs:
       - uses: ./.github/actions/setup-kind
       - name: Run the production lifecycle through Helm
         run: make test-e2e-helm
+      - name: Upload Helm lifecycle evidence and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helm-kind-evidence-${{ github.sha }}
+          path: e2e-artifacts/helm
+          if-no-files-found: error
+          retention-days: 14
 
   test-e2e-production:
     name: Production E2E on Kind workers
@@ -248,10 +259,6 @@ jobs:
           cache-dependency-path: go.sum
       - name: Set up Kind
         uses: ./.github/actions/setup-kind
-      - name: Create production Kind cluster
-        run: make setup-test-e2e-production
-      - name: Capture production Kind compatibility evidence
-        run: make capture-kind-compatibility-evidence KIND_CLUSTER=breakglass-operator-production-e2e COMPATIBILITY_EVIDENCE_DIR=compatibility-evidence/production
       - name: Run production E2E tests
         run: make test-e2e-production
       - name: Upload production Kind compatibility evidence
@@ -259,12 +266,12 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: production-kind-compatibility-evidence-${{ github.sha }}
-          path: compatibility-evidence/production
+          path: e2e-artifacts/production
           if-no-files-found: error
           retention-days: 14
 
   package:
-    name: Publish image and rendered installers
+    name: Publish gated operator, WebUI and installer bundle
     needs: [lint, test, webui-frontend, security, verify-manifests, verify-helm, test-e2e, test-e2e-production, test-e2e-helm]
     # Publishing is deliberately a post-gate action. Pull requests never get a
     # registry token or a Buildx cache write; manual runs are restricted to
@@ -278,6 +285,7 @@ jobs:
       packages: write
     env:
       IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/breakglass-operator
+      WEBUI_IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/breakglass-webui
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -304,14 +312,76 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=breakglass-operator-main
           cache-to: type=gha,mode=max,scope=breakglass-operator-main
       # The image is addressed by its immutable digest, not its mutable tag.
       # Installer artifacts are produced only after this policy gate succeeds.
-      - name: Scan the published manager image
+      - name: Scan the published manager image (amd64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
         with:
           image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.image.outputs.digest }}
+          scanners: vuln,secret
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          hide-progress: "true"
+          timeout: 10m
+      - name: Scan the published manager image (arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.image.outputs.digest }}
+          scanners: vuln,secret
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          hide-progress: "true"
+          timeout: 10m
+      - name: Build and publish the WebUI image
+        id: webui-image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.webui
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.WEBUI_IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=breakglass-webui-main
+          cache-to: type=gha,mode=max,scope=breakglass-webui-main
+      - name: Scan the published WebUI image (amd64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.WEBUI_IMAGE_REPOSITORY }}@${{ steps.webui-image.outputs.digest }}
+          scanners: vuln,secret
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          hide-progress: "true"
+          timeout: 10m
+      - name: Scan the published WebUI image (arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.WEBUI_IMAGE_REPOSITORY }}@${{ steps.webui-image.outputs.digest }}
           scanners: vuln,secret
           vuln-type: os,library
           severity: HIGH,CRITICAL
@@ -347,7 +417,9 @@ jobs:
       - name: Package a chart with the gated image digest
         run: |
           make package-helm IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}" \
-            CHART_VERSION="0.1.0-dev.${GITHUB_SHA:0:12}" CHART_APP_VERSION="sha-${GITHUB_SHA}"
+            WEBUI_IMG="${WEBUI_IMAGE_REPOSITORY}@${{ steps.webui-image.outputs.digest }}" \
+            CHART_VERSION="0.1.0-dev.${GITHUB_SHA:0:12}" CHART_APP_VERSION="sha-${GITHUB_SHA}" SOURCE_REVISION="${GITHUB_SHA}"
+          (cd dist && sha256sum install*.yaml breakglass-operator-*.tgz release.json > SHA256SUMS)
       - name: Upload installer bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

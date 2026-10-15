@@ -77,6 +77,7 @@ spec:
             - --metrics-secure=true
             - --metrics-cert-path=/tmp/k8s-metrics-server/serving-certs
             - {{ printf "--allowed-target-namespaces=%s" (join "," .Values.allowedTargetNamespaces) | quote }}
+            - {{ printf "--control-namespaces=%s" (join "," .Values.controlNamespaces) | quote }}
             - {{ printf "--request-controller-username=system:serviceaccount:%s:%s-controller-manager" .Release.Namespace $name | quote }}
           ports:
             - {name: health, containerPort: 8081, protocol: TCP}

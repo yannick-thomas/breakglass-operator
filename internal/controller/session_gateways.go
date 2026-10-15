@@ -42,15 +42,18 @@ import (
 )
 
 // apiPolicySource reads policy objects. Reader must bypass the informer cache.
+// apiPolicySource reads profiles, requests, and approvals in one control
+// namespace, and curated roles and namespaces cluster-wide.
 type apiPolicySource struct {
-	Reader client.Reader
+	Reader    client.Reader
+	Namespace string
 }
 
 var _ sessionlifecycle.PolicySource = apiPolicySource{}
 
 func (p apiPolicySource) Profile(ctx context.Context, name string) (access.Profile, error) {
 	profile := &accessv1alpha1.AccessProfile{}
-	if err := p.Reader.Get(ctx, client.ObjectKey{Name: name}, profile); err != nil {
+	if err := p.Reader.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: name}, profile); err != nil {
 		return access.Profile{}, apiconv.Classify(err)
 	}
 	return apiconv.ToDomainProfile(profile), nil
@@ -66,7 +69,7 @@ func (p apiPolicySource) Role(ctx context.Context, name string) (access.Role, er
 
 func (p apiPolicySource) Request(ctx context.Context, name string) (access.Request, error) {
 	request := &accessv1alpha1.BreakGlassRequest{}
-	if err := p.Reader.Get(ctx, client.ObjectKey{Name: name}, request); err != nil {
+	if err := p.Reader.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: name}, request); err != nil {
 		return access.Request{}, apiconv.Classify(err)
 	}
 	return apiconv.ToDomainRequest(request), nil
@@ -74,7 +77,7 @@ func (p apiPolicySource) Request(ctx context.Context, name string) (access.Reque
 
 func (p apiPolicySource) Approval(ctx context.Context, name string) (access.Approval, error) {
 	approval := &accessv1alpha1.BreakGlassApproval{}
-	if err := p.Reader.Get(ctx, client.ObjectKey{Name: name}, approval); err != nil {
+	if err := p.Reader.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: name}, approval); err != nil {
 		return access.Approval{}, apiconv.Classify(err)
 	}
 	return apiconv.ToDomainApproval(approval), nil
@@ -123,10 +126,9 @@ var _ sessionlifecycle.BindingGateway = roleBindingGateway{}
 func (g roleBindingGateway) Create(ctx context.Context, draft sessionlifecycle.BindingDraft) (access.Binding, error) {
 	rb := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            draft.Name,
-			Namespace:       draft.Namespace,
-			Labels:          draft.Labels,
-			OwnerReferences: []metav1.OwnerReference{apiconv.SessionControllerOwner(draft.Owner)},
+			Name:      draft.Name,
+			Namespace: draft.Namespace,
+			Labels:    draft.Labels,
 		},
 		RoleRef:  rbacv1.RoleRef{APIGroup: draft.RoleRef.APIGroup, Kind: draft.RoleRef.Kind, Name: draft.RoleRef.Name},
 		Subjects: apiconv.ToAPISubjects(draft.Subjects),

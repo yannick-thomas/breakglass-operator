@@ -18,8 +18,10 @@ jobs:
     permissions:
       contents: write
       packages: write
+      actions: read
     env:
       IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/breakglass-operator
+      WEBUI_IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/breakglass-webui
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -34,6 +36,13 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - uses: ./.github/actions/setup-helm
+      - name: Require successful CI for this exact source revision
+        id: gated-ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&branch=main&per_page=100" \
+            | python3 hack/require-release-ci.py "${GITHUB_SHA}" --github-output "${GITHUB_OUTPUT}"
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
@@ -48,25 +57,35 @@ jobs:
             echo "Release ${GITHUB_REF_NAME} already exists" >&2
             exit 1
           fi
-      - name: Resolve the image built by the gated main CI
-        id: image
+      # A failed rerun can overwrite SHA tags. Only the successful run's
+      # checksummed artifact defines which two image digests may be promoted.
+      - name: Download the exact successful CI bundle
+        id: images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GATED_RUN_ID: ${{ steps.gated-ci.outputs.run_id }}
         run: |
-          digest="$(docker buildx imagetools inspect "${IMAGE_REPOSITORY}:sha-${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
-          case "${digest}" in
-            sha256:*) echo "digest=${digest}" >> "${GITHUB_OUTPUT}" ;;
-            *) echo "Could not resolve a manifest-list digest for the gated source image" >&2; exit 1 ;;
-          esac
-      - name: Promote the exact multi-architecture manifest list
+          gh run download "$GATED_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "breakglass-operator-install-${GITHUB_SHA}" --dir gated-bundle
+          (cd gated-bundle && sha256sum --check SHA256SUMS)
+          python3 hack/read-release-images.py gated-bundle/release.json "$GITHUB_SHA" \
+            --operator-repository "$IMAGE_REPOSITORY" --webui-repository "$WEBUI_IMAGE_REPOSITORY" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Promote the exact gated multi-architecture images
         run: |
           docker buildx imagetools create \
             --tag "${IMAGE_REPOSITORY}:${GITHUB_REF_NAME}" \
-            "${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}"
+            "${IMAGE_REPOSITORY}@${{ steps.images.outputs.operator_digest }}"
+          docker buildx imagetools create \
+            --tag "${WEBUI_IMAGE_REPOSITORY}:${GITHUB_REF_NAME}" \
+            "${WEBUI_IMAGE_REPOSITORY}@${{ steps.images.outputs.webui_digest }}"
       - name: Render digest-pinned installers
         run: |
-          make build-installers IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}"
-          make package-helm IMG="${IMAGE_REPOSITORY}@${{ steps.image.outputs.digest }}" \
-            CHART_VERSION="${GITHUB_REF_NAME#v}" CHART_APP_VERSION="${GITHUB_REF_NAME#v}"
-          sha256sum dist/install*.yaml dist/breakglass-operator-*.tgz > dist/SHA256SUMS
+          make build-installers IMG="${IMAGE_REPOSITORY}@${{ steps.images.outputs.operator_digest }}"
+          make package-helm IMG="${IMAGE_REPOSITORY}@${{ steps.images.outputs.operator_digest }}" \
+            WEBUI_IMG="${WEBUI_IMAGE_REPOSITORY}@${{ steps.images.outputs.webui_digest }}" \
+            CHART_VERSION="${GITHUB_REF_NAME#v}" CHART_APP_VERSION="${GITHUB_REF_NAME#v}" SOURCE_REVISION="${GITHUB_SHA}"
+          (cd dist && sha256sum install*.yaml breakglass-operator-*.tgz release.json > SHA256SUMS)
       - name: Publish the versioned OCI chart
         env:
           HELM_REGISTRY_TOKEN: ${{ github.token }}
@@ -76,4 +95,4 @@ jobs:
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/install*.yaml dist/breakglass-operator-*.tgz dist/SHA256SUMS --generate-notes --title "BreakGlass Operator ${GITHUB_REF_NAME}"
+        run: gh release create "${GITHUB_REF_NAME}" dist/install*.yaml dist/breakglass-operator-*.tgz dist/release.json dist/SHA256SUMS --generate-notes --title "BreakGlass Operator ${GITHUB_REF_NAME}"

@@ -103,36 +103,36 @@ func (r *BreakGlassSessionReconciler) validateSession(session *accessv1alpha1.Br
 }
 
 func (r *BreakGlassSessionReconciler) resolveAccessGrant(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*accessv1alpha1.ResolvedAccess, time.Duration, error) {
-	grant, duration, err := r.lifecycle().ResolveGrant(ctx, apiconv.ToDomainSession(session))
+	grant, duration, err := r.lifecycle(session.Namespace).ResolveGrant(ctx, apiconv.ToDomainSession(session))
 	return apiconv.ToAPIGrant(grant), duration, err
 }
 
 func (r *BreakGlassSessionReconciler) verifyCuratedRole(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*curatedRoleIssue, error) {
-	issue, err := r.lifecycle().VerifyCuratedRole(ctx, apiconv.ToDomainSession(session))
+	issue, err := r.lifecycle(session.Namespace).VerifyCuratedRole(ctx, apiconv.ToDomainSession(session))
 	return fromDomainIssue(issue), err
 }
 
 func (r *BreakGlassSessionReconciler) verifyBindingIntegrity(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*bindingIntegrityIssue, error) {
-	issue, err := r.lifecycle().VerifyBinding(ctx, apiconv.ToDomainSession(session))
+	issue, err := r.lifecycle(session.Namespace).VerifyBinding(ctx, apiconv.ToDomainSession(session))
 	return fromDomainIssue(issue), err
 }
 
 func (r *BreakGlassSessionReconciler) activeRequeueAfter(expiresAt time.Time) time.Duration {
-	return r.lifecycle().RequeueAfter(expiresAt)
+	return r.lifecycle("").RequeueAfter(expiresAt)
 }
 
 func (r *BreakGlassSessionReconciler) namespaceConfirmedAbsent(ctx context.Context, namespace string) bool {
-	return r.lifecycle().NamespaceConfirmedAbsent(ctx, namespace)
+	return r.lifecycle("").NamespaceConfirmedAbsent(ctx, namespace)
 }
 
 func (r *BreakGlassSessionReconciler) ensureReservedBindingReference(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (*accessv1alpha1.BindingReference, error) {
-	ref, err := r.lifecycle().ReserveBinding(ctx, apiconv.ToDomainSession(session))
+	ref, err := r.lifecycle(session.Namespace).ReserveBinding(ctx, apiconv.ToDomainSession(session))
 	return apiconv.ToAPIBindingRef(ref), err
 }
 
 func (r *BreakGlassSessionReconciler) cleanupBindingWithResult(ctx context.Context, session *accessv1alpha1.BreakGlassSession) (bindingCleanupResult, error) {
 	s := apiconv.ToDomainSession(session)
-	result, err := r.lifecycle().CleanupBinding(ctx, s)
+	result, err := r.lifecycle(session.Namespace).CleanupBinding(ctx, s)
 	session.Status.BindingRef = apiconv.ToAPIBindingRef(s.Status.BindingRef)
 	session.Status.BindingName = s.Status.BindingName
 	return bindingCleanupResult{Deleted: result.Deleted, IntegrityIssue: fromDomainIssue(result.Issue)}, err
@@ -164,7 +164,6 @@ func (r *BreakGlassSessionReconciler) ensureBinding(ctx context.Context, session
 		Name:      expected.Name,
 		Namespace: expected.Namespace,
 		Labels:    s.ManagedLabels(),
-		Owner:     access.SessionOwner{Name: s.Name, UID: s.UID},
 		RoleRef:   s.ExpectedRoleRef(),
 		Subjects:  []access.BindingSubject{s.ExpectedSubject()},
 	})

@@ -12,11 +12,13 @@ the chart does not introduce a new supported Kubernetes version range.
 
 ## Installation
 
-Install cert-manager first and create the approved application namespaces. Use a
+Install cert-manager first and create the approved application namespaces and
+the control namespaces that hold AccessProfiles, requests, approvals, and
+sessions (ADR-004). Use a
 unique release name of at most 28 characters; names are derived from the release
 name and namespace, including the controller identity admission trusts. Install
-exactly one operator instance per cluster: the CRDs and reconciliation domain are
-cluster-scoped. Do not install Helm beside an existing Kustomize installation or
+exactly one operator instance per cluster: the CRDs and admission webhooks are
+cluster-wide. Do not install Helm beside an existing Kustomize installation or
 use `--take-ownership` as an unreviewed migration.
 
 Source installs deliberately require an image from successful gated CI or a
@@ -31,6 +33,8 @@ image:
 allowedTargetNamespaces:
   - production
   - payments
+controlNamespaces:
+  - breakglass-access
 curatedClusterRoles:
   - breakglass-pod-observer
   - breakglass-payments-diagnostics-v1
@@ -38,7 +42,7 @@ curatedClusterRoles:
 
 ```bash
 kubectl get crd certificates.cert-manager.io issuers.cert-manager.io
-kubectl get namespace production payments
+kubectl get namespace production payments breakglass-access
 helm upgrade --install breakglass-operator ./charts/breakglass-operator \
   --namespace breakglass-operator-system --create-namespace \
   --values deployment-values.yaml --wait --timeout 5m
@@ -47,7 +51,9 @@ helm upgrade --install breakglass-operator ./charts/breakglass-operator \
 After a versioned release containing this chart has been published, its `.tgz`
 is also available as a GitHub Release asset and at
 `oci://ghcr.io/yannick-thomas/charts/breakglass-operator`. Release packages default
-to the **same image digest** as that release's installer YAMLs:
+to the **same operator digest** as that release's installer YAMLs and the matching
+WebUI digest from the same successful CI run. `release.json` records both images,
+chart/app versions and the exact source commit; `SHA256SUMS` covers the bundle:
 
 ```bash
 helm upgrade --install breakglass-operator \
@@ -69,10 +75,26 @@ curated role name is an RBAC allowlist entry, not an installed role or access gr
 
 ## Configuration and fixed boundaries
 
+Start from the maintained examples:
+
+- [`examples/values-local.yaml`](examples/values-local.yaml): one replica,
+  explicit local image with `pullPolicy: Never`, and WebUI disabled. Build
+  `breakglass-operator:dev` and load it into the disposable Kind cluster before
+  installing. cert-manager, the target namespace and curated policy remain
+  prerequisites. This is not yet the M2 OIDC demo.
+- [`examples/values-production.yaml`](examples/values-production.yaml): HA
+  operator and WebUI via an HTTPS ingress. Replace the example domains and OIDC
+  settings, provision the named Secrets, and use a release package so both image
+  digests are already set. For a source checkout, explicitly supply both images.
+
+Both examples are rendered by the chart contract tests. Do not copy the fake
+CI digests from `ci/` into a real deployment.
+
 | Value | Purpose |
 | --- | --- |
 | `image.repository`, `image.digest` | Immutable operator image; also used by the guard. An explicit `image.tag` is permitted for reviewed development installs; digest and tag are mutually exclusive. |
 | `allowedTargetNamespaces` | Non-empty, unique namespace names. The same set controls manager/guard arguments, namespaced Roles/RoleBindings, and named Namespace observation. |
+| `controlNamespaces` | Non-empty, unique namespace names, disjoint from `allowedTargetNamespaces`. Access objects are admitted only here; the manager and the guard receive their rights on them per namespace. Bind requester, approver, revoker, and auditor roles here with RoleBindings. |
 | `curatedClusterRoles` | Non-empty, unique names; the manager receives `get` and `bind` only on these roles. |
 | `replicaCount`, `availability.*` | Defaults: two replicas, hostname spreading, PDB with one available replica. |
 | `resources`, `nodeSelector`, `tolerations`, `priorityClassName` | Manager/guard scheduling and resource settings. |
@@ -131,6 +153,17 @@ Secret is required. If ingress is disabled, supply a separately reviewed HTTPS
 gateway. Enforce HTTPS redirects at that gateway; a TLS block alone does not
 configure every ingress controller's redirect policy.
 
+Main CI now builds, scans and publishes both `breakglass-operator` and
+`breakglass-webui` images for amd64/arm64 with SBOM/provenance attestations. A tagged
+release uses the successful run's checksummed artifact to select both immutable
+images; a failed rerun cannot substitute an overwritten SHA tag. Enabling WebUI
+in a release package needs no separate image override. Source chart installs
+still require explicit operator/WebUI images.
+
+CI bundles are retained for 30 days. If the successful run's artifact has
+expired, rerun main CI for that exact commit before releasing; the release
+workflow deliberately fails instead of falling back to mutable image tags.
+
 The UI uses one replica and `Recreate` because sessions live in memory. Upgrades
 may require users to log in again; UI removal does not revoke existing grants.
 
@@ -171,12 +204,24 @@ Do not delete the CRDs until retention, finalizers and cleanup have been reviewe
 
 ```bash
 make verify-helm
-make test-e2e-helm             # dedicated Kind cluster with two workers
-make package-helm IMG=<repository>@sha256:<digest> CHART_VERSION=0.1.0
+make test-e2e-helm             # private kubeconfig; dedicated Kind with two workers
+make package-helm IMG=<operator-repository>@sha256:<digest> \
+  WEBUI_IMG=<webui-repository>@sha256:<digest> CHART_VERSION=0.1.0
 ```
 
 `verify-helm` runs strict lint, the **same production-namespaced manifest checks**
 used by Kustomize, multi-namespace/custom-release contract tests, invalid-value
 tests, webhook/RBAC source parity and CRD synchronization. The Helm Kind job runs
 the production failure/lifecycle suite, including an active-grant Helm upgrade.
-Release publication waits for those gates and uses the already gated image.
+Release publication waits for those gates and uses the successful CI artifact's
+image digests. `make verify-helm` also tests release-bundle validation and rendering
+the actual packaged chart with WebUI enabled.
+
+All E2E targets now own their private Kubeconfig. They accept only disposable
+`breakglass-operator-*-e2e` cluster names, export that exact Kind context and do
+not change your normal Kubernetes context. JUnit, test output, cluster diagnostics
+and compatibility evidence are written under `e2e-artifacts/<profile>/` and
+uploaded by CI. On failure the cluster and its temporary kubeconfig are retained
+and the inspection command is printed. On success the cluster is removed unless
+`KEEP_TEST_CLUSTER=true` is set. The suites may still clean up their installed
+resources; retaining a cluster is for diagnosis, not a persistent demo.

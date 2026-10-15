@@ -14,7 +14,7 @@ spec:
     shortNames:
     - bgs
     singular: breakglasssession
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - description: Authenticated requester granted access
@@ -71,8 +71,9 @@ spec:
             properties:
               accessProfile:
                 description: |-
-                  AccessProfile is the fixed, administrator-owned access policy to use.
-                  The requester requires the custom RBAC verb "use" on this named profile.
+                  AccessProfile is the fixed, administrator-owned access policy to use, in
+                  the session's own namespace. The requester requires the custom RBAC verb
+                  "use" on this named profile in that namespace.
                 maxLength: 253
                 minLength: 1
                 type: string

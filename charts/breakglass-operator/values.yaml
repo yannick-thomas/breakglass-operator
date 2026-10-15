@@ -10,6 +10,11 @@ imagePullSecrets: []
 # Application namespaces must already exist. Never grants global RoleBinding CRUD.
 allowedTargetNamespaces:
   - production
+# Namespaces that hold AccessProfiles, requests, approvals, and sessions
+# (ADR-004). They must already exist and must not be target namespaces.
+# Bind requester, approver, and auditor roles here, not cluster-wide.
+controlNamespaces:
+  - breakglass-access
 # Curated roles and AccessProfiles are managed separately through GitOps.
 curatedClusterRoles:
   - breakglass-pod-observer
@@ -54,7 +59,7 @@ expiryGuard:
 
 metrics:
   serviceMonitor:
-    enabled: false
+    enabled: true
     labels: {}
     interval: 30s
     # Existing CA Secret in the release namespace, trusted by the scraper.

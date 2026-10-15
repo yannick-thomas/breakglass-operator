@@ -38,6 +38,15 @@ type fakeSessions struct {
 
 func (f fakeSessions) List(context.Context) ([]access.Session, error) { return f.sessions, f.err }
 
+func (f fakeSessions) Get(_ context.Context, namespace, name string) (access.Session, error) {
+	for _, s := range f.sessions {
+		if s.Namespace == namespace && s.Name == name {
+			return s, nil
+		}
+	}
+	return access.Session{}, port.Mark(port.ErrNotFound, fmt.Errorf("session %s/%s", namespace, name))
+}
+
 type fakeBindings struct {
 	objects   map[string]access.Binding
 	deleteErr error
@@ -49,6 +58,16 @@ func (f *fakeBindings) Get(_ context.Context, namespace, name string) (access.Bi
 		return b, nil
 	}
 	return access.Binding{}, port.Mark(port.ErrNotFound, fmt.Errorf("binding %s", name))
+}
+
+func (f *fakeBindings) ListManaged(_ context.Context, namespace string) ([]access.Binding, error) {
+	var managed []access.Binding
+	for _, b := range f.objects {
+		if b.Labels[access.ManagedByLabelKey] == access.ManagedByLabelValue && (namespace == "" || b.Namespace == namespace) {
+			managed = append(managed, b)
+		}
+	}
+	return managed, nil
 }
 
 func (f *fakeBindings) Delete(_ context.Context, b access.Binding) error {
@@ -179,5 +198,68 @@ func TestSweepFailsWhenSessionsCannotBeListed(t *testing.T) {
 	sw.Sessions = fakeSessions{err: errors.New("unavailable")}
 	if _, err := sw.Sweep(context.Background()); err == nil {
 		t.Fatal("Sweep() error = nil, want error")
+	}
+}
+
+func managedBinding(session access.Session, namespace, name string) access.Binding {
+	return access.Binding{
+		Kind: access.RoleBindingKind, Namespace: namespace, Name: name, UID: "uid-" + name, Version: "3",
+		Labels: session.ManagedLabels(),
+	}
+}
+
+func TestSweepRemovesBindingsOfMissingSessions(t *testing.T) {
+	live := access.Session{Name: "live", Namespace: "breakglass-access", UID: "live-uid"}
+	deleted := access.Session{Name: "deleted", Namespace: "breakglass-access", UID: "deleted-uid"}
+	recreated := access.Session{Name: "live", Namespace: "breakglass-access", UID: "old-uid"}
+
+	bindings := &fakeBindings{objects: map[string]access.Binding{}}
+	for _, b := range []access.Binding{
+		managedBinding(live, "production", "rb-live"),
+		managedBinding(deleted, "production", "rb-deleted"),
+		managedBinding(recreated, "production", "rb-recreated"),
+	} {
+		bindings.objects[b.Namespace+"/"+b.Name] = b
+	}
+
+	report := sweep(t, sweeper([]access.Session{live}, bindings))
+	if len(report.Removed) != 2 || report.Failed() {
+		t.Fatalf("report = %#v, want the two orphaned bindings removed", report)
+	}
+	if _, ok := bindings.objects["production/rb-live"]; !ok || len(bindings.objects) != 1 {
+		t.Fatalf("remaining bindings = %v, want only the live session's binding", bindings.objects)
+	}
+}
+
+func TestSweepReportsManagedBindingWithoutSessionIdentity(t *testing.T) {
+	incomplete := managedBinding(access.Session{Name: "x", UID: "x-uid"}, "production", "rb-x")
+	delete(incomplete.Labels, access.SessionNamespaceLabelKey)
+	bindings := &fakeBindings{objects: map[string]access.Binding{"production/rb-x": incomplete}}
+
+	report := sweep(t, sweeper(nil, bindings))
+	if !report.Failed() || len(bindings.deleted) != 0 {
+		t.Fatalf("report = %#v, deleted = %v, want a refusal and no deletion", report, bindings.deleted)
+	}
+}
+
+func TestSweepLeavesOrphansOutsideScopeAlone(t *testing.T) {
+	orphan := managedBinding(access.Session{Name: "gone", Namespace: "breakglass-access", UID: "gone-uid"}, "kube-system", "rb-gone")
+	bindings := &fakeBindings{objects: map[string]access.Binding{"kube-system/rb-gone": orphan}}
+	sw := sweeper(nil, bindings)
+	sw.Scope = access.NamespaceScope{"production": {}}
+
+	if report := sweep(t, sw); len(report.Removed) != 0 || report.Failed() || len(bindings.deleted) != 0 {
+		t.Fatalf("report = %#v, want nothing outside the allowed namespaces touched", report)
+	}
+}
+
+func TestSweepDryRunKeepsOrphans(t *testing.T) {
+	orphan := managedBinding(access.Session{Name: "gone", Namespace: "breakglass-access", UID: "gone-uid"}, "production", "rb-gone")
+	bindings := &fakeBindings{objects: map[string]access.Binding{"production/rb-gone": orphan}}
+	sw := sweeper(nil, bindings)
+	sw.DryRun = true
+
+	if report := sweep(t, sw); len(report.Removed) != 1 || len(bindings.deleted) != 0 {
+		t.Fatalf("report = %#v, deleted = %v, want planned removal only", report, bindings.deleted)
 	}
 }

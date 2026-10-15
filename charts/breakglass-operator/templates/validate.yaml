@@ -1,5 +1,13 @@
-{{- if or (empty .Values.allowedTargetNamespaces) (empty .Values.curatedClusterRoles) -}}
-{{- fail "allowedTargetNamespaces and curatedClusterRoles must contain explicit names" -}}
+{{- if or (empty .Values.allowedTargetNamespaces) (empty .Values.curatedClusterRoles) (empty .Values.controlNamespaces) -}}
+{{- fail "allowedTargetNamespaces, controlNamespaces, and curatedClusterRoles must contain explicit names" -}}
+{{- end -}}
+{{- range .Values.controlNamespaces -}}
+{{- if or (gt (len .) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .)) -}}
+{{- fail "controlNamespaces must contain valid explicit namespace names" -}}
+{{- end -}}
+{{- if has . $.Values.allowedTargetNamespaces -}}
+{{- fail (printf "namespace %s must not be both a control namespace and an allowed target namespace" .) -}}
+{{- end -}}
 {{- end -}}
 {{- range .Values.allowedTargetNamespaces -}}
 {{- if or (gt (len .) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .)) -}}

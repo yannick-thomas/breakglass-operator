@@ -45,7 +45,7 @@ type Backend interface {
 	ListProfiles(ctx context.Context, actor facade.Actor) ([]facade.ProfileDTO, error)
 	CreateAccess(ctx context.Context, actor facade.Actor, input facade.CreateAccessInput) (*facade.RequestDTO, error)
 	ListMine(ctx context.Context, username string) ([]facade.RequestDTO, error)
-	RevokeSession(ctx context.Context, actor facade.Actor, sessionName string) error
+	RevokeSession(ctx context.Context, actor facade.Actor, namespace, sessionName string) error
 	ListPendingApprovals(ctx context.Context, actor facade.Actor) ([]facade.RequestDTO, error)
 	CreateApproval(ctx context.Context, actor facade.Actor, input facade.CreateApprovalInput) error
 }
@@ -108,7 +108,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /api/v1/profiles", h.withActor(h.handleProfiles))
 	h.mux.HandleFunc("POST /api/v1/requests", h.sameOrigin(h.withActor(h.handleCreateAccess)))
 	h.mux.HandleFunc("GET /api/v1/my-requests", h.withActor(h.handleMyRequests))
-	h.mux.HandleFunc("POST /api/v1/sessions/{name}/revoke", h.sameOrigin(h.withActor(h.handleRevoke)))
+	h.mux.HandleFunc("POST /api/v1/namespaces/{namespace}/sessions/{name}/revoke", h.sameOrigin(h.withActor(h.handleRevoke)))
 	h.mux.HandleFunc("GET /api/v1/approvals/pending", h.withActor(h.handlePendingApprovals))
 	h.mux.HandleFunc("POST /api/v1/approvals", h.sameOrigin(h.withActor(h.handleCreateApproval)))
 
@@ -386,13 +386,13 @@ func (h *Handler) handleMyRequests(w http.ResponseWriter, r *http.Request, sess 
 }
 
 func (h *Handler) handleRevoke(w http.ResponseWriter, r *http.Request, sess *auth.Session, actor facade.Actor) {
-	name := r.PathValue("name")
-	if err := h.backend.RevokeSession(r.Context(), actor, name); err != nil {
+	namespace, name := r.PathValue("namespace"), r.PathValue("name")
+	if err := h.backend.RevokeSession(r.Context(), actor, namespace, name); err != nil {
 		h.writeError(w, sess, "revoke-session", err)
 		return
 	}
-	h.log.Info("Recorded WebUI action", "action", "revoke-session", "outcome", "success", "ref", name)
-	h.jsonResponse(w, map[string]string{"status": "revoked", "session": name}, http.StatusOK)
+	h.log.Info("Recorded WebUI action", "action", "revoke-session", "outcome", "success", "namespace", namespace, "ref", name)
+	h.jsonResponse(w, map[string]string{"status": "revoked", "namespace": namespace, "session": name}, http.StatusOK)
 }
 
 func (h *Handler) handlePendingApprovals(w http.ResponseWriter, r *http.Request, sess *auth.Session, actor facade.Actor) {

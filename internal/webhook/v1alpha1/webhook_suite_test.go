@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -109,7 +110,7 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	err = SetupBreakGlassSessionWebhookWithManager(mgr, nil, "")
+	err = SetupBreakGlassSessionWebhookWithManager(mgr, access.Placement{}, "")
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:webhook

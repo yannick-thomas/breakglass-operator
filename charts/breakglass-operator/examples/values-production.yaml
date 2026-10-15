@@ -1,0 +1,18 @@
+# Use with a published chart: it contains both reviewed image digests.
+# Replace example domains, OIDC details and existing Secret names before use.
+replicaCount: 2
+allowedTargetNamespaces: [production]
+controlNamespaces: [breakglass-access]
+curatedClusterRoles: [breakglass-pod-observer]
+webui:
+  enabled: true
+  publicURL: https://access.example.com
+  oidc:
+    issuerURL: https://idp.example.com/realms/platform
+    clientID: breakglass-webui
+    existingSecret: breakglass-webui-oidc
+    clientSecretKey: client-secret
+  ingress:
+    enabled: true
+    host: access.example.com
+    tlsSecretName: breakglass-webui-tls

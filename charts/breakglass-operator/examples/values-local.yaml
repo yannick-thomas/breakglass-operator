@@ -1,0 +1,15 @@
+# Local images loaded into a disposable Kind cluster. OIDC demo follows in M2.
+image:
+  repository: breakglass-operator
+  tag: dev
+  pullPolicy: Never
+replicaCount: 1
+availability:
+  spreadAcrossHosts: false
+  podDisruptionBudget:
+    enabled: false
+allowedTargetNamespaces: [production]
+controlNamespaces: [breakglass-access]
+curatedClusterRoles: [breakglass-pod-observer]
+webui:
+  enabled: false

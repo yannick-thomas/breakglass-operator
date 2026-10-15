@@ -12,10 +12,14 @@ artifact containing:
 * the selected Kind node and its Docker image metadata; and
 * the exact cert-manager fixture version.
 
+Evidence is collected under `e2e-artifacts/<profile>/compatibility/`, alongside
+JUnit and diagnostics. The Helm suite emits its own evidence artifact and
+qualifies the chart installation/active-grant upgrade path.
+
 The standard suite qualifies admission, certificates, lifecycle, and approval
 behavior. The production suite qualifies the HA overlay, manager/webhook
 outage, certificate reissue, restart continuity, and TTL recovery. A valid
-support tuple requires both suites to pass for the same revision.
+support tuple requires the standard, production and Helm suites to pass for the same revision.
 
 ## Creating the first lock
 

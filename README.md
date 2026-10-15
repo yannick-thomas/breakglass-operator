@@ -329,7 +329,8 @@ The requester supplies neither `requester`, `accessProfileUID` nor
 `requestTTL`; the approver supplies neither request UID nor `approver`. The
 webhooks derive those values from the authenticated Kubernetes identity and
 server state. Do not grant requesters broad `list` or `watch` access to the
-cluster-scoped request resource: it can reveal other incidents. See the
+request resource, even in its control namespace: it can reveal other
+incidents. See the
 [request workflow design](docs/breakglass-request-design.md) and
 [ADR-001](docs/adr-001-single-grant-path.md) for the full trust boundary.
 

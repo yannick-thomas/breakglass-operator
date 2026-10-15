@@ -5,11 +5,14 @@ This is the high-assurance production example for the one target namespace
 then removes global RoleBinding CRUD from the manager's ClusterRole and grants
 that capability only through a namespaced `Role` and `RoleBinding`.
 
-It also passes `--allowed-target-namespaces=production`. The manager caches
-RoleBindings only there, and both admission and reconciliation reject an
-`AccessProfile` whose target namespace is outside that set. This prevents a
-profile author from turning the generic controller identity into a binding
-proxy for another namespace.
+It also passes `--allowed-target-namespaces=production` and
+`--control-namespaces=breakglass-access`. Access objects (profiles, requests,
+approvals, sessions) are accepted only in `breakglass-access`, and both
+admission and reconciliation reject an `AccessProfile` whose target namespace
+is outside the allowed set or is a control namespace (ADR-004). The manager
+caches only these two namespaces. This prevents a profile author from turning
+the generic controller identity into a binding proxy for another namespace.
+Create `breakglass-access` before applying profiles.
 
 Render it with:
 
@@ -23,6 +26,7 @@ manager argument. Keep the argument and every RBAC resource in one reviewed
 GitOps change. Do not merely add the argument: without the corresponding Role
 and RoleBinding, the controller correctly fails closed on binding creation.
 
-The overlay still needs cluster-scoped read/watch access to `AccessProfile` and
-`BreakGlassSession`, plus named-role `bind`, because those are cluster-scoped
-policy and request objects. It does not enable cluster-wide RBAC grants.
+The overlay still grants the manager cluster-wide read/watch access to the
+access objects, plus named-role `bind`; its cache and admission limit it to the
+control namespace. Restricting those rights to the control namespace follows
+with per-tenant RBAC. It does not enable cluster-wide RBAC grants.

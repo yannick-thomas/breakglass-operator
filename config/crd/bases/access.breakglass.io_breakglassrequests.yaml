@@ -14,7 +14,7 @@ spec:
     shortNames:
     - bgr
     singular: breakglassrequest
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - description: Authenticated requester
@@ -58,6 +58,7 @@ spec:
               administrator-managed AccessProfile.
             properties:
               accessProfile:
+                description: AccessProfile names a profile in the request's own namespace.
                 maxLength: 253
                 minLength: 1
                 type: string

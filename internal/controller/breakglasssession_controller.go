@@ -23,7 +23,6 @@ import (
 
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -44,10 +43,11 @@ const (
 	// BreakGlassFinalizer ensures that RBAC bindings are deleted when the session CR is deleted.
 	BreakGlassFinalizer = access.Finalizer
 	// Label keys used for ownership tracking.
-	ManagedByLabelKey   = access.ManagedByLabelKey
-	ManagedByLabelValue = access.ManagedByLabelValue
-	SessionLabelKey     = access.SessionLabelKey
-	SessionUIDLabelKey  = access.SessionUIDLabelKey
+	ManagedByLabelKey        = access.ManagedByLabelKey
+	ManagedByLabelValue      = access.ManagedByLabelValue
+	SessionLabelKey          = access.SessionLabelKey
+	SessionNamespaceLabelKey = access.SessionNamespaceLabelKey
+	SessionUIDLabelKey       = access.SessionUIDLabelKey
 
 	AccessGrantedCondition    = access.ConditionAccessGranted
 	BindingIntegrityCondition = access.ConditionBindingIntegrity
@@ -67,6 +67,10 @@ const (
 	// immutable request they cite. The request UID is verified after retrieval;
 	// the name is only a cache index and never an authorization decision.
 	requestSourceField = ".spec.requestRef.name"
+	// recordedBindingField indexes sessions by the namespace and name of the
+	// binding recorded in their status. It maps a binding event to its
+	// session even after the binding's labels were removed.
+	recordedBindingField = ".status.bindingRef"
 )
 
 // BreakGlassSessionReconciler adapts the session lifecycle use case to
@@ -88,6 +92,9 @@ type BreakGlassSessionReconciler struct {
 	// activate. An empty map preserves the development default; production
 	// overlays set this to the same namespaces granted RoleBinding RBAC.
 	AllowedTargetNamespaces map[string]struct{}
+	// ControlNamespaces optionally restricts the namespaces in which profiles
+	// and sessions may live. It must not overlap AllowedTargetNamespaces.
+	ControlNamespaces map[string]struct{}
 	// IntegrityCheckInterval overrides the periodic active-binding verification
 	// interval. A non-positive value uses DefaultBindingIntegrityCheckInterval.
 	IntegrityCheckInterval time.Duration
@@ -101,17 +108,18 @@ func (r *BreakGlassSessionReconciler) policyReader() client.Reader {
 }
 
 // lifecycle wires the use case to this reconciler's Kubernetes clients.
-func (r *BreakGlassSessionReconciler) lifecycle() *sessionlifecycle.Lifecycle {
+func (r *BreakGlassSessionReconciler) lifecycle(namespace string) *sessionlifecycle.Lifecycle {
 	var telemetry sessionlifecycle.Telemetry
 	if r.Metrics != nil {
 		telemetry = lifecycleTelemetry{recorder: r.Metrics}
 	}
 	return &sessionlifecycle.Lifecycle{
-		Policy:                 apiPolicySource{Reader: r.policyReader()},
+		Policy:                 apiPolicySource{Reader: r.policyReader(), Namespace: namespace},
 		Bindings:               roleBindingGateway{Client: r.Client, Lister: r.policyReader()},
 		Telemetry:              telemetry,
 		MaxSessionDuration:     r.MaxSessionDuration,
 		Scope:                  r.AllowedTargetNamespaces,
+		Control:                r.ControlNamespaces,
 		IntegrityCheckInterval: r.IntegrityCheckInterval,
 	}
 }
@@ -132,7 +140,7 @@ func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	result, err := r.lifecycle().Reconcile(ctx, apiconv.ToDomainSession(obj),
+	result, err := r.lifecycle(obj.Namespace).Reconcile(ctx, apiconv.ToDomainSession(obj),
 		sessionStore{Client: r.Client, Object: obj},
 		sessionEvents{Recorder: r.Recorder, Object: obj})
 	return ctrl.Result{RequeueAfter: result.RequeueAfter}, err
@@ -146,6 +154,9 @@ func (r *BreakGlassSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.BreakGlassSession{}, requestSourceField, requestSourceNameIndex); err != nil {
 		return fmt.Errorf("index BreakGlassSessions by request source: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &accessv1alpha1.BreakGlassSession{}, recordedBindingField, recordedBindingIndex); err != nil {
+		return fmt.Errorf("index BreakGlassSessions by recorded binding: %w", err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
@@ -183,13 +194,17 @@ func (r *BreakGlassSessionReconciler) findSessionForBinding(ctx context.Context,
 	if !ok {
 		return nil
 	}
-	sessionName, sessionUID := bindingSessionHint(rb)
-	if sessionName == "" || sessionUID == "" {
-		return nil
+	claimed, ok := apiconv.ToDomainBinding(rb).ManagedSession()
+	if !ok {
+		// A binding whose labels were removed or forged still belongs to the
+		// session that recorded its location; that session must see the drift
+		// now, not at its next periodic check.
+		return r.sessionsRecordingBinding(ctx, rb)
 	}
+	key := client.ObjectKey{Namespace: claimed.Namespace, Name: claimed.Name}
 
 	session := &accessv1alpha1.BreakGlassSession{}
-	if err := r.Get(ctx, client.ObjectKey{Name: sessionName}, session); err != nil || session.UID != sessionUID {
+	if err := r.Get(ctx, key, session); err != nil || string(session.UID) != claimed.UID {
 		return nil
 	}
 	domainSession := apiconv.ToDomainSession(session)
@@ -200,20 +215,27 @@ func (r *BreakGlassSessionReconciler) findSessionForBinding(ctx context.Context,
 	if !reference.Locates(apiconv.ToDomainBinding(rb)) {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: sessionName}}}
+	return []ctrl.Request{{NamespacedName: key}}
 }
 
-func bindingSessionHint(obj client.Object) (string, types.UID) {
-	for _, owner := range obj.GetOwnerReferences() {
-		if apiconv.IsSessionControllerOwner(owner) && owner.Name != "" && owner.UID != "" {
-			return owner.Name, owner.UID
-		}
+func (r *BreakGlassSessionReconciler) sessionsRecordingBinding(ctx context.Context, rb *rbacv1.RoleBinding) []ctrl.Request {
+	sessions := &accessv1alpha1.BreakGlassSessionList{}
+	if err := r.List(ctx, sessions, client.MatchingFields{recordedBindingField: rb.Namespace + "/" + rb.Name}); err != nil {
+		return nil
 	}
-	labels := obj.GetLabels()
-	if labels[ManagedByLabelKey] == ManagedByLabelValue && labels[SessionLabelKey] != "" && labels[SessionUIDLabelKey] != "" {
-		return labels[SessionLabelKey], types.UID(labels[SessionUIDLabelKey])
+	requests := make([]ctrl.Request, 0, len(sessions.Items))
+	for i := range sessions.Items {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&sessions.Items[i])})
 	}
-	return "", ""
+	return requests
+}
+
+func recordedBindingIndex(obj client.Object) []string {
+	session, ok := obj.(*accessv1alpha1.BreakGlassSession)
+	if !ok || session.Status.BindingRef == nil || session.Status.BindingRef.Name == "" {
+		return nil
+	}
+	return []string{session.Status.BindingRef.Namespace + "/" + session.Status.BindingRef.Name}
 }
 
 func accessProfileNameIndex(obj client.Object) []string {
@@ -237,7 +259,7 @@ func (r *BreakGlassSessionReconciler) findSessionsForAccessProfile(ctx context.C
 	if !ok || profile.Name == "" {
 		return nil
 	}
-	return r.sessionsMatching(ctx, accessProfileField, profile.Name)
+	return r.sessionsMatching(ctx, profile.Namespace, accessProfileField, profile.Name)
 }
 
 func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassRequest(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -245,7 +267,7 @@ func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassRequest(ctx conte
 	if !ok || request.Name == "" {
 		return nil
 	}
-	return r.sessionsMatching(ctx, requestSourceField, request.Name)
+	return r.sessionsMatching(ctx, request.Namespace, requestSourceField, request.Name)
 }
 
 func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassApproval(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -253,12 +275,14 @@ func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassApproval(ctx cont
 	if !ok || approval.Spec.RequestRef.Name == "" {
 		return nil
 	}
-	return r.sessionsMatching(ctx, requestSourceField, approval.Spec.RequestRef.Name)
+	return r.sessionsMatching(ctx, approval.Namespace, requestSourceField, approval.Spec.RequestRef.Name)
 }
 
-func (r *BreakGlassSessionReconciler) sessionsMatching(ctx context.Context, field, value string) []ctrl.Request {
+// sessionsMatching lists the sessions in one namespace whose indexed field
+// has the value. References never cross namespaces.
+func (r *BreakGlassSessionReconciler) sessionsMatching(ctx context.Context, namespace, field, value string) []ctrl.Request {
 	sessions := &accessv1alpha1.BreakGlassSessionList{}
-	if err := r.List(ctx, sessions, client.MatchingFields{field: value}); err != nil {
+	if err := r.List(ctx, sessions, client.InNamespace(namespace), client.MatchingFields{field: value}); err != nil {
 		return nil
 	}
 	requests := make([]ctrl.Request, 0, len(sessions.Items))

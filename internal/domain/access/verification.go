@@ -49,7 +49,7 @@ func ProfileMissing() *Issue {
 
 // ProfileIssue checks the live profile against the session's snapshot. Any
 // deletion, name reuse, or policy change fails closed.
-func (s *Session) ProfileIssue(profile Profile, scope NamespaceScope) *Issue {
+func (s *Session) ProfileIssue(profile Profile, placement Placement) *Issue {
 	grant := s.Status.Grant
 	if profile.UID != grant.AccessProfileUID {
 		return &Issue{Reason: "AccessProfileUIDMismatch", Message: "a different AccessProfile object now uses the recorded profile name"}
@@ -57,8 +57,8 @@ func (s *Session) ProfileIssue(profile Profile, scope NamespaceScope) *Issue {
 	if _, defect := profile.Check(); defect != ProfileValid {
 		return &Issue{Reason: "AccessProfileInvalid", Message: "the active AccessProfile no longer passes semantic validation"}
 	}
-	if !scope.Allows(profile.TargetNamespace) {
-		return &Issue{Reason: "AccessProfileOutOfScope", Message: "the active AccessProfile targets a namespace outside this manager's allowed namespace set"}
+	if placement.CheckProfile(profile) != nil {
+		return &Issue{Reason: "AccessProfileOutOfScope", Message: "the active AccessProfile is outside this manager's control or target namespace set"}
 	}
 	if profile.RoleRef != grant.RoleRef || profile.TargetNamespace != grant.TargetNamespace {
 		return &Issue{Reason: "AccessProfilePolicyDrift", Message: "the AccessProfile policy differs from the resolved session snapshot"}

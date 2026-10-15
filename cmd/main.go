@@ -71,7 +71,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
-	var allowedTargetNamespacesValue string
+	var allowedTargetNamespacesValue, controlNamespacesValue string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -104,6 +104,14 @@ func main() {
 		"allowed-target-namespaces",
 		"",
 		"Comma-separated namespaces in which this manager may grant and watch RoleBindings. "+
+			"Empty permits all namespaces and is for development only.",
+	)
+	flag.StringVar(
+		&controlNamespacesValue,
+		"control-namespaces",
+		"",
+		"Comma-separated namespaces in which AccessProfiles, requests, approvals, and sessions may live. "+
+			"Must not overlap allowed-target-namespaces and is required when that is set. "+
 			"Empty permits all namespaces and is for development only.",
 	)
 	opts := zap.Options{
@@ -187,6 +195,16 @@ func main() {
 		setupLog.Error(err, "Invalid allowed target namespaces")
 		os.Exit(1)
 	}
+	controlNamespaces, err := parseControlNamespaces(controlNamespacesValue)
+	if err != nil {
+		setupLog.Error(err, "Invalid control namespaces")
+		os.Exit(1)
+	}
+	placement := access.Placement{Control: controlNamespaces, Target: allowedTargetNamespaces}
+	if err := placement.Validate(); err != nil {
+		setupLog.Error(err, "Invalid namespace placement")
+		os.Exit(1)
+	}
 	if requestTTL <= 0 {
 		setupLog.Error(fmt.Errorf("request-ttl must be greater than zero"), "Invalid request TTL")
 		os.Exit(1)
@@ -211,9 +229,9 @@ func main() {
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
 	}
-	if len(allowedTargetNamespaces) > 0 {
-		managerOptions.Cache = cache.Options{DefaultNamespaces: make(map[string]cache.Config, len(allowedTargetNamespaces))}
-		for namespace := range allowedTargetNamespaces {
+	if cached := cachedNamespaces(placement); len(cached) > 0 {
+		managerOptions.Cache = cache.Options{DefaultNamespaces: make(map[string]cache.Config, len(cached))}
+		for namespace := range cached {
 			managerOptions.Cache.DefaultNamespaces[namespace] = cache.Config{}
 		}
 	}
@@ -234,6 +252,7 @@ func main() {
 		MaxSessionDuration:      maxSessionDuration,
 		Metrics:                 breakglassmetrics.DefaultRecorder,
 		AllowedTargetNamespaces: allowedTargetNamespaces,
+		ControlNamespaces:       controlNamespaces,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "breakglasssession")
 		os.Exit(1)
@@ -243,6 +262,7 @@ func main() {
 		APIReader:               mgr.GetAPIReader(),
 		Scheme:                  mgr.GetScheme(),
 		AllowedTargetNamespaces: allowedTargetNamespaces,
+		ControlNamespaces:       controlNamespaces,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "accessprofile")
 		os.Exit(1)
@@ -260,18 +280,18 @@ func main() {
 		os.Exit(1)
 	}
 	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(
-		mgr, allowedTargetNamespaces, requestControllerUsername,
+		mgr, placement, requestControllerUsername,
 	); err != nil {
 		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
 		os.Exit(1)
 	}
 	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(
-		mgr, allowedTargetNamespaces, requestTTL,
+		mgr, placement, requestTTL,
 	); err != nil {
 		setupLog.Error(err, "unable to create BreakGlassRequest webhook")
 		os.Exit(1)
 	}
-	if err := webhookv1alpha1.SetupBreakGlassApprovalWebhookWithManager(mgr, allowedTargetNamespaces); err != nil {
+	if err := webhookv1alpha1.SetupBreakGlassApprovalWebhookWithManager(mgr, placement); err != nil {
 		setupLog.Error(err, "unable to create BreakGlassApproval webhook")
 		os.Exit(1)
 	}
@@ -299,4 +319,29 @@ func parseAllowedTargetNamespaces(value string) (map[string]struct{}, error) {
 		return nil, fmt.Errorf("allowed-target-namespaces %w", err)
 	}
 	return scope, nil
+}
+
+func parseControlNamespaces(value string) (map[string]struct{}, error) {
+	scope, err := access.ParseNamespaceScope(value)
+	if err != nil {
+		return nil, fmt.Errorf("control-namespaces %w", err)
+	}
+	return scope, nil
+}
+
+// cachedNamespaces is the union of control and target namespaces, or empty
+// for the all-namespaces development default. Validate guarantees that
+// explicit target namespaces come with explicit control namespaces.
+func cachedNamespaces(placement access.Placement) map[string]struct{} {
+	if !placement.Target.Explicit() {
+		return nil
+	}
+	cached := make(map[string]struct{}, len(placement.Control)+len(placement.Target))
+	for namespace := range placement.Control {
+		cached[namespace] = struct{}{}
+	}
+	for namespace := range placement.Target {
+		cached[namespace] = struct{}{}
+	}
+	return cached
 }

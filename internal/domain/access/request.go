@@ -171,6 +171,15 @@ func (a Approval) DecidesFor(r Request) bool {
 		(a.Decision == DecisionApproved || a.Decision == DecisionDenied)
 }
 
+// RetainedBy reports whether the approval must be kept because the request it
+// decided still exists. request is nil when no request of that name exists.
+// Once the request is gone, no session can be sourced from it and any session
+// it backed is suspended, so the approval no longer protects a grant and may
+// be removed, for example with its control namespace (ADR-004).
+func (a Approval) RetainedBy(request *Request) bool {
+	return request != nil && request.UID == a.RequestRef.UID
+}
+
 // Approves reports whether the approval is an independent approval of the
 // request.
 func (a Approval) Approves(r Request) bool {

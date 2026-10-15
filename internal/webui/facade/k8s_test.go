@@ -34,8 +34,12 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// permissions maps "verb/profile" to the SelfSubjectAccessReview result.
+// permissions maps "verb/profile" to the SelfSubjectAccessReview result for
+// profiles in testNamespace; a review in any other namespace is denied.
 type permissions map[string]bool
+
+// testNamespace is the control namespace of every access object here.
+const testNamespace = "breakglass-access"
 
 // newTestFacade returns a facade acting as userJane, whose reader and actor share one fake API
 // server. The actor client answers SelfSubjectAccessReviews from perms, and
@@ -47,7 +51,7 @@ func newTestFacade(t *testing.T, perms permissions, objs ...client.Object) (*K8s
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if review, ok := obj.(*authorizationv1.SelfSubjectAccessReview); ok {
 				attrs := review.Spec.ResourceAttributes
-				review.Status.Allowed = perms[attrs.Verb+"/"+attrs.Name]
+				review.Status.Allowed = attrs.Namespace == testNamespace && perms[attrs.Verb+"/"+attrs.Name]
 				return nil
 			}
 			return c.Create(ctx, obj, opts...)
@@ -58,7 +62,7 @@ func newTestFacade(t *testing.T, perms permissions, objs ...client.Object) (*K8s
 
 func profile(name string, mode v1alpha1.AccessDeliveryMode) *v1alpha1.AccessProfile {
 	return &v1alpha1.AccessProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name + "-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name, UID: types.UID(name + "-uid")},
 		Spec: v1alpha1.AccessProfileSpec{
 			TargetNamespace: "production",
 			MaxDuration:     "1h",
@@ -73,7 +77,7 @@ func profile(name string, mode v1alpha1.AccessDeliveryMode) *v1alpha1.AccessProf
 
 func request(name, requester, profileName string, phase v1alpha1.RequestPhase) *v1alpha1.BreakGlassRequest {
 	return &v1alpha1.BreakGlassRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name + "-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name, UID: types.UID(name + "-uid")},
 		Spec: v1alpha1.BreakGlassRequestSpec{
 			AccessProfile: profileName,
 			Requester:     v1alpha1.SubjectReference{Kind: v1alpha1.SubjectKindUser, Name: requester},
@@ -86,7 +90,7 @@ func request(name, requester, profileName string, phase v1alpha1.RequestPhase) *
 
 func session(name, subject string, requestRef *v1alpha1.BreakGlassRequestReference) *v1alpha1.BreakGlassSession {
 	return &v1alpha1.BreakGlassSession{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
 		Spec: v1alpha1.BreakGlassSessionSpec{
 			AccessProfile: "observer",
 			Subject:       v1alpha1.SubjectReference{Kind: v1alpha1.SubjectKindUser, Name: subject},
@@ -207,14 +211,14 @@ func TestCreateApproval(t *testing.T) {
 			f, actor, store := newTestFacade(t, nil, tc.request)
 
 			err := f.CreateApproval(context.Background(), actor, CreateApprovalInput{
-				RequestName: "bgr-1", Decision: tc.decision, Comment: "  ok  ",
+				Namespace: testNamespace, RequestName: "bgr-1", Decision: tc.decision, Comment: "  ok  ",
 			})
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("expected %v, got %v", tc.wantErr, err)
 			}
 
 			var approval v1alpha1.BreakGlassApproval
-			getErr := store.Get(context.Background(), types.NamespacedName{Name: v1alpha1.ApprovalNameForRequestUID("bgr-1-uid")}, &approval)
+			getErr := store.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: v1alpha1.ApprovalNameForRequestUID("bgr-1-uid")}, &approval)
 			if tc.wantErr != nil {
 				if getErr == nil {
 					t.Fatal("expected no approval to be written")
@@ -239,7 +243,7 @@ func TestCreateAccess_RoutesByDeliveryMode(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	created, err := f.CreateAccess(ctx, actor, CreateAccessInput{AccessProfile: "observer", Duration: "30m", Reason: " INC-1 "})
+	created, err := f.CreateAccess(ctx, actor, CreateAccessInput{Namespace: testNamespace, AccessProfile: "observer", Duration: "30m", Reason: " INC-1 "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +255,7 @@ func TestCreateAccess_RoutesByDeliveryMode(t *testing.T) {
 		t.Fatalf("expected one written request, got %+v, %v", reqs.Items, err)
 	}
 
-	created, err = f.CreateAccess(ctx, actor, CreateAccessInput{AccessProfile: "self-observer", Duration: "30m", Reason: "INC-1"})
+	created, err = f.CreateAccess(ctx, actor, CreateAccessInput{Namespace: testNamespace, AccessProfile: "self-observer", Duration: "30m", Reason: "INC-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,15 +268,15 @@ func TestCreateAccess_RejectsInvalidInput(t *testing.T) {
 	f, actor, _ := newTestFacade(t, nil, profile("observer", v1alpha1.AccessDeliveryModeApprovalRequired))
 
 	for _, input := range []CreateAccessInput{
-		{AccessProfile: "observer", Duration: "30m", Reason: "   "},
-		{AccessProfile: "observer", Duration: "-5m", Reason: "INC-1"},
-		{AccessProfile: "observer", Duration: "soon", Reason: "INC-1"},
+		{Namespace: testNamespace, AccessProfile: "observer", Duration: "30m", Reason: "   "},
+		{Namespace: testNamespace, AccessProfile: "observer", Duration: "-5m", Reason: "INC-1"},
+		{Namespace: testNamespace, AccessProfile: "observer", Duration: "soon", Reason: "INC-1"},
 	} {
 		if _, err := f.CreateAccess(context.Background(), actor, input); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("expected ErrInvalidInput for %+v, got %v", input, err)
 		}
 	}
-	if _, err := f.CreateAccess(context.Background(), actor, CreateAccessInput{AccessProfile: "missing", Duration: "30m", Reason: "INC-1"}); !errors.Is(err, ErrNotFound) {
+	if _, err := f.CreateAccess(context.Background(), actor, CreateAccessInput{Namespace: testNamespace, AccessProfile: "missing", Duration: "30m", Reason: "INC-1"}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -288,21 +292,21 @@ func TestRevokeSession(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	if err := f.RevokeSession(ctx, actor, "bgs-other"); !errors.Is(err, ErrNotFound) {
+	if err := f.RevokeSession(ctx, actor, testNamespace, "bgs-other"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected another person's session to be reported as not found, got %v", err)
 	}
-	if err := f.RevokeSession(ctx, actor, "bgs-ended"); !errors.Is(err, ErrNotRevocable) {
+	if err := f.RevokeSession(ctx, actor, testNamespace, "bgs-ended"); !errors.Is(err, ErrNotRevocable) {
 		t.Errorf("expected ErrNotRevocable, got %v", err)
 	}
-	if err := f.RevokeSession(ctx, actor, "bgs-own"); err != nil {
+	if err := f.RevokeSession(ctx, actor, testNamespace, "bgs-own"); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 
 	var got v1alpha1.BreakGlassSession
-	if err := store.Get(ctx, types.NamespacedName{Name: "bgs-own"}, &got); err != nil || !got.Spec.Revoked {
+	if err := store.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "bgs-own"}, &got); err != nil || !got.Spec.Revoked {
 		t.Errorf("expected own session to be revoked, got %+v, %v", got.Spec, err)
 	}
-	if err := store.Get(ctx, types.NamespacedName{Name: "bgs-other"}, &got); err != nil || got.Spec.Revoked {
+	if err := store.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "bgs-other"}, &got); err != nil || got.Spec.Revoked {
 		t.Errorf("expected other session to be untouched, got %+v, %v", got.Spec, err)
 	}
 }

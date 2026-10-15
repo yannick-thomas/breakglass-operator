@@ -34,13 +34,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/adapter/apiconv"
 	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	"github.com/yannick-thomas/breakglass-operator/internal/usecase/expirysweep"
 )
 
 const (
-	testNamespace = "production"
-	bindingUID    = "binding-uid"
+	testNamespace    = "production"
+	controlNamespace = "breakglass-access"
+	bindingUID       = "binding-uid"
 )
 
 var now = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
@@ -50,7 +52,7 @@ func TestSweepDeletesExactBindingAfterGrace(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-3*time.Minute))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, New(c))
+	report := sweep(t, New(c, nil))
 
 	if len(report.Removed) != 1 || report.Failed() {
 		t.Fatalf("report = %#v, want one removal and no refusal", report)
@@ -65,7 +67,7 @@ func TestSweepLeavesBindingWithinGrace(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-time.Minute))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, New(c))
+	report := sweep(t, New(c, nil))
 
 	if len(report.Removed) != 0 || report.Failed() {
 		t.Fatalf("report = %#v, want nothing to do", report)
@@ -81,7 +83,7 @@ func TestSweepIgnoresSessionsWithoutExpiry(t *testing.T) {
 	session.Status.ExpiresAt = nil
 	c := newClient(t, session, binding)
 
-	if report := sweep(t, New(c)); len(report.Removed) != 0 || report.Failed() {
+	if report := sweep(t, New(c, nil)); len(report.Removed) != 0 || report.Failed() {
 		t.Fatalf("report = %#v, want nothing to do", report)
 	}
 }
@@ -92,7 +94,7 @@ func TestSweepRefusesReplacementBinding(t *testing.T) {
 	binding.UID = "replacement-uid"
 	c := newClient(t, session, binding)
 
-	report := sweep(t, New(c))
+	report := sweep(t, New(c, nil))
 
 	if !report.Failed() || len(report.Removed) != 0 {
 		t.Fatalf("report = %#v, want refusal", report)
@@ -107,7 +109,7 @@ func TestSweepRefusesNamespaceOutsideAllowList(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-time.Hour))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, withScope(New(c), access.NamespaceScope{"staging": {}}))
+	report := sweep(t, withScope(New(c, nil), access.NamespaceScope{"staging": {}}))
 
 	if !report.Failed() {
 		t.Fatalf("report = %#v, want refusal", report)
@@ -120,7 +122,7 @@ func TestSweepRefusesNamespaceOutsideAllowList(t *testing.T) {
 func TestSweepTreatsMissingBindingAsDone(t *testing.T) {
 	t.Parallel()
 	session, _ := expiredSession("s1", now.Add(-time.Hour))
-	report := sweep(t, New(newClient(t, session)))
+	report := sweep(t, New(newClient(t, session), nil))
 	if len(report.Removed) != 0 || report.Failed() {
 		t.Fatalf("report = %#v, want nothing to do", report)
 	}
@@ -134,7 +136,7 @@ func TestSweepRefusesActiveSessionWithoutBindingIdentity(t *testing.T) {
 	expired.Status.BindingRef = nil
 	expired.Status.Phase = accessv1alpha1.PhaseExpired
 
-	report := sweep(t, New(newClient(t, active, expired)))
+	report := sweep(t, New(newClient(t, active, expired), nil))
 
 	if len(report.Refused) != 1 || report.Refused[0].Session != "active" {
 		t.Fatalf("report = %#v, want one refusal for the active session", report)
@@ -146,7 +148,7 @@ func TestSweepDryRunDeletesNothing(t *testing.T) {
 	session, binding := expiredSession("s1", now.Add(-time.Hour))
 	c := newClient(t, session, binding)
 
-	report := sweep(t, dryRun(New(c)))
+	report := sweep(t, dryRun(New(c, nil)))
 
 	if len(report.Removed) != 1 {
 		t.Fatalf("report = %#v, want one planned removal", report)
@@ -169,7 +171,7 @@ func TestSweepDeletesWithUIDPrecondition(t *testing.T) {
 		},
 	})
 
-	sweep(t, New(c))
+	sweep(t, New(c, nil))
 
 	if preconditions == nil || preconditions.UID == nil || *preconditions.UID != types.UID(bindingUID) {
 		t.Fatalf("delete preconditions = %#v, want recorded UID", preconditions)
@@ -185,7 +187,7 @@ func TestSweepReportsConflictAsRefusal(t *testing.T) {
 		},
 	})
 
-	if report := sweep(t, New(c)); !report.Failed() {
+	if report := sweep(t, New(c, nil)); !report.Failed() {
 		t.Fatalf("report = %#v, want refusal", report)
 	}
 }
@@ -197,7 +199,7 @@ func TestSweepFailsWhenSessionsCannotBeListed(t *testing.T) {
 			return errors.New("unavailable")
 		},
 	})
-	guard := New(c)
+	guard := New(c, nil)
 	guard.Clock = func() time.Time { return now }
 	guard.Log = logr.Discard()
 	if _, err := guard.Sweep(context.Background()); err == nil {
@@ -230,7 +232,7 @@ func expiredSession(name string, expiresAt time.Time) (*accessv1alpha1.BreakGlas
 	expiry := metav1.NewTime(expiresAt)
 	bindingName := "breakglass-" + name
 	session := &accessv1alpha1.BreakGlassSession{
-		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name + "-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: controlNamespace, Name: name, UID: types.UID(name + "-uid")},
 		Status: accessv1alpha1.BreakGlassSessionStatus{
 			Phase:     accessv1alpha1.PhaseActive,
 			ExpiresAt: &expiry,
@@ -240,9 +242,12 @@ func expiredSession(name string, expiresAt time.Time) (*accessv1alpha1.BreakGlas
 		},
 	}
 	binding := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: testNamespace, UID: bindingUID},
-		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "pod-observer"},
-		Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: "oidc:jane@example.com"}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: bindingName, Namespace: testNamespace, UID: bindingUID,
+			Labels: apiconv.ToDomainSession(session).ManagedLabels(),
+		},
+		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "pod-observer"},
+		Subjects: []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: "oidc:jane@example.com"}},
 	}
 	return session, binding
 }
@@ -258,4 +263,64 @@ func newClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
 		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}).Build()
+}
+
+func TestSweepDeletesBindingOfDeletedSession(t *testing.T) {
+	t.Parallel()
+	_, binding := expiredSession("gone", now.Add(time.Hour))
+	c := newClient(t, binding)
+
+	report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}}))
+
+	if len(report.Removed) != 1 || report.Removed[0].Reason != "session no longer exists" || report.Failed() {
+		t.Fatalf("report = %#v, want the orphaned binding removed", report)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(binding), &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("orphaned binding still present: %v", err)
+	}
+}
+
+func TestSweepKeepsBindingOfLiveSession(t *testing.T) {
+	t.Parallel()
+	session, binding := expiredSession("live", now.Add(time.Hour))
+	c := newClient(t, session, binding)
+
+	if report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}})); len(report.Removed) != 0 || report.Failed() {
+		t.Fatalf("report = %#v, want nothing to do", report)
+	}
+}
+
+func TestSweepTreatsSessionOutsideControlNamespacesAsMissing(t *testing.T) {
+	t.Parallel()
+	session, binding := expiredSession("elsewhere", now.Add(time.Hour))
+	session.Namespace = "team-b"
+	binding.Labels = apiconv.ToDomainSession(session).ManagedLabels()
+	c := newClient(t, session, binding)
+
+	report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}}))
+
+	if len(report.Removed) != 1 {
+		t.Fatalf("report = %#v, want the binding of a session outside the control namespaces removed", report)
+	}
+}
+
+func TestSweepListsSessionsOnlyInControlNamespaces(t *testing.T) {
+	t.Parallel()
+	var namespaces []string
+	c := interceptor.NewClient(newClient(t), interceptor.Funcs{
+		List: func(ctx context.Context, next client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*accessv1alpha1.BreakGlassSessionList); ok {
+				options := &client.ListOptions{}
+				options.ApplyOptions(opts)
+				namespaces = append(namespaces, options.Namespace)
+			}
+			return next.List(ctx, list, opts...)
+		},
+	})
+
+	sweep(t, New(c, access.NamespaceScope{"team-b": {}, controlNamespace: {}}))
+
+	if len(namespaces) != 2 || namespaces[0] != controlNamespace || namespaces[1] != "team-b" {
+		t.Fatalf("listed sessions in %q, want exactly the control namespaces", namespaces)
+	}
 }

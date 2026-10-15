@@ -278,10 +278,13 @@ func verifyNamespacedRBACBoundary(objects []unstructured.Unstructured) error {
 	if !found {
 		return fmt.Errorf("manager Deployment must contain a manager container")
 	}
-	if allowedTargetNamespaceArguments(container) == 1 {
-		return nil
+	if allowedTargetNamespaceArguments(container) != 1 {
+		return fmt.Errorf("manager Deployment must restrict allowed target namespaces to production")
 	}
-	return fmt.Errorf("manager Deployment must restrict allowed target namespaces to production")
+	if controlNamespaceArguments(container) != 1 {
+		return fmt.Errorf("manager Deployment must restrict control namespaces to %s", controlNamespace)
+	}
+	return nil
 }
 
 func namedContainer(deployment unstructured.Unstructured, name string) (map[string]any, bool) {
@@ -323,6 +326,25 @@ func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
 		found = true
 	}
 	return found
+}
+
+// controlNamespace holds the access objects in the namespaced profiles
+// (ADR-004).
+const controlNamespace = "breakglass-access"
+
+// controlNamespaceArguments counts the exact control-namespace argument and
+// returns 0 if any other control-namespace argument is present.
+func controlNamespaceArguments(container map[string]any) int {
+	const controlFlag = "--control-namespaces="
+	count := 0
+	for _, arg := range stringValues(container["args"]) {
+		if arg == controlFlag+controlNamespace {
+			count++
+		} else if len(arg) >= len(controlFlag) && arg[:len(controlFlag)] == controlFlag {
+			return 0
+		}
+	}
+	return count
 }
 
 func allowedTargetNamespaceArguments(container map[string]any) int {
@@ -391,7 +413,7 @@ func roleHasNamedClusterRoleBind(role unstructured.Unstructured) bool {
 func roleHasExactRoleBindingVerbs(role unstructured.Unstructured) bool {
 	for _, item := range nestedRules(role) {
 		if containsString(item["resources"], roleBindingRule) {
-			return sameStrings(stringValues(item["verbs"]), []string{"create", verbDelete, verbGet, "list", "update", "watch"})
+			return sameStrings(stringValues(item["verbs"]), []string{"create", verbDelete, verbGet, verbList, "update", "watch"})
 		}
 	}
 	return false

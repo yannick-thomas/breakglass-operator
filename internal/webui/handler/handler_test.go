@@ -47,7 +47,7 @@ func (s *stubBackend) CreateAccess(_ context.Context, a facade.Actor, in facade.
 func (s *stubBackend) ListMine(context.Context, string) ([]facade.RequestDTO, error) {
 	return []facade.RequestDTO{}, nil
 }
-func (s *stubBackend) RevokeSession(context.Context, facade.Actor, string) error { return nil }
+func (s *stubBackend) RevokeSession(context.Context, facade.Actor, string, string) error { return nil }
 func (s *stubBackend) ListPendingApprovals(context.Context, facade.Actor) ([]facade.RequestDTO, error) {
 	return []facade.RequestDTO{}, nil
 }

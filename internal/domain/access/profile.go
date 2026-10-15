@@ -53,9 +53,11 @@ type RoleRef struct {
 	Name string
 }
 
-// Profile is an administrator-owned, immutable access policy.
+// Profile is an administrator-owned, immutable access policy. It lives in a
+// control namespace and grants in exactly one other namespace.
 type Profile struct {
 	Name            string
+	Namespace       string
 	UID             string
 	RoleRef         RoleRef
 	TargetNamespace string
@@ -91,6 +93,7 @@ const (
 	ProfileValid ProfileDefect = iota
 	ProfileRoleRefInvalid
 	ProfileTargetNamespaceMissing
+	ProfileTargetIsControlNamespace
 	ProfileMaxDurationInvalid
 	ProfileDeliveryModeUnsupported
 )
@@ -105,6 +108,9 @@ func (p Profile) Check() (time.Duration, ProfileDefect) {
 	}
 	if p.TargetNamespace == "" {
 		return 0, ProfileTargetNamespaceMissing
+	}
+	if p.TargetNamespace == p.Namespace {
+		return 0, ProfileTargetIsControlNamespace
 	}
 	maxDuration, ok := ParsePositiveDuration(p.MaxDuration)
 	if !ok {
@@ -125,6 +131,8 @@ func (p Profile) DefectError(defect ProfileDefect) error {
 		return fmt.Errorf("AccessProfile %q must reference a curated ClusterRole", p.Name)
 	case ProfileTargetNamespaceMissing:
 		return fmt.Errorf("AccessProfile %q must specify a targetNamespace", p.Name)
+	case ProfileTargetIsControlNamespace:
+		return fmt.Errorf("AccessProfile %q must not grant access in its own namespace", p.Name)
 	case ProfileMaxDurationInvalid:
 		return fmt.Errorf("AccessProfile %q has an invalid positive maxDuration", p.Name)
 	default:
@@ -174,6 +182,55 @@ func ParseNamespaceScope(value string) (NamespaceScope, error) {
 // all-namespaces development default.
 func (s NamespaceScope) Explicit() bool {
 	return len(s) > 0
+}
+
+// Placement separates the control namespaces, which hold access objects, from
+// the target namespaces, in which sessions grant access (ADR-004). A person
+// who can write access objects must never thereby gain a grant location, and a
+// grant must never land where the evidence of other grants is kept.
+type Placement struct {
+	Control NamespaceScope
+	Target  NamespaceScope
+}
+
+// Validate rejects a manager configuration that cannot keep control and
+// target namespaces apart: explicit target namespaces without explicit
+// control namespaces, or a namespace that is both. The all-namespaces
+// development default is checked per profile instead.
+func (p Placement) Validate() error {
+	if p.Target.Explicit() && !p.Control.Explicit() {
+		return errors.New("explicit target namespaces require explicit control namespaces")
+	}
+	if !p.Control.Explicit() || !p.Target.Explicit() {
+		return nil
+	}
+	for namespace := range p.Control {
+		if _, ok := p.Target[namespace]; ok {
+			return fmt.Errorf("namespace %q must not be both a control and a target namespace", namespace)
+		}
+	}
+	return nil
+}
+
+// AllowsControl reports whether access objects may live in the namespace.
+func (p Placement) AllowsControl(namespace string) bool {
+	return namespace != "" && p.Control.Allows(namespace)
+}
+
+// CheckProfile decides whether a profile may be used at all: it must live in
+// a control namespace and grant in an allowed target namespace that is not a
+// control namespace. It returns a denial reason.
+func (p Placement) CheckProfile(profile Profile) error {
+	if !p.AllowsControl(profile.Namespace) {
+		return fmt.Errorf("AccessProfile %q is not in a control namespace of this manager", profile.Name)
+	}
+	if !p.Target.Allows(profile.TargetNamespace) {
+		return fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", profile.Name, profile.TargetNamespace)
+	}
+	if p.Control.Explicit() && p.Control.Allows(profile.TargetNamespace) {
+		return fmt.Errorf("AccessProfile %q targets control namespace %q", profile.Name, profile.TargetNamespace)
+	}
+	return nil
 }
 
 // ParsePositiveDuration parses a Go duration that must be greater than zero.

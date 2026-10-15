@@ -29,6 +29,7 @@ import (
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
 	"github.com/yannick-thomas/breakglass-operator/internal/adapter/apiconv"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	"github.com/yannick-thomas/breakglass-operator/internal/usecase/profilereadiness"
 )
 
@@ -55,6 +56,8 @@ type AccessProfileReconciler struct {
 	// AllowedTargetNamespaces limits the namespaces in which this manager can
 	// create RoleBindings. An empty set is the documented development default.
 	AllowedTargetNamespaces map[string]struct{}
+	// ControlNamespaces limits the namespaces in which profiles are usable.
+	ControlNamespaces map[string]struct{}
 }
 
 func (r *AccessProfileReconciler) policyReader() client.Reader {
@@ -77,7 +80,10 @@ func (r *AccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	evaluator := profilereadiness.Evaluator{Roles: apiPolicySource{Reader: r.policyReader()}, Scope: r.AllowedTargetNamespaces}
+	evaluator := profilereadiness.Evaluator{
+		Roles:     apiPolicySource{Reader: r.policyReader(), Namespace: profile.Namespace},
+		Placement: access.Placement{Control: r.ControlNamespaces, Target: r.AllowedTargetNamespaces},
+	}
 	readiness, err := evaluator.Evaluate(ctx, apiconv.ToDomainProfile(profile))
 	r.setReadyCondition(profile, readiness)
 	if updateErr := r.updateStatusIfChanged(ctx, profile); updateErr != nil {

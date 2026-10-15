@@ -3,7 +3,8 @@
 # It starts from the HA production overlay, removes the manager's cluster-wide
 # RoleBinding CRUD rule, and grants that capability only in `production`.
 # The manager's cache and admission/controller policy are restricted by the
-# matching --allowed-target-namespaces flag below.
+# matching --allowed-target-namespaces flag below. Access objects are accepted
+# only in the control namespace breakglass-access (ADR-004).
 resources:
   - ../production
   - manager-rolebindings-production.yaml
@@ -41,6 +42,9 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/args/-
         value: --allowed-target-namespaces=production
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --control-namespaces=breakglass-access
   # The expiry guard gets the same namespace restriction as the manager.
   - target:
       kind: ClusterRole
@@ -58,3 +62,6 @@ patches:
       - op: add
         path: /spec/jobTemplate/spec/template/spec/containers/0/args/-
         value: --allowed-target-namespaces=production
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/args/-
+        value: --control-namespaces=breakglass-access

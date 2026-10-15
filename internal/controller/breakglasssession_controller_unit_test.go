@@ -313,9 +313,6 @@ func TestCleanupNeverRecoversAnUnrecordedAuthorizingBinding(t *testing.T) {
 		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: clusterRoleKind, Name: "breakglass-pod-observer"},
 		Subjects: []rbacv1.Subject{expectedSubject(session)},
 	}
-	if err := controllerutil.SetControllerReference(session, forged, scheme); err != nil {
-		t.Fatalf("set forged binding owner reference: %v", err)
-	}
 	testClient := newTestClient(scheme, session, forged)
 	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
 
@@ -477,7 +474,7 @@ func TestResolveAccessGrantUsesImmutableProfileSnapshot(t *testing.T) {
 
 	scheme := testScheme(t)
 	profile := &accessv1alpha1.AccessProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", UID: types.UID("profile-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "production-pod-observer", UID: types.UID("profile-uid")},
 		Spec: accessv1alpha1.AccessProfileSpec{
 			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
 			TargetNamespace: "default",
@@ -593,7 +590,7 @@ func TestResolveAccessGrantRejectsProfileOutsideAllowedNamespaces(t *testing.T) 
 
 	scheme := testScheme(t)
 	profile := &accessv1alpha1.AccessProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", UID: types.UID("profile-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "production-pod-observer", UID: types.UID("profile-uid")},
 		Spec: accessv1alpha1.AccessProfileSpec{
 			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
 			TargetNamespace: "production",
@@ -657,8 +654,8 @@ func TestEnsureBindingLabelsAndDeletesOnlyItsOwnBinding(t *testing.T) {
 	if !isManagedBindingForSession(binding, session) {
 		t.Fatalf("created binding labels = %#v, want session ownership labels", binding.Labels)
 	}
-	if len(binding.OwnerReferences) != 1 || binding.OwnerReferences[0].UID != session.UID {
-		t.Fatalf("created binding owner references = %#v, want session UID %s", binding.OwnerReferences, session.UID)
+	if len(binding.OwnerReferences) != 0 {
+		t.Fatalf("created binding owner references = %#v, want none: the session lives in another namespace", binding.OwnerReferences)
 	}
 	if len(binding.Subjects) != 1 || binding.Subjects[0].APIGroup != rbacv1.GroupName {
 		t.Fatalf("created binding subjects = %#v, want canonical User API group %q", binding.Subjects, rbacv1.GroupName)
@@ -686,6 +683,15 @@ func TestBindingLabelRemovalIsDetectedAndExactBindingIsCleanedUp(t *testing.T) {
 
 	if err := reconciler.ensureBinding(context.Background(), session); err != nil {
 		t.Fatalf("ensureBinding() error = %v", err)
+	}
+
+	stored := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), client.ObjectKeyFromObject(session), stored); err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	stored.Status = session.Status
+	if err := testClient.Status().Update(context.Background(), stored); err != nil {
+		t.Fatalf("record binding reference: %v", err)
 	}
 
 	key := types.NamespacedName{Name: bindingName, Namespace: "default"}
@@ -900,11 +906,15 @@ func TestFindSessionsForAccessProfileUsesProfileFieldIndex(t *testing.T) {
 	otherSession.Name = "profile-mismatch"
 	otherSession.UID = types.UID("profile-mismatch-uid")
 	otherSession.Spec.AccessProfile = "staging-pod-observer"
+	// The same profile name in another control namespace is another profile.
+	otherNamespace := testSession()
+	otherNamespace.Namespace = "team-b-access"
+	otherNamespace.UID = types.UID("other-namespace-uid")
 
 	reconciler := &BreakGlassSessionReconciler{
-		Client: newTestClient(testScheme(t), sessionForProfile, otherSession),
+		Client: newTestClient(testScheme(t), sessionForProfile, otherSession, otherNamespace),
 	}
-	profile := &accessv1alpha1.AccessProfile{ObjectMeta: metav1.ObjectMeta{Name: sessionForProfile.Spec.AccessProfile}}
+	profile := &accessv1alpha1.AccessProfile{ObjectMeta: metav1.ObjectMeta{Namespace: sessionForProfile.Namespace, Name: sessionForProfile.Spec.AccessProfile}}
 
 	requests := reconciler.findSessionsForAccessProfile(context.Background(), profile)
 	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(sessionForProfile) {
@@ -973,7 +983,7 @@ func TestFindSessionsForBreakGlassRequestUsesSourceFieldIndex(t *testing.T) {
 	otherSession.Spec.RequestRef = &accessv1alpha1.BreakGlassRequestReference{Name: "other-request", UID: "other-request-uid"}
 	reconciler := &BreakGlassSessionReconciler{Client: newTestClient(scheme, session, otherSession)}
 
-	requests := reconciler.findSessionsForBreakGlassRequest(context.Background(), &accessv1alpha1.BreakGlassRequest{ObjectMeta: metav1.ObjectMeta{Name: "incident-request"}})
+	requests := reconciler.findSessionsForBreakGlassRequest(context.Background(), &accessv1alpha1.BreakGlassRequest{ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "incident-request"}})
 	if len(requests) != 1 || requests[0].Name != session.Name {
 		t.Fatalf("source request watch mapped %#v, want only %q", requests, session.Name)
 	}
@@ -982,7 +992,7 @@ func TestFindSessionsForBreakGlassRequestUsesSourceFieldIndex(t *testing.T) {
 func TestAccessProfileWatchPredicateSkipsStatusOnlyUpdates(t *testing.T) {
 	t.Parallel()
 
-	profile := &accessv1alpha1.AccessProfile{ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", Generation: 1}}
+	profile := &accessv1alpha1.AccessProfile{ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "production-pod-observer", Generation: 1}}
 	profilePredicate := predicate.GenerationChangedPredicate{}
 	if profilePredicate.Update(event.UpdateEvent{ObjectOld: profile, ObjectNew: profile.DeepCopy()}) {
 		t.Fatal("GenerationChangedPredicate accepted a status-only AccessProfile update")
@@ -1008,7 +1018,7 @@ func activationPolicyObjects() (*accessv1alpha1.AccessProfile, *rbacv1.ClusterRo
 		}},
 	}
 	profile := &accessv1alpha1.AccessProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", UID: types.UID("profile-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "production-pod-observer", UID: types.UID("profile-uid")},
 		Spec: accessv1alpha1.AccessProfileSpec{
 			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: role.Name},
 			TargetNamespace: "default",
@@ -1027,9 +1037,13 @@ func hasCondition(conditions []metav1.Condition, conditionType string, status me
 	return false
 }
 
+// testControlNamespace holds the access objects; "default" is the target
+// namespace in which sessions grant access (ADR-004).
+const testControlNamespace = "breakglass-access"
+
 func testSession() *accessv1alpha1.BreakGlassSession {
 	return &accessv1alpha1.BreakGlassSession{
-		ObjectMeta: metav1.ObjectMeta{Name: "incident", UID: types.UID("session-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "incident", UID: types.UID("session-uid")},
 		Spec: accessv1alpha1.BreakGlassSessionSpec{
 			AccessProfile:    "production-pod-observer",
 			AccessProfileUID: "profile-uid",
@@ -1056,6 +1070,7 @@ func testSession() *accessv1alpha1.BreakGlassSession {
 func requestSourceObjects(session *accessv1alpha1.BreakGlassSession) (*accessv1alpha1.BreakGlassRequest, *accessv1alpha1.BreakGlassApproval) {
 	request := &accessv1alpha1.BreakGlassRequest{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         session.Namespace,
 			Name:              session.Spec.RequestRef.Name,
 			UID:               types.UID(session.Spec.RequestRef.UID),
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
@@ -1075,7 +1090,7 @@ func requestSourceObjects(session *accessv1alpha1.BreakGlassSession) (*accessv1a
 		},
 	}
 	approval := &accessv1alpha1.BreakGlassApproval{
-		ObjectMeta: metav1.ObjectMeta{Name: request.Status.ApprovalRef.Name, UID: types.UID(request.Status.ApprovalRef.UID)},
+		ObjectMeta: metav1.ObjectMeta{Namespace: request.Namespace, Name: request.Status.ApprovalRef.Name, UID: types.UID(request.Status.ApprovalRef.UID)},
 		Spec: accessv1alpha1.BreakGlassApprovalSpec{
 			RequestRef: accessv1alpha1.BreakGlassRequestReference{Name: request.Name, UID: string(request.UID)},
 			Decision:   accessv1alpha1.ApprovalDecisionApproved,
@@ -1109,6 +1124,7 @@ func newTestClient(scheme *runtime.Scheme, objects ...client.Object) client.Clie
 		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}, &accessv1alpha1.BreakGlassRequest{}).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, requestSourceField, requestSourceNameIndex).
+		WithIndex(&accessv1alpha1.BreakGlassSession{}, recordedBindingField, recordedBindingIndex).
 		WithObjects(objects...).
 		Build()
 	return interceptor.NewClient(raw, interceptor.Funcs{
@@ -1130,6 +1146,7 @@ func newStatusFailingTestClient(scheme *runtime.Scheme, objects ...client.Object
 		WithStatusSubresource(&accessv1alpha1.BreakGlassSession{}, &accessv1alpha1.AccessProfile{}, &accessv1alpha1.BreakGlassRequest{}).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, accessProfileField, accessProfileNameIndex).
 		WithIndex(&accessv1alpha1.BreakGlassSession{}, requestSourceField, requestSourceNameIndex).
+		WithIndex(&accessv1alpha1.BreakGlassSession{}, recordedBindingField, recordedBindingIndex).
 		WithObjects(objects...).
 		Build()
 	failStatusUpdate := true

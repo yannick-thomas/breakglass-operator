@@ -32,12 +32,15 @@ const (
 	// Finalizer keeps a session until its binding is removed.
 	Finalizer = "access.breakglass.io/finalizer"
 
-	// Labels that corroborate a binding's ownership together with its
-	// controller owner reference.
-	ManagedByLabelKey   = "app.kubernetes.io/managed-by"
-	ManagedByLabelValue = "breakglass-operator"
-	SessionLabelKey     = "access.breakglass.io/session"
-	SessionUIDLabelKey  = "access.breakglass.io/session-uid"
+	// Labels that tie a binding to its session. A session lives in a control
+	// namespace and its binding in a target namespace; Kubernetes forbids
+	// owner references across namespaces, so the labels name the session's
+	// namespace, name, and UID (ADR-004).
+	ManagedByLabelKey        = "app.kubernetes.io/managed-by"
+	ManagedByLabelValue      = "breakglass-operator"
+	SessionLabelKey          = "access.breakglass.io/session"
+	SessionNamespaceLabelKey = "access.breakglass.io/session-namespace"
+	SessionUIDLabelKey       = "access.breakglass.io/session-uid"
 
 	// Binding names include a short digest of the immutable session UID. This
 	// avoids predictable name reuse across delete/recreate cycles while
@@ -79,12 +82,6 @@ type BindingSubject struct {
 	Namespace string
 }
 
-// SessionOwner is a controller owner reference to a BreakGlassSession.
-type SessionOwner struct {
-	Name string
-	UID  string
-}
-
 // Binding is an observed RBAC binding.
 type Binding struct {
 	Kind      string
@@ -92,11 +89,8 @@ type Binding struct {
 	Namespace string
 	UID       string
 	Labels    map[string]string
-	// SessionOwners lists the binding's controller owner references that point
-	// at a BreakGlassSession.
-	SessionOwners []SessionOwner
-	RoleRef       BindingRoleRef
-	Subjects      []BindingSubject
+	RoleRef   BindingRoleRef
+	Subjects  []BindingSubject
 	// Version is an opaque optimistic-concurrency token. A write based on this
 	// observation fails if the object changed since it was read.
 	Version string
@@ -172,26 +166,18 @@ func (s *Session) ExpectedRoleRef() BindingRoleRef {
 // ManagedLabels are the ownership labels of the session's binding.
 func (s *Session) ManagedLabels() map[string]string {
 	return map[string]string{
-		ManagedByLabelKey:  ManagedByLabelValue,
-		SessionLabelKey:    s.Name,
-		SessionUIDLabelKey: s.UID,
+		ManagedByLabelKey:        ManagedByLabelValue,
+		SessionLabelKey:          s.Name,
+		SessionNamespaceLabelKey: s.Namespace,
+		SessionUIDLabelKey:       s.UID,
 	}
 }
 
-// Owns reports whether the binding is corroborated as this session's own by
-// both its controller owner reference and its labels. Once a UID is recorded,
-// the UID remains the authority for safe deletion.
+// Owns reports whether the binding is labelled as this session's own. Labels
+// prove no more than an owner reference did: anyone who may write bindings in
+// the target namespace can set either. Once a UID is recorded, the UID remains
+// the authority for safe deletion.
 func (s *Session) Owns(b Binding) bool {
-	owned := false
-	for _, owner := range b.SessionOwners {
-		if owner.Name == s.Name && owner.UID == s.UID {
-			owned = true
-			break
-		}
-	}
-	if !owned {
-		return false
-	}
 	for key, value := range s.ManagedLabels() {
 		if b.Labels[key] != value {
 			return false
@@ -229,7 +215,7 @@ func (s *Session) checkBindingMetadata(b Binding) *Issue {
 		return BindingReferenceInvalid("the RBAC binding kind, name, or namespace differs from the session record")
 	}
 	if !s.Owns(b) {
-		return &Issue{Code: BindingIssueOwnership, Reason: "BindingOwnershipLost", Message: "the RBAC binding no longer has the expected owner reference and labels"}
+		return &Issue{Code: BindingIssueOwnership, Reason: "BindingOwnershipLost", Message: "the RBAC binding no longer has the expected ownership labels"}
 	}
 	if b.RoleRef != s.ExpectedRoleRef() {
 		return &Issue{Code: BindingIssueRoleRef, Reason: "BindingRoleRefDrift", Message: "the RBAC binding role reference differs from the approved session"}
@@ -242,6 +228,26 @@ func (s *Session) checkBindingMetadata(b Binding) *Issue {
 // recording its UID failed. Such a binding grants nothing.
 func (s *Session) IsUnrecordedReservation(b Binding) bool {
 	return b.Name == BindingName(s.Name, s.UID) && len(b.Subjects) == 0 && s.Owns(b)
+}
+
+// ManagedSessionRef is the session a managed binding claims to belong to.
+type ManagedSessionRef struct {
+	Namespace string
+	Name      string
+	UID       string
+}
+
+// ManagedSession reads the session a binding is labelled for. ok is false
+// unless the binding carries the managed-by label and a complete session
+// identity.
+func (b Binding) ManagedSession() (ManagedSessionRef, bool) {
+	ref := ManagedSessionRef{
+		Namespace: b.Labels[SessionNamespaceLabelKey],
+		Name:      b.Labels[SessionLabelKey],
+		UID:       b.Labels[SessionUIDLabelKey],
+	}
+	ok := b.Labels[ManagedByLabelKey] == ManagedByLabelValue && ref.Namespace != "" && ref.Name != "" && ref.UID != ""
+	return ref, ok
 }
 
 // MayHaveUnrecordedReservation reports whether the session is in the narrow

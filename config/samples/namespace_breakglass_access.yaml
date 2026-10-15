@@ -1,0 +1,7 @@
+# Control namespace for AccessProfiles, requests, approvals, and sessions.
+# Bind the sample requester, approver, revoker, and auditor ClusterRoles here
+# with RoleBindings: they then apply only to this namespace's profiles.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: breakglass-access

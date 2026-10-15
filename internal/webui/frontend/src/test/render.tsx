@@ -13,6 +13,7 @@ export const me: Me = { username: 'oidc:jane@example.com', displayName: 'Jane', 
 export function profile(overrides: Partial<Profile> = {}): Profile {
   return {
     name: 'production-pod-observer-approval',
+    namespace: 'breakglass-access',
     targetNamespace: 'production',
     maxDuration: '1h',
     deliveryMode: 'ApprovalRequired',
@@ -27,6 +28,7 @@ export function entry(overrides: Partial<AccessEntry> = {}): AccessEntry {
   return {
     kind: 'Request',
     name: 'bgr-abc12',
+    namespace: 'breakglass-access',
     accessProfile: 'production-pod-observer-approval',
     targetNamespace: 'production',
     requester: 'oidc:max@example.com',

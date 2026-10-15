@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components';
 import { useAppData } from '../AppContext';
 import { ApiError } from '../api/client';
+import { objectKey } from '../api/objectKey';
 import type { AccessEntry } from '../api/types';
 import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
@@ -41,7 +42,7 @@ export function MyAccess() {
     selectedTab ?? (groups.active.length ? 'active' : groups.open.length ? 'open' : groups.history.length ? 'history' : 'active');
 
   // Keep the dialog in sync with polled data.
-  const current = detail && access.data?.find((e) => e.name === detail.name);
+  const current = detail && access.data?.find((e) => objectKey(e) === objectKey(detail));
 
   return (
     <div className={page.page}>
@@ -89,7 +90,7 @@ export function MyAccess() {
               ) : (
                 <ul className={page.list}>
                   {groups[t.id].map((entry) => (
-                    <li key={entry.name}>
+                    <li key={objectKey(entry)}>
                       <AccessRow
                         entry={entry}
                         now={now}
@@ -275,7 +276,7 @@ export function RevokeDialog({ entry, onClose, onRevoked }: { entry: AccessEntry
     setPending(true);
     setError(undefined);
     try {
-      await api.revokeSession(entry.sessionName);
+      await api.revokeSession(entry.namespace, entry.sessionName);
       notify(`Zugriff ${entry.name} wird beendet.`, 'success');
       onRevoked();
     } catch (err) {

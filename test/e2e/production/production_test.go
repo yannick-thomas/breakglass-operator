@@ -38,6 +38,9 @@ const (
 	managerName      = "breakglass-operator-controller-manager"
 	managerNamespace = "breakglass-operator-system"
 	targetNamespace  = "production"
+	// controlNamespace holds the access objects (ADR-004); it matches the
+	// production overlay and the chart default.
+	controlNamespace = "breakglass-access"
 
 	requesterName        = "production-e2e-requester"
 	requesterRole        = "breakglass-production-e2e-requester"
@@ -112,8 +115,10 @@ var _ = AfterSuite(func() {
 
 var _ = Describe("Production installation", Ordered, func() {
 	BeforeAll(func() {
-		By("creating the target namespace before installing the namespaced production overlay")
+		By("creating the target and control namespaces before installing the namespaced production overlay")
 		_, err := utils.Run(exec.Command("kubectl", "create", "namespace", targetNamespace))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = utils.Run(exec.Command("kubectl", "create", "namespace", controlNamespace))
 		Expect(err).NotTo(HaveOccurred())
 		if usesHelm() {
 			By("installing the chart with CRDs and namespace-restricted high-availability RBAC")
@@ -153,15 +158,15 @@ var _ = Describe("Production installation", Ordered, func() {
 			rollingRestartRecoverySession, namespaceDeletionSessionName, expiryGuardSessionName,
 		} {
 			_, _ = utils.Run(exec.Command(
-				"kubectl", "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
+				"kubectl", "-n", controlNamespace, "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
 			))
 		}
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding", requesterRoleBinding, "--ignore-not-found"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "rolebinding", requesterRoleBinding, "-n", controlNamespace, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command(
 			"kubectl", "delete", "clusterrole", requesterRole, curatedRoleName, "--ignore-not-found",
 		))
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found"))
+		_, _ = utils.Run(exec.Command("kubectl", "-n", controlNamespace, "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, controlNamespace, "--ignore-not-found"))
 		if usesHelm() {
 			helm := os.Getenv("HELM")
 			if helm == "" {
@@ -355,7 +360,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(bindingIsDeleted(bindingName), 6*time.Minute, 5*time.Second).Should(Succeed())
 		Expect(managerIsStopped()).To(Succeed(), "the binding must have been removed while no manager ran")
 		phase, err := utils.Run(exec.Command(
-			"kubectl", "get", "breakglasssession", expiryGuardSessionName, "-o", "jsonpath={.status.phase}",
+			"kubectl", "-n", controlNamespace, "get", "breakglasssession", expiryGuardSessionName, "-o", "jsonpath={.status.phase}",
 		))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(phase).To(Equal("Active"), "no controller may have processed the expiry yet")
@@ -367,7 +372,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(func(g Gomega) {
 			output, err := utils.Run(exec.Command(
-				"kubectl", "get", "breakglasssession", expiryGuardSessionName,
+				"kubectl", "-n", controlNamespace, "get", "breakglasssession", expiryGuardSessionName,
 				"-o", "jsonpath={.status.phase},{.status.conditions[?(@.type=='BindingIntegrity')].reason}",
 			))
 			g.Expect(err).NotTo(HaveOccurred())
@@ -396,7 +401,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		_, err = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, "--wait=false"))
 		Expect(err).NotTo(HaveOccurred())
 		_, err = utils.Run(exec.Command(
-			"kubectl", "delete", "breakglasssession", namespaceDeletionSessionName, "--wait=false",
+			"kubectl", "-n", controlNamespace, "delete", "breakglasssession", namespaceDeletionSessionName, "--wait=false",
 		))
 		Expect(err).NotTo(HaveOccurred())
 
@@ -567,6 +572,7 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
   name: %s
+  namespace: breakglass-access
 spec:
   accessProfile: %s
   duration: %q
@@ -578,7 +584,7 @@ spec:
 func sessionIsActive(name string) func(Gomega) {
 	return func(g Gomega) {
 		output, err := utils.Run(exec.Command(
-			"kubectl", "--as="+requesterName, "get", "breakglasssession", name,
+			"kubectl", "--as="+requesterName, "-n", controlNamespace, "get", "breakglasssession", name,
 			"-o", "jsonpath={.status.phase},{.spec.subject.name},{.status.bindingRef.name}",
 		))
 		g.Expect(err).NotTo(HaveOccurred())
@@ -592,7 +598,7 @@ func sessionIsActive(name string) func(Gomega) {
 
 func sessionHasPhase(name, phase string) func(Gomega) {
 	return func(g Gomega) {
-		output, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.phase}"))
+		output, err := utils.Run(exec.Command("kubectl", "-n", controlNamespace, "get", "breakglasssession", name, "-o", "jsonpath={.status.phase}"))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(output).To(Equal(phase))
 	}
@@ -600,7 +606,7 @@ func sessionHasPhase(name, phase string) func(Gomega) {
 
 func sessionHasPassedExpiry(name string) func(Gomega) {
 	return func(g Gomega) {
-		output, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.expiresAt}"))
+		output, err := utils.Run(exec.Command("kubectl", "-n", controlNamespace, "get", "breakglasssession", name, "-o", "jsonpath={.status.expiresAt}"))
 		g.Expect(err).NotTo(HaveOccurred())
 		expiresAt, err := time.Parse(time.RFC3339, output)
 		g.Expect(err).NotTo(HaveOccurred())
@@ -615,7 +621,7 @@ func sessionBindingName(name string) string {
 
 func sessionBindingReference(name string) (string, string) {
 	output, err := utils.Run(exec.Command(
-		"kubectl", "get", "breakglasssession", name,
+		"kubectl", "-n", controlNamespace, "get", "breakglasssession", name,
 		"-o", "jsonpath={.status.bindingRef.name},{.status.bindingRef.uid}",
 	))
 	Expect(err).NotTo(HaveOccurred())
@@ -638,7 +644,7 @@ func roleBindingUID(name string) string {
 func sessionIsSuspendedForCuratedRole(name, reason string) func(Gomega) {
 	return func(g Gomega) {
 		output, err := utils.Run(exec.Command(
-			"kubectl", "get", "breakglasssession", name,
+			"kubectl", "-n", controlNamespace, "get", "breakglasssession", name,
 			"-o", "jsonpath={.status.phase},{.status.conditions[?(@.type=='CuratedRoleValid')].reason}",
 		))
 		g.Expect(err).NotTo(HaveOccurred())
@@ -669,7 +675,7 @@ func bindingIsDeleted(name string) func(Gomega) {
 
 func sessionIsDeleted(name string) func(Gomega) {
 	return func(g Gomega) {
-		_, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name))
+		_, err := utils.Run(exec.Command("kubectl", "-n", controlNamespace, "get", "breakglasssession", name))
 		g.Expect(err).To(HaveOccurred())
 	}
 }
@@ -690,11 +696,11 @@ func resetCuratedRole() {
 
 func revokeSession(name string) {
 	_, err := utils.Run(exec.Command(
-		"kubectl", "patch", "breakglasssession", name, "--type=merge", "-p", `{"spec":{"revoked":true}}`,
+		"kubectl", "-n", controlNamespace, "patch", "breakglasssession", name, "--type=merge", "-p", `{"spec":{"revoked":true}}`,
 	))
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(func(g Gomega) {
-		output, err := utils.Run(exec.Command("kubectl", "get", "breakglasssession", name, "-o", "jsonpath={.status.phase}"))
+		output, err := utils.Run(exec.Command("kubectl", "-n", controlNamespace, "get", "breakglasssession", name, "-o", "jsonpath={.status.phase}"))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(output).To(Equal("Revoked"))
 	}, 2*time.Minute, time.Second).Should(Succeed())
@@ -727,9 +733,10 @@ rules:
     verbs: ["use"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: breakglass-production-e2e-requester-binding
+  namespace: breakglass-access
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

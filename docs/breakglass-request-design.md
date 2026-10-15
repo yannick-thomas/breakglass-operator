@@ -60,6 +60,8 @@ delivery mode per immutable `AccessProfile`:
   use profile-specific `use` and `approve` authorizations, and fail closed on
   stale profile/request data or an expired immutable request deadline.
 * Each request UID has exactly one deterministic, append-only approval slot.
+  The approval may be deleted only once its request no longer exists; then it
+  backs no grant, and its control namespace can be deleted (ADR-004).
   Simultaneous approve/deny attempts become a Kubernetes create conflict,
   rather than an ambiguous controller choice.
 * Only the exact configured request-controller ServiceAccount can create the
@@ -78,7 +80,7 @@ that turns it into a namespaced RBAC grant.
 
 * Requesters receive `create` on requests and custom `use` on named
   `ApprovalRequired` profiles. They do **not** need `list` or `watch` on the
-  cluster-scoped request resource.
+  request resource in the control namespace.
 * Approvers receive `create` only on approvals and custom `approve` on named
   profiles. They do **not** receive session or RoleBinding permissions.
 * The controller receives the sole permission to create a session sourced

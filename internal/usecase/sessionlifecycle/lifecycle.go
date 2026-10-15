@@ -54,11 +54,18 @@ type Lifecycle struct {
 	MaxSessionDuration time.Duration
 	// Scope restricts the namespaces in which access may be granted.
 	Scope access.NamespaceScope
+	// Control restricts the namespaces in which profiles and sessions may
+	// live. It must be disjoint from Scope when both are explicit.
+	Control access.NamespaceScope
 	// IntegrityCheckInterval overrides DefaultIntegrityCheckInterval when
 	// positive.
 	IntegrityCheckInterval time.Duration
 	// Clock is optional; it defaults to time.Now.
 	Clock func() time.Time
+}
+
+func (l *Lifecycle) placement() access.Placement {
+	return access.Placement{Control: l.Control, Target: l.Scope}
 }
 
 // Result tells the caller when to reconcile the session again. A zero value

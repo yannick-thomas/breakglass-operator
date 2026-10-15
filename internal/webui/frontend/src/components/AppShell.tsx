@@ -45,15 +45,15 @@ export function AppShell({
   children,
 }: AppShellProps) {
   const mainRef = useRef<HTMLElement>(null);
-  const firstRender = useRef(true);
+  const previousRoute = useRef(route);
 
   // Move focus to the new view's heading so keyboard and screen-reader users
   // land on the content after navigating, as on a page load.
   useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false;
-      return;
-    }
+    // StrictMode replays mount effects. Only an actual route change should
+    // move focus; initial loads must leave the skip link first in tab order.
+    if (previousRoute.current === route) return;
+    previousRoute.current = route;
     mainRef.current?.querySelector<HTMLElement>('h1')?.focus();
   }, [route]);
 

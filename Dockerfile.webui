@@ -1,6 +1,8 @@
 # Build the React frontend. Install scripts stay disabled: no dependency needs
 # one, and this keeps a compromised package from running code at build time.
-FROM node:24-alpine AS frontend
+ARG NODE_IMAGE=node:24-alpine
+ARG BASE_IMAGE=golang:1.26
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS frontend
 WORKDIR /frontend
 COPY internal/webui/frontend/package.json internal/webui/frontend/package-lock.json ./
 RUN npm ci --ignore-scripts --no-fund --no-audit
@@ -8,7 +10,7 @@ COPY internal/webui/frontend/ ./
 RUN npm run build
 
 # Build the WebUI binary with the frontend embedded
-FROM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

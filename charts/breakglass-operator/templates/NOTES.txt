@@ -6,6 +6,7 @@ Before granting requester permissions:
   kubectl get validatingwebhookconfiguration {{ include "breakglass.fullname" . }}-validating-webhook-configuration
 
 Allowed target namespaces: {{ join ", " .Values.allowedTargetNamespaces }}
+Control namespaces (AccessProfiles, requests, sessions): {{ join ", " .Values.controlNamespaces }}
 Curated roles: {{ join ", " .Values.curatedClusterRoles }}
 
 The chart does not create application namespaces, profiles, curated roles or

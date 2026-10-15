@@ -300,7 +300,7 @@ Das schließt an die vorhandene Authentifizierungsgrenze an: Admission übernimm
 
 ### Das offene P0-Thema: private Listen und Inboxes
 
-Die neue `BreakGlassRequest`-CRD ist cluster-scoped und enthält Requester, Profil, Dauer und Grund. [Request API](/Users/yannickchristianthomas/Documents/Codex/2026-09-25/referenced-chatgpt-conversation-this-is-an/work/breakglass-operator/api/v1alpha1/breakglassrequest_types.go:10) Kubernetes RBAC kann nicht ausdrücken: „Liste nur Objekte, deren `spec.requester.name` meiner Identität entspricht.“
+Die `BreakGlassRequest`-CRD liegt in einem Steuer-Namespace (ADR-004) und enthält Requester, Profil, Dauer und Grund. [Request API](/Users/yannickchristianthomas/Documents/Codex/2026-09-25/referenced-chatgpt-conversation-this-is-an/work/breakglass-operator/api/v1alpha1/breakglassrequest_types.go:10) Kubernetes RBAC kann nicht ausdrücken: „Liste nur Objekte, deren `spec.requester.name` meiner Identität entspricht.“
 
 Daher dürfen wir **nicht** einfach `list/get/watch` an alle Requester oder Approver vergeben. Das wiederholt genau den bereits dokumentierten Schutzbedarf für Identität und Incident-Gründe. [Threat Model](/Users/yannickchristianthomas/Documents/Codex/2026-09-25/referenced-chatgpt-conversation-this-is-an/work/breakglass-operator/docs/threat-model.md:9), [Security Review SR-05](/Users/yannickchristianthomas/Documents/Codex/2026-09-25/referenced-chatgpt-conversation-this-is-an/work/breakglass-operator/docs/security-review.md:74)
 

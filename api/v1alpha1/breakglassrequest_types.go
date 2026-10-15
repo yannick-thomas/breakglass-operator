@@ -13,6 +13,7 @@ import (
 // administrator-managed AccessProfile.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="BreakGlassRequest spec is immutable"
 type BreakGlassRequestSpec struct {
+	// AccessProfile names a profile in the request's own namespace.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
@@ -114,7 +115,7 @@ type BreakGlassRequestStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=bgr
+// +kubebuilder:resource:scope=Namespaced,shortName=bgr
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Requester",type="string",JSONPath=".spec.requester.name",description="Authenticated requester"
 // +kubebuilder:printcolumn:name="Profile",type="string",JSONPath=".spec.accessProfile",description="Requested profile"

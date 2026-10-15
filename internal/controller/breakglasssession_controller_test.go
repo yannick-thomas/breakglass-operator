@@ -21,9 +21,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,10 +40,14 @@ var _ = Describe("BreakGlassSession Controller", func() {
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
-			Name: resourceName,
+			Namespace: testControlNamespace,
+			Name:      resourceName,
 		}
 
 		BeforeEach(func() {
+			control := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testControlNamespace}}
+			Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, control))).To(Succeed())
+
 			role := &rbacv1.ClusterRole{
 				ObjectMeta: metav1.ObjectMeta{Name: "breakglass-pod-observer"},
 				Rules: []rbacv1.PolicyRule{{
@@ -56,22 +62,23 @@ var _ = Describe("BreakGlassSession Controller", func() {
 			}
 
 			profile := &accessv1alpha1.AccessProfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "production-pod-observer"},
 				Spec: accessv1alpha1.AccessProfileSpec{
 					RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
 					TargetNamespace: "default",
 					MaxDuration:     "30m",
 				},
 			}
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: profile.Name}, &accessv1alpha1.AccessProfile{})
+			err = k8sClient.Get(ctx, client.ObjectKeyFromObject(profile), &accessv1alpha1.AccessProfile{})
 			if err != nil && errors.IsNotFound(err) {
 				Expect(k8sClient.Create(ctx, profile)).To(Succeed())
 			}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: profile.Name}, profile)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(profile), profile)).To(Succeed())
 
 			session := &accessv1alpha1.BreakGlassSession{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: resourceName,
+					Namespace: testControlNamespace,
+					Name:      resourceName,
 				},
 				Spec: accessv1alpha1.BreakGlassSessionSpec{
 					AccessProfile:    profile.Name,
@@ -147,11 +154,10 @@ var _ = Describe("BreakGlassSession Controller", func() {
 				Namespace: updatedSession.Status.Grant.TargetNamespace,
 			}, binding)).To(Succeed())
 			Expect(binding.Labels).To(HaveKeyWithValue(SessionUIDLabelKey, string(updatedSession.UID)))
-			Expect(binding.OwnerReferences).To(HaveLen(1))
-			owner := binding.OwnerReferences[0]
-			Expect(owner.UID).To(Equal(updatedSession.UID))
-			Expect(owner.Controller).NotTo(BeNil())
-			Expect(*owner.Controller).To(BeTrue())
+			Expect(binding.Labels).To(HaveKeyWithValue(SessionNamespaceLabelKey, testControlNamespace))
+			// A session in a control namespace cannot own a binding in a target
+			// namespace; the API server would garbage-collect it (ADR-004).
+			Expect(binding.OwnerReferences).To(BeEmpty())
 			Expect(updatedSession.Status.BindingRef.UID).To(Equal(string(binding.UID)))
 		})
 	})
