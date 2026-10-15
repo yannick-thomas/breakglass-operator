@@ -137,6 +137,7 @@ test('shows the live situation and follows changes made elsewhere', async ({ pag
 
 test('is operable with the keyboard alone', async ({ page }) => {
   await page.goto('/#/request');
+  await expect(page.getByRole('heading', { level: 1, name: 'Zugriff anfordern' })).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Zum Inhalt springen' })).toBeFocused();
 
