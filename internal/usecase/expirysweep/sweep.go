@@ -27,8 +27,14 @@ limitations under the License.
 // A session lives in a control namespace and its binding in a target
 // namespace, so no owner reference lets the garbage collector remove a
 // binding whose session is gone (ADR-004). The sweep therefore also deletes
-// managed bindings whose labelled session no longer exists. Such a binding
-// cannot be the recorded binding of any live session.
+// managed bindings whose labelled session no longer exists in its control
+// namespace. Such a binding cannot be the recorded binding of any live
+// session. A binding labelled for a session outside the control namespaces is
+// reported, never touched: the sweep cannot read that session, and the
+// guard's control namespaces may simply have drifted from the manager's. A
+// managed binding without a complete session identity is ignored: it proves
+// nothing about any session, and anyone able to create RoleBindings in a
+// target namespace can create one.
 package expirysweep
 
 import (
@@ -50,9 +56,9 @@ const DefaultGrace = 2 * time.Minute
 
 // SessionSource reads sessions as stored by the API server.
 type SessionSource interface {
+	// List lists the sessions in the control namespaces, or in all
+	// namespaces when none are configured.
 	List(ctx context.Context) ([]access.Session, error)
-	// Get returns port.ErrNotFound if the session does not exist.
-	Get(ctx context.Context, namespace, name string) (access.Session, error)
 }
 
 // BindingGateway reads and deletes bindings.
@@ -75,8 +81,9 @@ type Sweeper struct {
 	Grace time.Duration
 	// Scope restricts the namespaces the sweep acts in.
 	Scope access.NamespaceScope
-	// Control is the set of namespaces in which sessions may exist. A binding
-	// labelled for a session elsewhere cannot belong to a live session.
+	// Control is the set of namespaces in which sessions may exist. It must
+	// match the namespaces Sessions lists. A binding labelled for a session
+	// elsewhere is refused, never deleted.
 	Control access.NamespaceScope
 	// DryRun reports what would be removed without deleting anything.
 	DryRun bool
@@ -97,9 +104,15 @@ type Report struct {
 	// Removed lists bindings deleted (or, in dry-run mode, due for deletion),
 	// both of expired sessions and of sessions that no longer exist.
 	Removed []Finding
-	// Refused lists expired sessions whose binding could not be proven to be
-	// the recorded one. They need a human; the sweep never resolves them.
+	// Refused lists bindings that could not be proven to be removable. They
+	// need a human; the sweep never resolves them.
 	Refused []Finding
+	// Ignored lists managed bindings without a complete session identity.
+	// They are not counted as failures: such a binding claims no session the
+	// sweep could check, and a namespace admin in a target namespace can
+	// create one at will, so failing on it would let anyone there keep the
+	// guard failing on every run and bury real refusals in noise.
+	Ignored []Finding
 }
 
 // Failed reports whether the sweep left anything for a human to look at.
@@ -107,9 +120,20 @@ func (r Report) Failed() bool {
 	return len(r.Refused) > 0
 }
 
-// Sweep inspects every session once. It returns an error only when it could
-// not complete; per-session problems are collected in the report.
+// Sweep inspects every session and every managed binding in scope once. It
+// returns an error only when it could not complete; per-binding problems are
+// collected in the report.
 func (s *Sweeper) Sweep(ctx context.Context) (Report, error) {
+	// Managed bindings are listed before sessions. The controller creates a
+	// session before its binding, so every binding seen here has its session
+	// visible in the later session list, and a session created in between
+	// cannot make its brand-new binding look orphaned. Listing sessions first
+	// would open exactly that window. The same session list serves the expiry
+	// part, for which the order does not matter.
+	managed, err := s.listManaged(ctx)
+	if err != nil {
+		return Report{}, err
+	}
 	sessions, err := s.Sessions.List(ctx)
 	if err != nil {
 		return Report{}, fmt.Errorf("list BreakGlassSessions: %w", err)
@@ -118,8 +142,10 @@ func (s *Sweeper) Sweep(ctx context.Context) (Report, error) {
 	// A session is due once now >= expiresAt + grace.
 	dueAt := s.now().Add(-s.Grace)
 	var report Report
+	existing := make(map[access.ManagedSessionRef]struct{}, len(sessions))
 	for i := range sessions {
 		session := &sessions[i]
+		existing[access.ManagedSessionRef{Namespace: session.Namespace, Name: session.Name, UID: session.UID}] = struct{}{}
 		if !session.Expired(dueAt) {
 			continue
 		}
@@ -129,8 +155,10 @@ func (s *Sweeper) Sweep(ctx context.Context) (Report, error) {
 		}
 		report.add(finding, removed)
 	}
-	if err := s.sweepOrphans(ctx, &report); err != nil {
-		return report, err
+	for _, binding := range managed {
+		if err := s.enforceOrphan(ctx, binding, existing, &report); err != nil {
+			return report, err
+		}
 	}
 	return report, nil
 }
@@ -145,9 +173,9 @@ func (r *Report) add(finding *Finding, removed bool) {
 	}
 }
 
-// sweepOrphans deletes managed bindings whose labelled session no longer
-// exists, or exists only as a different object under the same name.
-func (s *Sweeper) sweepOrphans(ctx context.Context, report *Report) error {
+// listManaged lists the managed bindings in the namespaces the sweep may act
+// in.
+func (s *Sweeper) listManaged(ctx context.Context) ([]access.Binding, error) {
 	namespaces := []string{""}
 	if s.Scope.Explicit() {
 		namespaces = namespaces[:0]
@@ -156,40 +184,39 @@ func (s *Sweeper) sweepOrphans(ctx context.Context, report *Report) error {
 		}
 		slices.Sort(namespaces)
 	}
+	var managed []access.Binding
 	for _, namespace := range namespaces {
 		bindings, err := s.Bindings.ListManaged(ctx, namespace)
 		if err != nil {
-			return fmt.Errorf("list managed RoleBindings: %w", err)
+			return nil, fmt.Errorf("list managed RoleBindings: %w", err)
 		}
-		for _, binding := range bindings {
-			finding, removed, err := s.enforceOrphan(ctx, binding)
-			if err != nil {
-				return err
-			}
-			report.add(finding, removed)
-		}
+		managed = append(managed, bindings...)
 	}
-	return nil
+	return managed, nil
 }
 
-func (s *Sweeper) enforceOrphan(ctx context.Context, binding access.Binding) (*Finding, bool, error) {
-	if !s.Scope.Allows(binding.Namespace) {
-		return nil, false, nil
-	}
+// enforceOrphan deletes a managed binding whose labelled session no longer
+// exists, or exists only as a different object under the same name. existing
+// holds the sessions listed after the binding was.
+func (s *Sweeper) enforceOrphan(ctx context.Context, binding access.Binding,
+	existing map[access.ManagedSessionRef]struct{}, report *Report) error {
 	claimed, ok := binding.ManagedSession()
 	if !ok {
-		// Without a complete session identity the binding proves nothing about
-		// which session it belongs to, so it is reported, never deleted.
-		return s.refuseOrphan(binding, "", "managed binding has no complete session identity"), false, nil
+		s.Log.Info("Ignored managed RoleBinding without complete BreakGlassSession identity",
+			"namespace", binding.Namespace, "roleBinding", binding.Name)
+		report.Ignored = append(report.Ignored, Finding{Namespace: binding.Namespace, Binding: binding.Name,
+			Reason: "managed binding has no complete session identity"})
+		return nil
 	}
-	if s.Control.Allows(claimed.Namespace) {
-		session, err := s.Sessions.Get(ctx, claimed.Namespace, claimed.Name)
-		switch {
-		case err == nil && session.UID == claimed.UID:
-			return nil, false, nil
-		case err != nil && !errors.Is(err, port.ErrNotFound):
-			return nil, false, fmt.Errorf("get BreakGlassSession %s/%s: %w", claimed.Namespace, claimed.Name, err)
-		}
+	if !s.Control.Allows(claimed.Namespace) {
+		// The sweep does not read sessions there, so it cannot tell whether
+		// the session is live; the control namespaces may have drifted from
+		// the manager's.
+		report.add(s.refuseOrphan(binding, claimed.Name, "session namespace is outside the control namespaces"), false)
+		return nil
+	}
+	if _, ok := existing[claimed]; ok {
+		return nil
 	}
 
 	finding := &Finding{Session: claimed.Name, Namespace: binding.Namespace, Binding: binding.Name, Reason: "session no longer exists"}
@@ -197,24 +224,25 @@ func (s *Sweeper) enforceOrphan(ctx context.Context, binding access.Binding) (*F
 		"namespace", binding.Namespace, "roleBinding", binding.Name, "uid", binding.UID)
 	if s.DryRun {
 		log.Info("Would delete RoleBinding of missing BreakGlassSession")
-		return finding, true, nil
+		report.add(finding, true)
+		return nil
 	}
 	err := s.Bindings.Delete(ctx, binding)
 	switch {
 	case err == nil:
 		log.Info("Deleted RoleBinding of missing BreakGlassSession")
-		return finding, true, nil
+		report.add(finding, true)
 	case errors.Is(err, port.ErrNotFound):
-		return nil, false, nil
 	case errors.Is(err, port.ErrConflict):
-		return s.refuseOrphan(binding, claimed.Name, "binding changed before it could be deleted"), false, nil
+		report.add(s.refuseOrphan(binding, claimed.Name, "binding changed before it could be deleted"), false)
 	default:
-		return nil, false, fmt.Errorf("delete RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+		return fmt.Errorf("delete RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
 	}
+	return nil
 }
 
 func (s *Sweeper) refuseOrphan(binding access.Binding, session, reason string) *Finding {
-	s.Log.Info("Refused to delete managed RoleBinding",
+	s.Log.Info("Refused to delete managed RoleBinding", "session", session,
 		"namespace", binding.Namespace, "roleBinding", binding.Name, "reason", reason)
 	return &Finding{Session: session, Namespace: binding.Namespace, Binding: binding.Name, Reason: reason}
 }

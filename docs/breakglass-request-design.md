@@ -60,8 +60,10 @@ delivery mode per immutable `AccessProfile`:
   use profile-specific `use` and `approve` authorizations, and fail closed on
   stale profile/request data or an expired immutable request deadline.
 * Each request UID has exactly one deterministic, append-only approval slot.
-  The approval may be deleted only once its request no longer exists; then it
-  backs no grant, and its control namespace can be deleted (ADR-004).
+  Deleting the request does not release the approval: it may be deleted only
+  while its control namespace is being deleted, so that namespace can still
+  be removed while the operator runs (ADR-004). A Namespace read error denies
+  the deletion.
   Simultaneous approve/deny attempts become a Kubernetes create conflict,
   rather than an ambiguous controller choice.
 * Only the exact configured request-controller ServiceAccount can create the
@@ -106,8 +108,9 @@ bind roles, impersonate humans, or implement a parallel approval datastore.
    stale UID, unauthorized profile, duplicate decision, request expiry, and
    direct-session bypass attempts.
 3. E2E proves controller restart between every persistence step cannot create
-   duplicate sessions; deleting/recreating a request or approval suspends an
-   active session and removes only its own binding.
+   duplicate sessions; deleting/recreating a request suspends an active
+   session and removes only its own binding, and deleting its approval is
+   denied outside namespace deletion.
 4. Audit events and metrics stay privacy-safe; IDs and identities remain out
    of Prometheus labels. A production SIEM/audit-sink correlation contract is
    documented before broad use of `ApprovalRequired` profiles.

@@ -12,6 +12,12 @@ rules:
   - create
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
   - access.breakglass.io
   resources:
   - accessprofiles

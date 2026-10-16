@@ -1,7 +1,9 @@
 # High-assurance production example for a single approved target namespace.
 #
 # It starts from the HA production overlay, removes the manager's cluster-wide
-# RoleBinding CRUD rule, and grants that capability only in `production`.
+# RoleBinding CRUD and Namespace get rules, grants RoleBinding CRUD only in
+# `production`, and reads only the `production` and `breakglass-access`
+# namespaces.
 # The manager's cache and admission/controller policy are restricted by the
 # matching --allowed-target-namespaces flag below. Access objects are accepted
 # only in the control namespace breakglass-access (ADR-004).
@@ -11,29 +13,45 @@ resources:
   - expiry-guard-rolebindings-production.yaml
 
 patches:
-  # The RoleBinding policy rule is currently the ninth generated manager rule.
-  # If controller-gen changes this ordering, rendering must fail review rather
-  # than silently removing a different permission.
+  # The generated manager rules are removed by index: the cluster-wide
+  # Namespace get is currently the second rule and the RoleBinding CRUD rule
+  # the tenth. If controller-gen changes this ordering, the test guards make
+  # rendering fail review rather than silently removing a different
+  # permission. The higher index is removed first so the lower stays valid.
   - target:
       kind: ClusterRole
       name: breakglass-operator-manager-role
     patch: |-
       - op: test
-        path: /rules/8/apiGroups/0
+        path: /rules/9/apiGroups/0
         value: rbac.authorization.k8s.io
       - op: test
-        path: /rules/8/resources/0
+        path: /rules/9/resources/0
         value: rolebindings
       - op: remove
-        path: /rules/8
-      # Survives deletion of target-namespace RBAC; read only this namespace
-      # to distinguish confirmed absence from a generic cleanup Forbidden.
+        path: /rules/9
+      - op: test
+        path: /rules/1/apiGroups/0
+        value: ""
+      - op: test
+        path: /rules/1/resources/0
+        value: namespaces
+      - op: test
+        path: /rules/1/verbs
+        value: ["get"]
+      - op: remove
+        path: /rules/1
+      # Read only the target and control namespaces. The target read survives
+      # deletion of target-namespace RBAC and distinguishes confirmed absence
+      # from a generic cleanup Forbidden; the control-namespace read lets the
+      # approval webhook release approvals only while their namespace is being
+      # deleted.
       - op: add
         path: /rules/-
         value:
           apiGroups: [""]
           resources: ["namespaces"]
-          resourceNames: ["production"]
+          resourceNames: ["production", "breakglass-access"]
           verbs: ["get"]
   - target:
       kind: Deployment

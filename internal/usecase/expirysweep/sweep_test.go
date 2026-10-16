@@ -36,21 +36,14 @@ type fakeSessions struct {
 	err      error
 }
 
-func (f fakeSessions) List(context.Context) ([]access.Session, error) { return f.sessions, f.err }
-
-func (f fakeSessions) Get(_ context.Context, namespace, name string) (access.Session, error) {
-	for _, s := range f.sessions {
-		if s.Namespace == namespace && s.Name == name {
-			return s, nil
-		}
-	}
-	return access.Session{}, port.Mark(port.ErrNotFound, fmt.Errorf("session %s/%s", namespace, name))
-}
+func (f *fakeSessions) List(context.Context) ([]access.Session, error) { return f.sessions, f.err }
 
 type fakeBindings struct {
 	objects   map[string]access.Binding
 	deleteErr error
 	deleted   []string
+	// afterList runs after ListManaged took its snapshot.
+	afterList func()
 }
 
 func (f *fakeBindings) Get(_ context.Context, namespace, name string) (access.Binding, error) {
@@ -66,6 +59,9 @@ func (f *fakeBindings) ListManaged(_ context.Context, namespace string) ([]acces
 		if b.Labels[access.ManagedByLabelKey] == access.ManagedByLabelValue && (namespace == "" || b.Namespace == namespace) {
 			managed = append(managed, b)
 		}
+	}
+	if f.afterList != nil {
+		f.afterList()
 	}
 	return managed, nil
 }
@@ -97,7 +93,7 @@ func bindingOf(s access.Session) access.Binding {
 
 func sweeper(sessions []access.Session, bindings *fakeBindings) *Sweeper {
 	return &Sweeper{
-		Sessions: fakeSessions{sessions: sessions}, Bindings: bindings, Grace: DefaultGrace,
+		Sessions: &fakeSessions{sessions: sessions}, Bindings: bindings, Grace: DefaultGrace,
 		Clock: func() time.Time { return now }, Log: logr.Discard(),
 	}
 }
@@ -195,7 +191,7 @@ func TestSweepDryRunDeletesNothing(t *testing.T) {
 
 func TestSweepFailsWhenSessionsCannotBeListed(t *testing.T) {
 	sw := sweeper(nil, &fakeBindings{})
-	sw.Sessions = fakeSessions{err: errors.New("unavailable")}
+	sw.Sessions = &fakeSessions{err: errors.New("unavailable")}
 	if _, err := sw.Sweep(context.Background()); err == nil {
 		t.Fatal("Sweep() error = nil, want error")
 	}
@@ -231,14 +227,48 @@ func TestSweepRemovesBindingsOfMissingSessions(t *testing.T) {
 	}
 }
 
-func TestSweepReportsManagedBindingWithoutSessionIdentity(t *testing.T) {
+func TestSweepIgnoresManagedBindingWithoutSessionIdentity(t *testing.T) {
 	incomplete := managedBinding(access.Session{Name: "x", UID: "x-uid"}, "production", "rb-x")
 	delete(incomplete.Labels, access.SessionNamespaceLabelKey)
 	bindings := &fakeBindings{objects: map[string]access.Binding{"production/rb-x": incomplete}}
 
 	report := sweep(t, sweeper(nil, bindings))
-	if !report.Failed() || len(bindings.deleted) != 0 {
+	if report.Failed() || len(report.Ignored) != 1 || len(report.Removed) != 0 || len(bindings.deleted) != 0 {
+		t.Fatalf("report = %#v, deleted = %v, want one ignored binding, no failure, no deletion", report, bindings.deleted)
+	}
+}
+
+func TestSweepRefusesOrphanOfSessionOutsideControlNamespaces(t *testing.T) {
+	// The session may well be live: the guard's control namespaces can drift
+	// from the manager's, and the sweep does not read sessions elsewhere.
+	elsewhere := managedBinding(access.Session{Name: "s", Namespace: "team-b", UID: "s-uid"}, "production", "rb-s")
+	bindings := &fakeBindings{objects: map[string]access.Binding{"production/rb-s": elsewhere}}
+	sw := sweeper(nil, bindings)
+	sw.Control = access.NamespaceScope{"team-a": {}}
+
+	report := sweep(t, sw)
+	if !report.Failed() || len(report.Refused) != 1 || len(report.Removed) != 0 || len(bindings.deleted) != 0 {
 		t.Fatalf("report = %#v, deleted = %v, want a refusal and no deletion", report, bindings.deleted)
+	}
+}
+
+func TestSweepListsSessionsAfterBindings(t *testing.T) {
+	// A session created after the bindings were listed has its binding
+	// created later still; it must never make an earlier binding look
+	// orphaned, and its own binding cannot appear in the binding snapshot.
+	created := access.Session{Name: "new", Namespace: "breakglass-access", UID: "new-uid"}
+	bindings := &fakeBindings{objects: map[string]access.Binding{}}
+	b := managedBinding(created, "production", "rb-new")
+	bindings.objects[b.Namespace+"/"+b.Name] = b
+	sessions := &fakeSessions{}
+	// The binding is in the snapshot, so its session was created before the
+	// snapshot; it only becomes visible to List if List runs afterwards.
+	bindings.afterList = func() { sessions.sessions = []access.Session{created} }
+	sw := sweeper(nil, bindings)
+	sw.Sessions = sessions
+
+	if report := sweep(t, sw); len(report.Removed) != 0 || len(bindings.deleted) != 0 {
+		t.Fatalf("report = %#v, deleted = %v, want the live session's binding kept", report, bindings.deleted)
 	}
 }
 

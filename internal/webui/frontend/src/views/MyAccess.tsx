@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components';
 import { useAppData } from '../AppContext';
 import { ApiError } from '../api/client';
-import { objectKey } from '../api/objectKey';
+import { domId, objectKey } from '../api/objectKey';
 import type { AccessEntry } from '../api/types';
 import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
@@ -136,10 +136,10 @@ function AccessRow({ entry, now, onDetails, onRevoke }: { entry: AccessEntry; no
   const status = statusOf(entry);
   const revocable = entry.canRevoke && Boolean(entry.sessionName);
   return (
-    <article className={`${page.card} ${styles.row}`} aria-labelledby={`row-${entry.name}`}>
+    <article className={`${page.card} ${styles.row}`} aria-labelledby={domId('row', entry)}>
       <div className={styles.rowMain}>
         <div className={styles.rowTitle}>
-          <h2 id={`row-${entry.name}`} className={styles.rowName}>
+          <h2 id={domId('row', entry)} className={styles.rowName}>
             {entry.accessProfile}
           </h2>
           <StatusBadge tone={status.tone} label={status.label} />

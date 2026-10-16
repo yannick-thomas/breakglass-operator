@@ -55,8 +55,14 @@ is cheapest now.
 6. **Orphaned bindings are swept.** Without garbage collection, a binding
    whose session disappeared without its finalizer running would keep its
    access. The expiry guard therefore also deletes managed bindings whose
-   session (namespace, name and UID) no longer exists, after the same grace
-   period and with UID and version preconditions.
+   session (namespace, name and UID) no longer exists, with UID and version
+   preconditions. No grace period applies: the guard lists bindings before
+   sessions, and a session always exists before its binding, so a binding of
+   a live session is never mistaken for an orphan. A binding labelled for a
+   session outside the guard's control namespaces is reported, never deleted,
+   because that signals drift between guard and manager flags. A binding with
+   the managed-by label but no complete session identity claims no session;
+   it is listed as ignored and does not fail the run.
 7. **No migration from the cluster-scoped API.** The version stays
    `v1alpha1`. Existing installations delete the CRDs (and with them every
    access object) and reinstall. No release with the cluster-scoped API was
@@ -73,11 +79,15 @@ is cheapest now.
   it.
 - Validating and mutating webhooks reject an access object outside the
   control namespaces before any other check.
-- Approvals stay append-only while their request exists. Once the request is
-  gone, an approval backs no grant (a session sourced from it is suspended),
-  and it may be deleted. Without this, a control namespace could never be
-  deleted while the operator runs: namespace deletion would be denied on
-  every approval.
+- Approvals are append-only evidence of a human decision. Deleting the
+  request does not release its approval; otherwise a requester could delete
+  the request and then erase the decision. An approval may be deleted only
+  while its namespace is being deleted (deletionTimestamp set or phase
+  `Terminating`), so a control namespace can still be deleted while the
+  operator runs. The webhook reads the Namespace directly from the API server
+  and denies the deletion on any read error. The manager therefore needs
+  `get` on its control namespaces as well as its target namespaces; the
+  namespace-restricted Kustomize overlay and the Helm chart name both sets.
 - A binding event whose labels were removed still reaches its session through
   an index on the binding location recorded in the session status, so drift
   is detected at once rather than at the next periodic check.

@@ -404,11 +404,14 @@ jobs:
             '' \
             'Prerequisites:' \
             '- cert-manager must already be installed and ready; this bundle intentionally does not install a cluster-wide cert-manager dependency.' \
-            '- The namespaced profile deliberately does not create the application namespace. Before using it, create or verify the approved `production` namespace.' \
+            '- The namespaced profile deliberately does not create the application namespace. Before using it, create or verify the approved `production` target namespace.' \
+            '- The namespaced profile also requires the control namespace `breakglass-access`. Create it before applying access profiles: profiles, requests, approvals and sessions live there, and requester and approver roles are bound there with RoleBindings.' \
+            '- The manager and the expiry guard run with `--allowed-target-namespaces=production` and `--control-namespaces=breakglass-access`. Control namespaces must not overlap target namespaces and are required whenever target namespaces are explicit; the manager refuses to start otherwise.' \
             '' \
             'Preflight commands:' \
             '`kubectl get crd certificates.cert-manager.io`' \
             '`kubectl get namespace production`' \
+            '`kubectl get namespace breakglass-access`' \
             '' \
             'Install with, for example:' \
             '`kubectl apply -f install-production-namespaced.yaml`' \

@@ -59,7 +59,7 @@ expiryGuard:
 
 metrics:
   serviceMonitor:
-    enabled: true
+    enabled: false
     labels: {}
     interval: 30s
     # Existing CA Secret in the release namespace, trusted by the scraper.

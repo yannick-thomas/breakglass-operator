@@ -76,7 +76,19 @@ recreated, or unreadable namespace is not proof of cleanup; the finalizer
 remains for retry or investigation. Custom namespace overlays must update
 this `resourceNames` list along with their RoleBinding scope and
 `--allowed-target-namespaces`; no namespace writes or cluster-wide binding
-permissions are required. Never manually force namespace finalization while
+permissions are required.
+
+The namespaced overlay also requires the control namespace
+`breakglass-access`, which it does not create. Create it before applying
+access profiles: profiles, requests, approvals, and sessions live only there
+(ADR-004). Bind requester and approver roles in `breakglass-access` with
+RoleBindings, not ClusterRoleBindings. Both the manager and the expiry guard
+receive `--control-namespaces=breakglass-access` next to
+`--allowed-target-namespaces=production`. Control namespaces must not
+overlap target namespaces, and they are required whenever target namespaces
+are explicit: the manager refuses to start with explicit target namespaces
+but no control namespaces. Custom overlays must change both flags on both
+workloads together. Never manually force namespace finalization while
 relying on normal namespace garbage-collection guarantees.
 
 ## Upgrade and rollback

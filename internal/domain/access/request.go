@@ -171,13 +171,14 @@ func (a Approval) DecidesFor(r Request) bool {
 		(a.Decision == DecisionApproved || a.Decision == DecisionDenied)
 }
 
-// RetainedBy reports whether the approval must be kept because the request it
-// decided still exists. request is nil when no request of that name exists.
-// Once the request is gone, no session can be sourced from it and any session
-// it backed is suspended, so the approval no longer protects a grant and may
-// be removed, for example with its control namespace (ADR-004).
-func (a Approval) RetainedBy(request *Request) bool {
-	return request != nil && request.UID == a.RequestRef.UID
+// ErasableWith reports whether the approval may be deleted. An approval is
+// append-only evidence of a human decision: deleting its request does not
+// release it, otherwise a requester could delete the request and then erase
+// the decision. The single exception is the deletion of the control namespace
+// that holds it (namespaceTerminating), which must not be blocked while the
+// operator runs (ADR-004).
+func (Approval) ErasableWith(namespaceTerminating bool) bool {
+	return namespaceTerminating
 }
 
 // Approves reports whether the approval is an independent approval of the

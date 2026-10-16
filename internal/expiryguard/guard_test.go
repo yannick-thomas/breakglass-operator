@@ -290,8 +290,10 @@ func TestSweepKeepsBindingOfLiveSession(t *testing.T) {
 	}
 }
 
-func TestSweepTreatsSessionOutsideControlNamespacesAsMissing(t *testing.T) {
+func TestSweepRefusesBindingOfSessionOutsideControlNamespaces(t *testing.T) {
 	t.Parallel()
+	// The guard's control namespaces have drifted from the manager's: the
+	// session in team-b is live, but the guard does not read team-b.
 	session, binding := expiredSession("elsewhere", now.Add(time.Hour))
 	session.Namespace = "team-b"
 	binding.Labels = apiconv.ToDomainSession(session).ManagedLabels()
@@ -299,8 +301,55 @@ func TestSweepTreatsSessionOutsideControlNamespacesAsMissing(t *testing.T) {
 
 	report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}}))
 
-	if len(report.Removed) != 1 {
-		t.Fatalf("report = %#v, want the binding of a session outside the control namespaces removed", report)
+	if !report.Failed() || len(report.Refused) != 1 || len(report.Removed) != 0 {
+		t.Fatalf("report = %#v, want a refusal and no removal", report)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(binding), &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("binding of a session outside the control namespaces was touched: %v", err)
+	}
+}
+
+func TestSweepIgnoresManagedBindingWithoutSessionIdentity(t *testing.T) {
+	t.Parallel()
+	_, binding := expiredSession("forged", now.Add(time.Hour))
+	binding.Labels = map[string]string{access.ManagedByLabelKey: access.ManagedByLabelValue}
+	c := newClient(t, binding)
+
+	report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}}))
+
+	if report.Failed() || len(report.Ignored) != 1 || len(report.Removed) != 0 {
+		t.Fatalf("report = %#v, want one ignored binding and no failure", report)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(binding), &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("binding without session identity was touched: %v", err)
+	}
+}
+
+func TestSweepListsBindingsBeforeSessions(t *testing.T) {
+	t.Parallel()
+	var order []string
+	c := interceptor.NewClient(newClient(t), interceptor.Funcs{
+		List: func(ctx context.Context, next client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *rbacv1.RoleBindingList:
+				order = append(order, "bindings")
+			case *accessv1alpha1.BreakGlassSessionList:
+				order = append(order, "sessions")
+			}
+			return next.List(ctx, list, opts...)
+		},
+		Get: func(ctx context.Context, next client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*accessv1alpha1.BreakGlassSession); ok {
+				t.Errorf("Get(BreakGlassSession %s): want sessions only listed", key)
+			}
+			return next.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	sweep(t, New(c, access.NamespaceScope{controlNamespace: {}}))
+
+	if len(order) != 2 || order[0] != "bindings" || order[1] != "sessions" {
+		t.Fatalf("list order = %q, want managed bindings listed once before sessions", order)
 	}
 }
 

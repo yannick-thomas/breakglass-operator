@@ -35,7 +35,8 @@ import (
 
 // New wires a sweeper to a Kubernetes client. The client must read directly
 // from the API server: the guard must not act on a stale cache. Sessions are
-// listed in the control namespaces, or cluster-wide when none are named.
+// listed in the control namespaces, or cluster-wide when none are named, so
+// the sweeper's Control always matches what it can see.
 func New(c client.Client, control access.NamespaceScope) *expirysweep.Sweeper {
 	return &expirysweep.Sweeper{
 		Sessions: sessionSource{Reader: c, Namespaces: slices.Sorted(maps.Keys(control))},
@@ -76,14 +77,6 @@ func (s sessionSource) list(ctx context.Context, options ...client.ListOption) (
 		sessions[i] = *apiconv.ToDomainSession(&list.Items[i])
 	}
 	return sessions, nil
-}
-
-func (s sessionSource) Get(ctx context.Context, namespace, name string) (access.Session, error) {
-	var session accessv1alpha1.BreakGlassSession
-	if err := s.Reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &session); err != nil {
-		return access.Session{}, apiconv.Classify(err)
-	}
-	return *apiconv.ToDomainSession(&session), nil
 }
 
 type bindingGateway struct {

@@ -372,7 +372,7 @@ func (h *Handler) handleCreateAccess(w http.ResponseWriter, r *http.Request, ses
 		h.writeError(w, sess, "create-access", err)
 		return
 	}
-	h.log.Info("Recorded WebUI action", "action", "create-access", "outcome", "success", "kind", created.Kind, "ref", created.Name)
+	h.log.Info("Recorded WebUI action", "action", "create-access", "outcome", "success", "kind", created.Kind, "namespace", created.Namespace, "ref", created.Name)
 	h.jsonResponse(w, created, http.StatusCreated)
 }
 
@@ -413,8 +413,8 @@ func (h *Handler) handleCreateApproval(w http.ResponseWriter, r *http.Request, s
 		h.writeError(w, sess, "create-approval", err)
 		return
 	}
-	h.log.Info("Recorded WebUI action", "action", "create-approval", "outcome", "success", "ref", input.RequestName)
-	h.jsonResponse(w, map[string]string{"status": "decision_recorded", "request": input.RequestName}, http.StatusCreated)
+	h.log.Info("Recorded WebUI action", "action", "create-approval", "outcome", "success", "namespace", input.Namespace, "ref", input.RequestName)
+	h.jsonResponse(w, map[string]string{"status": "decision_recorded", "namespace": input.Namespace, "request": input.RequestName}, http.StatusCreated)
 }
 
 func (h *Handler) decode(w http.ResponseWriter, r *http.Request, v any) bool {

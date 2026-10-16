@@ -100,7 +100,7 @@ CI digests from `ci/` into a real deployment.
 | `resources`, `nodeSelector`, `tolerations`, `priorityClassName` | Manager/guard scheduling and resource settings. |
 | `certManager.issuerRef` | Optional existing `Issuer` or `ClusterIssuer`; otherwise create the local self-signed Issuer used by the Kustomize deployment. |
 | `expiryGuard.*` | Sweep schedule, grace, timeout and resources. The guard cannot be disabled through values. |
-| `metrics.serviceMonitor.*` | Optional monitor; an explicit CA Secret is required and TLS verification remains enabled. |
+| `metrics.serviceMonitor.*` | Optional monitor, disabled by default. Enabling it requires an explicit CA Secret (`caSecretName`); TLS verification remains enabled. |
 | `metrics.prometheusRule.*` | Optional lifecycle, integrity, cleanup and guard alerts. |
 | `webui.*` | Optional OIDC client, read-only facade, separate image and HTTPS ingress. Disabled by default. |
 

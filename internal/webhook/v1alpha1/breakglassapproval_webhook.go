@@ -22,6 +22,7 @@ import (
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,6 +47,7 @@ type ProfileApprovalReviewer interface {
 type authenticationUserInfo = authenticationv1.UserInfo
 
 // +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassrequests,verbs=get
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 
 // SetupBreakGlassApprovalWebhookWithManager installs the append-only human
 // approval boundary. The request controller later consumes only an admission-
@@ -58,11 +60,12 @@ func SetupBreakGlassApprovalWebhookWithManager(mgr ctrl.Manager, placement acces
 			Placement:     placement,
 		}).
 		WithValidator(&BreakGlassApprovalValidator{
-			RequestReader: mgr.GetAPIReader(),
-			ProfileReader: mgr.GetAPIReader(),
-			Reviewer:      KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
-			Metrics:       breakglassmetrics.DefaultRecorder,
-			Placement:     placement,
+			RequestReader:   mgr.GetAPIReader(),
+			ProfileReader:   mgr.GetAPIReader(),
+			NamespaceReader: mgr.GetAPIReader(),
+			Reviewer:        KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+			Metrics:         breakglassmetrics.DefaultRecorder,
+			Placement:       placement,
 		}).
 		Complete()
 }
@@ -123,10 +126,13 @@ func (d *BreakGlassApprovalDefaulter) Default(ctx context.Context, obj *accessv1
 type BreakGlassApprovalValidator struct {
 	RequestReader client.Reader
 	ProfileReader client.Reader
-	Reviewer      ProfileApprovalReviewer
-	Metrics       breakglassmetrics.AdmissionRecorder
-	Placement     access.Placement
-	Clock         func() time.Time
+	// NamespaceReader must read the API server directly (not a cache): it
+	// decides whether the approval's namespace is being deleted.
+	NamespaceReader client.Reader
+	Reviewer        ProfileApprovalReviewer
+	Metrics         breakglassmetrics.AdmissionRecorder
+	Placement       access.Placement
+	Clock           func() time.Time
 }
 
 func (v *BreakGlassApprovalValidator) ValidateCreate(ctx context.Context, obj *accessv1alpha1.BreakGlassApproval) (warnings admission.Warnings, err error) {
@@ -193,28 +199,26 @@ func (v *BreakGlassApprovalValidator) ValidateUpdate(_ context.Context, oldObj, 
 	return nil, nil
 }
 
-// ValidateDelete makes decisions append-only while their request exists: a
-// requester or approver must not be able to erase the object that the
-// controller used for a grant decision. Once the request is gone, the approval
-// backs no grant, and deleting it lets a control namespace be deleted.
+// ValidateDelete keeps decisions append-only: neither a requester nor an
+// approver may erase the evidence the controller used for a grant decision,
+// not even after deleting the request. Only the deletion of the approval's
+// namespace releases it, so a control namespace can be deleted while the
+// operator runs. The namespace is read from the API server, and any read
+// failure denies the deletion.
 func (v *BreakGlassApprovalValidator) ValidateDelete(ctx context.Context, obj *accessv1alpha1.BreakGlassApproval) (warnings admission.Warnings, err error) {
 	defer func() {
-		recordAdmissionDecision(v.Metrics, breakglassmetrics.AdmissionOperationUpdate, admissionOutcomeForError(err))
+		recordAdmissionDecision(v.Metrics, breakglassmetrics.AdmissionOperationDelete, admissionOutcomeForError(err))
 	}()
-	if v.RequestReader == nil {
-		return nil, apierrors.NewInternalError(fmt.Errorf("BreakGlassRequest reader is not configured"))
+	if v.NamespaceReader == nil {
+		return nil, apierrors.NewInternalError(fmt.Errorf("namespace reader is not configured"))
 	}
-	var request *access.Request
-	stored := &accessv1alpha1.BreakGlassRequest{}
-	switch err := v.RequestReader.Get(ctx, client.ObjectKey{Namespace: obj.Namespace, Name: obj.Spec.RequestRef.Name}, stored); {
-	case err == nil:
-		decided := apiconv.ToDomainRequest(stored)
-		request = &decided
-	case !apierrors.IsNotFound(err):
-		return nil, apierrors.NewInternalError(fmt.Errorf("read BreakGlassRequest for approval deletion: %w", err))
+	namespace := &corev1.Namespace{}
+	if err := v.NamespaceReader.Get(ctx, client.ObjectKey{Name: obj.Namespace}, namespace); err != nil {
+		return nil, apierrors.NewInternalError(fmt.Errorf("read Namespace for approval deletion: %w", err))
 	}
-	if apiconv.ToDomainApproval(obj).RetainedBy(request) {
-		return nil, fmt.Errorf("BreakGlassApproval is append-only while its BreakGlassRequest exists")
+	terminating := !namespace.DeletionTimestamp.IsZero() || namespace.Status.Phase == corev1.NamespaceTerminating
+	if !apiconv.ToDomainApproval(obj).ErasableWith(terminating) {
+		return nil, fmt.Errorf("BreakGlassApproval is append-only; it is removed only with its namespace")
 	}
 	return nil, nil
 }

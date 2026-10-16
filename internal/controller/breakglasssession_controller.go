@@ -185,49 +185,40 @@ func (r *BreakGlassSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// findSessionForBinding maps a RoleBinding change to its session. A
-// replacement object at the recorded location maps to its session so it can
-// be suspended; unrelated objects that merely carry a forged label or owner
-// reference do not get to create reconcile work.
+// findSessionForBinding maps a RoleBinding change to the sessions it
+// concerns. Labels are only a hint: a claimed session is enqueued only when it
+// exists with the claimed UID and locates this binding. Otherwise, including
+// when the labels are missing, the binding maps to every session that
+// recorded its location, so removed, forged, or rewritten labels wake the
+// owning session now rather than at its next periodic check. Unrelated
+// objects that merely carry a forged label do not create reconcile work.
 func (r *BreakGlassSessionReconciler) findSessionForBinding(ctx context.Context, obj client.Object) []ctrl.Request {
 	rb, ok := obj.(*rbacv1.RoleBinding)
 	if !ok {
 		return nil
 	}
-	claimed, ok := apiconv.ToDomainBinding(rb).ManagedSession()
-	if !ok {
-		// A binding whose labels were removed or forged still belongs to the
-		// session that recorded its location; that session must see the drift
-		// now, not at its next periodic check.
-		return r.sessionsRecordingBinding(ctx, rb)
+	if claimed, ok := apiconv.ToDomainBinding(rb).ManagedSession(); ok {
+		key := client.ObjectKey{Namespace: claimed.Namespace, Name: claimed.Name}
+		if r.claimLocatesBinding(ctx, key, claimed.UID, rb) {
+			return []ctrl.Request{{NamespacedName: key}}
+		}
 	}
-	key := client.ObjectKey{Namespace: claimed.Namespace, Name: claimed.Name}
+	return r.sessionsMatching(ctx, "", recordedBindingField, rb.Namespace+"/"+rb.Name)
+}
 
+// claimLocatesBinding reports whether the session a binding's labels claim
+// exists with the claimed UID and records, or expects, this binding.
+func (r *BreakGlassSessionReconciler) claimLocatesBinding(ctx context.Context, key client.ObjectKey, uid string, rb *rbacv1.RoleBinding) bool {
 	session := &accessv1alpha1.BreakGlassSession{}
-	if err := r.Get(ctx, key, session); err != nil || string(session.UID) != claimed.UID {
-		return nil
+	if err := r.Get(ctx, key, session); err != nil || string(session.UID) != uid {
+		return false
 	}
 	domainSession := apiconv.ToDomainSession(session)
 	reference := domainSession.Status.BindingRef
 	if reference == nil {
 		reference = domainSession.ExpectedBindingRef()
 	}
-	if !reference.Locates(apiconv.ToDomainBinding(rb)) {
-		return nil
-	}
-	return []ctrl.Request{{NamespacedName: key}}
-}
-
-func (r *BreakGlassSessionReconciler) sessionsRecordingBinding(ctx context.Context, rb *rbacv1.RoleBinding) []ctrl.Request {
-	sessions := &accessv1alpha1.BreakGlassSessionList{}
-	if err := r.List(ctx, sessions, client.MatchingFields{recordedBindingField: rb.Namespace + "/" + rb.Name}); err != nil {
-		return nil
-	}
-	requests := make([]ctrl.Request, 0, len(sessions.Items))
-	for i := range sessions.Items {
-		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&sessions.Items[i])})
-	}
-	return requests
+	return reference.Locates(apiconv.ToDomainBinding(rb))
 }
 
 func recordedBindingIndex(obj client.Object) []string {
@@ -278,8 +269,9 @@ func (r *BreakGlassSessionReconciler) findSessionsForBreakGlassApproval(ctx cont
 	return r.sessionsMatching(ctx, approval.Namespace, requestSourceField, approval.Spec.RequestRef.Name)
 }
 
-// sessionsMatching lists the sessions in one namespace whose indexed field
-// has the value. References never cross namespaces.
+// sessionsMatching lists the sessions whose indexed field has the value.
+// Profile and request references never cross namespaces, so their callers
+// pass the referencing namespace; an empty namespace lists all namespaces.
 func (r *BreakGlassSessionReconciler) sessionsMatching(ctx context.Context, namespace, field, value string) []ctrl.Request {
 	sessions := &accessv1alpha1.BreakGlassSessionList{}
 	if err := r.List(ctx, sessions, client.InNamespace(namespace), client.MatchingFields{field: value}); err != nil {

@@ -727,6 +727,42 @@ func TestBindingLabelRemovalIsDetectedAndExactBindingIsCleanedUp(t *testing.T) {
 	}
 }
 
+func TestRewrittenSessionUIDLabelStillEnqueuesOwningSession(t *testing.T) {
+	t.Parallel()
+
+	scheme := testScheme(t)
+	session := testSession()
+	testClient := newTestClient(scheme, session.DeepCopy())
+	reconciler := &BreakGlassSessionReconciler{Client: testClient, Scheme: scheme}
+
+	if err := reconciler.ensureBinding(context.Background(), session); err != nil {
+		t.Fatalf("ensureBinding() error = %v", err)
+	}
+	stored := &accessv1alpha1.BreakGlassSession{}
+	if err := testClient.Get(context.Background(), client.ObjectKeyFromObject(session), stored); err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	stored.Status = session.Status
+	if err := testClient.Status().Update(context.Background(), stored); err != nil {
+		t.Fatalf("record binding reference: %v", err)
+	}
+
+	binding := &rbacv1.RoleBinding{}
+	key := types.NamespacedName{Name: bindingNameForSession(session), Namespace: "default"}
+	if err := testClient.Get(context.Background(), key, binding); err != nil {
+		t.Fatalf("get created RoleBinding: %v", err)
+	}
+	binding.Labels[SessionUIDLabelKey] = "forged-uid"
+	if err := testClient.Update(context.Background(), binding); err != nil {
+		t.Fatalf("rewrite session UID label: %v", err)
+	}
+
+	requests := reconciler.findSessionForBinding(context.Background(), binding)
+	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(session) {
+		t.Fatalf("findSessionForBinding() = %#v, want request for owning session %q", requests, session.Name)
+	}
+}
+
 func TestCleanupNeverDeletesAReplacementBinding(t *testing.T) {
 	t.Parallel()
 

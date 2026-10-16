@@ -135,7 +135,7 @@ func TestRenderedSecurityBoundary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			objects := render(t, tc.release, tc.namespace, tc.flags...)
-			verifyRoleBoundary(t, objects, tc.release, tc.namespace, tc.targets, tc.roles)
+			verifyRoleBoundary(t, objects, tc.release, tc.namespace, tc.targets, tc.controls, tc.roles)
 			verifyControlBoundary(t, objects, tc.release, tc.namespace, tc.controls)
 			verifyAdmission(t, objects, tc.release, tc.namespace)
 			verifySourceParity(t, objects, tc.release, tc.controls, tc.targets, tc.roles)
@@ -162,8 +162,21 @@ func TestRenderedSecurityBoundary(t *testing.T) {
 	}
 }
 
+// observedNamespaces is the ordered, duplicate-free set of namespaces the
+// manager may get: the targets (cleanup recovery) and the control namespaces
+// (approval deletion during namespace deletion).
+func observedNamespaces(targets, controls []string) []string {
+	var names []string
+	for _, name := range append(slices.Clone(targets), controls...) {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 func verifyRoleBoundary(
-	t *testing.T, objects []unstructured.Unstructured, release, namespace string, targets, roles []string,
+	t *testing.T, objects []unstructured.Unstructured, release, namespace string, targets, controls, roles []string,
 ) {
 	t.Helper()
 	for _, item := range objects {
@@ -194,8 +207,8 @@ func verifyRoleBoundary(
 				}
 				if slices.Contains(resources, "namespaces") {
 					names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
-					if !reflect.DeepEqual(names, targets) || !reflect.DeepEqual(verbs, []string{"get"}) {
-						t.Fatal("namespace observation must match the explicit target set")
+					if !reflect.DeepEqual(names, observedNamespaces(targets, controls)) || !reflect.DeepEqual(verbs, []string{"get"}) {
+						t.Fatal("namespace observation must match the explicit target and control sets")
 					}
 				}
 			}
@@ -407,7 +420,9 @@ func verifySourceParity(
 		resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
 		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
 		groups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
+		// The chart narrows these generated cluster-wide rules to explicit names.
 		if slices.Equal(resources, []string{"rolebindings"}) ||
+			(slices.Equal(resources, []string{"namespaces"}) && len(names) == 0) ||
 			(slices.Equal(resources, []string{"clusterroles"}) && len(names) == 0) {
 			continue
 		}
@@ -423,7 +438,7 @@ func verifySourceParity(
 	}
 	expectedRules = append(expectedRules, map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"namespaces"},
-		"resourceNames": stringItems(targets), "verbs": []any{"get"},
+		"resourceNames": stringItems(observedNamespaces(targets, controls)), "verbs": []any{"get"},
 	})
 	managerRole := object(t, objects, "ClusterRole", release+"-manager-role", "")
 	if !reflect.DeepEqual(field(t, managerRole, "rules"), expectedRules) {

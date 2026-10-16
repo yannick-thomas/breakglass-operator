@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAppData } from '../AppContext';
 import { ApiError } from '../api/client';
-import { objectKey } from '../api/objectKey';
+import { domId, objectKey } from '../api/objectKey';
 import type { AccessEntry, Decision } from '../api/types';
 import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
@@ -55,11 +55,11 @@ export function Approvals() {
         <ul className={page.list}>
           {items.map((entry) => (
             <li key={objectKey(entry)}>
-              <article className={page.card} aria-labelledby={`approval-${entry.name}`}>
+              <article className={page.card} aria-labelledby={domId('approval', entry)}>
                 <div className={`${page.cardBody} ${styles.body}`}>
                   <div className={styles.head}>
                     <div>
-                      <h2 id={`approval-${entry.name}`} className={styles.requester}>
+                      <h2 id={domId('approval', entry)} className={styles.requester}>
                         {entry.requester}
                       </h2>
                       <p className={page.sectionHint}>

@@ -1,4 +1,5 @@
 import { useAppData } from '../AppContext';
+import { domId, objectKey } from '../api/objectKey';
 import { Button } from '../components/Button';
 import { EmptyState, Loading, Notice, StatusBadge } from '../components/Feedback';
 import { formatGoDuration } from '../lib/format';
@@ -32,10 +33,10 @@ export function Profiles() {
       ) : (
         <ul className={styles.grid}>
           {items.map((p) => (
-            <li key={p.name} className={page.card}>
-              <article className={styles.profile} aria-labelledby={`profile-${p.name}`}>
+            <li key={objectKey(p)} className={page.card}>
+              <article className={styles.profile} aria-labelledby={domId('profile', p)}>
                 <div className={styles.head}>
-                  <h2 id={`profile-${p.name}`} className={styles.name}>
+                  <h2 id={domId('profile', p)} className={styles.name}>
                     {p.name}
                   </h2>
                   {p.isReady ? (

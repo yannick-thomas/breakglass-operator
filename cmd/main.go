@@ -27,11 +27,13 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -190,12 +192,12 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	allowedTargetNamespaces, err := parseAllowedTargetNamespaces(allowedTargetNamespacesValue)
+	allowedTargetNamespaces, err := parseNamespaceFlag("allowed-target-namespaces", allowedTargetNamespacesValue)
 	if err != nil {
 		setupLog.Error(err, "Invalid allowed target namespaces")
 		os.Exit(1)
 	}
-	controlNamespaces, err := parseControlNamespaces(controlNamespacesValue)
+	controlNamespaces, err := parseNamespaceFlag("control-namespaces", controlNamespacesValue)
 	if err != nil {
 		setupLog.Error(err, "Invalid control namespaces")
 		os.Exit(1)
@@ -228,12 +230,7 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	}
-	if cached := cachedNamespaces(placement); len(cached) > 0 {
-		managerOptions.Cache = cache.Options{DefaultNamespaces: make(map[string]cache.Config, len(cached))}
-		for namespace := range cached {
-			managerOptions.Cache.DefaultNamespaces[namespace] = cache.Config{}
-		}
+		Cache: cacheOptions(placement),
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions)
@@ -313,35 +310,47 @@ func main() {
 	}
 }
 
-func parseAllowedTargetNamespaces(value string) (map[string]struct{}, error) {
+// parseNamespaceFlag parses a comma-separated namespace scope and names the
+// flag in any error.
+func parseNamespaceFlag(flagName, value string) (map[string]struct{}, error) {
 	scope, err := access.ParseNamespaceScope(value)
 	if err != nil {
-		return nil, fmt.Errorf("allowed-target-namespaces %w", err)
+		return nil, fmt.Errorf("%s %w", flagName, err)
 	}
 	return scope, nil
 }
 
-func parseControlNamespaces(value string) (map[string]struct{}, error) {
-	scope, err := access.ParseNamespaceScope(value)
-	if err != nil {
-		return nil, fmt.Errorf("control-namespaces %w", err)
+// cacheOptions scopes each informer to the namespaces its RBAC covers.
+// Access objects live only in control namespaces and RoleBindings only in
+// target namespaces, so a shared namespace set would watch objects the
+// manager has no permission to list and the cache would never sync. Any
+// other namespaced type defaults to the control namespaces. An empty scope
+// keeps the all-namespaces development default for its kinds; Validate
+// guarantees that explicit target namespaces come with explicit control
+// namespaces.
+func cacheOptions(placement access.Placement) cache.Options {
+	if !placement.Target.Explicit() && !placement.Control.Explicit() {
+		return cache.Options{}
 	}
-	return scope, nil
+	control := namespaceConfigs(placement.Control)
+	byObject := map[client.Object]cache.ByObject{
+		&accessv1alpha1.AccessProfile{}:      {Namespaces: control},
+		&accessv1alpha1.BreakGlassRequest{}:  {Namespaces: control},
+		&accessv1alpha1.BreakGlassApproval{}: {Namespaces: control},
+		&accessv1alpha1.BreakGlassSession{}:  {Namespaces: control},
+	}
+	bindings := map[string]cache.Config{cache.AllNamespaces: {}}
+	if placement.Target.Explicit() {
+		bindings = namespaceConfigs(placement.Target)
+	}
+	byObject[&rbacv1.RoleBinding{}] = cache.ByObject{Namespaces: bindings}
+	return cache.Options{DefaultNamespaces: control, ByObject: byObject}
 }
 
-// cachedNamespaces is the union of control and target namespaces, or empty
-// for the all-namespaces development default. Validate guarantees that
-// explicit target namespaces come with explicit control namespaces.
-func cachedNamespaces(placement access.Placement) map[string]struct{} {
-	if !placement.Target.Explicit() {
-		return nil
+func namespaceConfigs(namespaces map[string]struct{}) map[string]cache.Config {
+	configs := make(map[string]cache.Config, len(namespaces))
+	for namespace := range namespaces {
+		configs[namespace] = cache.Config{}
 	}
-	cached := make(map[string]struct{}, len(placement.Control)+len(placement.Target))
-	for namespace := range placement.Control {
-		cached[namespace] = struct{}{}
-	}
-	for namespace := range placement.Target {
-		cached[namespace] = struct{}{}
-	}
-	return cached
+	return configs
 }

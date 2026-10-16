@@ -556,14 +556,12 @@ func TestManagedSessionRequiresCompleteIdentity(t *testing.T) {
 	}
 }
 
-func TestApprovalIsRetainedOnlyWhileItsRequestExists(t *testing.T) {
-	request := Request{Name: "bgr", UID: "bgr-uid"}
-	approval := Approval{RequestRef: request.Ref()}
-	if !approval.RetainedBy(&request) {
-		t.Fatal("an approval must be kept while its request exists")
+func TestApprovalIsErasableOnlyWithItsNamespace(t *testing.T) {
+	approval := Approval{RequestRef: ObjectRef{Name: "bgr", UID: "bgr-uid"}}
+	if approval.ErasableWith(false) {
+		t.Fatal("an approval must stay append-only while its namespace exists, even once its request is gone")
 	}
-	recreated := Request{Name: "bgr", UID: "other-uid"}
-	if approval.RetainedBy(&recreated) || approval.RetainedBy(nil) {
-		t.Fatal("an approval of a deleted request backs no grant and may be removed")
+	if !approval.ErasableWith(true) {
+		t.Fatal("an approval must not block the deletion of its control namespace")
 	}
 }

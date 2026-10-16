@@ -109,7 +109,8 @@ func main() {
 	guard := expiryguard.New(c, control)
 	guard.Grace, guard.Scope, guard.DryRun, guard.Log = grace, scope, dryRun, log
 	report, err := guard.Sweep(ctx)
-	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused), "dryRun", dryRun)
+	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused),
+		"ignored", len(report.Ignored), "dryRun", dryRun)
 	if err != nil {
 		log.Error(err, "Could not complete expiry sweep")
 		os.Exit(exitError)

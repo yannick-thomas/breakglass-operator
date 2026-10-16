@@ -13,9 +13,12 @@ rules:
     resources: [clusterroles]
     resourceNames: {{ .Values.curatedClusterRoles | toJson }}
     verbs: [bind, get]
+  # Target namespaces: confirm absence during cleanup recovery. Control
+  # namespaces: release append-only approvals only while their namespace is
+  # being deleted (ADR-004).
   - apiGroups: [""]
     resources: [namespaces]
-    resourceNames: {{ .Values.allowedTargetNamespaces | toJson }}
+    resourceNames: {{ concat .Values.allowedTargetNamespaces .Values.controlNamespaces | uniq | toJson }}
     verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
