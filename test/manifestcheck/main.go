@@ -61,6 +61,9 @@ func validateProfile(profile string, input io.Reader) error {
 	if err != nil {
 		return err
 	}
+	if err := verifyAccessKindsAdmitted(objects); err != nil {
+		return err
+	}
 	if err := verifyWebhookSecurity(objects); err != nil {
 		return err
 	}
@@ -504,4 +507,39 @@ func requiredObjectInNamespace(
 		return unstructured.Unstructured{}, fmt.Errorf("%s %q must be in namespace %q", kind, name, namespace)
 	}
 	return object, nil
+}
+
+// verifyAccessKindsAdmitted requires the validating configuration to intercept
+// the creation of every access kind. Placement (ADR-004) is an admission
+// boundary for all four kinds; a kind without a validating webhook could be
+// created in any namespace a principal may write to.
+func verifyAccessKindsAdmitted(objects []unstructured.Unstructured) error {
+	configuration, err := requiredObject(objects, validatingWebhookKind, validatingWebhookConfiguration)
+	if err != nil {
+		return err
+	}
+	webhooks, _, _ := unstructured.NestedSlice(configuration.Object, "webhooks")
+	admitted := map[string]bool{}
+	for _, item := range webhooks {
+		webhook, _ := item.(map[string]any)
+		rules, _, _ := unstructured.NestedSlice(webhook, "rules")
+		for _, rawRule := range rules {
+			rule, _ := rawRule.(map[string]any)
+			groups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
+			operations, _, _ := unstructured.NestedStringSlice(rule, "operations")
+			if !slices.Contains(groups, "access.breakglass.io") || !slices.Contains(operations, "CREATE") {
+				continue
+			}
+			resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+			for _, resource := range resources {
+				admitted[resource] = true
+			}
+		}
+	}
+	for _, kind := range accessKinds {
+		if !admitted[kind] {
+			return fmt.Errorf("validating admission must intercept the creation of %s", kind)
+		}
+	}
+	return nil
 }

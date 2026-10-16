@@ -350,8 +350,14 @@ func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release,
 	for _, mode := range []struct {
 		kind, suffix  string
 		drainWebhooks int
+		// accessResources are the access kinds this configuration must
+		// cover: every kind is validated, AccessProfile on creation only.
+		accessResources []string
 	}{
-		{"MutatingWebhookConfiguration", "mutating", 0}, {"ValidatingWebhookConfiguration", "validating", 1},
+		{"MutatingWebhookConfiguration", "mutating", 0,
+			[]string{"breakglassapprovals", "breakglassrequests", "breakglasssessions"}},
+		{"ValidatingWebhookConfiguration", "validating", 1,
+			[]string{"accessprofiles", "breakglassapprovals", "breakglassrequests", "breakglasssessions"}},
 	} {
 		config := object(t, objects, mode.kind, release+"-"+mode.suffix+"-webhook-configuration", "")
 		annotations, _, _ := unstructured.NestedStringMap(config, "metadata", "annotations")
@@ -359,7 +365,8 @@ func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release,
 			t.Fatal("webhook CA injection must reference the rendered certificate")
 		}
 		webhooks := field(t, config, "webhooks").([]any)
-		accessWebhooks, drainWebhooks := 0, 0
+		var accessResources []string
+		drainWebhooks := 0
 		for _, raw := range webhooks {
 			webhook := raw.(map[string]any)
 			if webhook["failurePolicy"] != "Fail" || webhook["sideEffects"] != "None" ||
@@ -378,18 +385,24 @@ func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release,
 				verifyControlNamespaceWebhook(t, webhook, controls)
 				continue
 			}
-			accessWebhooks++
 			if _, exists := webhook["namespaceSelector"]; exists {
 				t.Fatal("namespace selector may bypass admission")
 			}
-			for _, rule := range field(t, webhook, "rules").([]any) {
-				if rule.(map[string]any)["scope"] != "Namespaced" {
+			for _, raw := range field(t, webhook, "rules").([]any) {
+				rule := raw.(map[string]any)
+				if rule["scope"] != "Namespaced" {
 					t.Fatal("admission must match the namespaced access objects")
 				}
+				operations, _, _ := unstructured.NestedStringSlice(rule, "operations")
+				if !slices.Contains(operations, "CREATE") {
+					t.Fatal("every access webhook must intercept creation")
+				}
+				resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+				accessResources = append(accessResources, resources...)
 			}
 		}
-		if accessWebhooks != 3 {
-			t.Fatal("all three admission resources must be protected")
+		if !sameSet(accessResources, mode.accessResources) {
+			t.Fatalf("%s must protect exactly %v, got %v", mode.kind, mode.accessResources, accessResources)
 		}
 		if drainWebhooks != mode.drainWebhooks {
 			t.Fatal("exactly one validating drain check must guard control-namespace deletion")

@@ -195,10 +195,62 @@ and stays `Terminating` until the Roles are restored by hand.
 3. Apply the release, wait for both manager Pods, both admission Pods and the
    serving certificate to become ready, then perform the harmless request
    check above. Upgrading from a single-Deployment installation (manager
-   serving the webhooks) is a reinstall (ADR-005).
+   serving the webhooks) is a reinstall (ADR-005). Upgrading from
+   cluster-scoped CRDs is destructive; see the procedure below.
 4. Keep the former controller image and manifest available, but never roll
    back to an image or manifest that accepts the removed free-form session API.
    First revoke or allow expiry of grants incompatible with the target version.
+
+### Upgrading from cluster-scoped access objects (ADR-004): destructive
+
+Installations created before ADR-004 have cluster-scoped `AccessProfile`,
+`BreakGlassRequest`, `BreakGlassApproval` and `BreakGlassSession` CRDs.
+Kubernetes treats a CRD's `spec.scope` as immutable: applying the new CRDs
+over them fails (`spec.scope: Invalid value: "Namespaced": field is
+immutable`), even when no session is active. Neither `kubectl apply` nor
+`helm upgrade` can perform this upgrade, and Helm never replaces existing
+CRDs. The only path is to delete the four CRDs, which deletes **every** access
+object, and install the new release from scratch. There is no conversion:
+old objects are not valid under the new schema and are not restored.
+
+1. **Stop new access.** Remove `use`, `approve` and session/request `create`
+   permissions from requesters and approvers.
+2. **End every grant while the old manager still runs.** Revoke or let expire
+   every session, then confirm:
+   ```bash
+   kubectl get breakglasssessions -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,BINDING:.status.bindingRef.namespace/.status.bindingRef.name
+   kubectl get rolebindings -A -l app.kubernetes.io/managed-by=breakglass-operator
+   ```
+   Every session must be terminal and no managed RoleBinding may remain. The
+   old manager must still be running: deleting a session runs its finalizer,
+   which removes the session's RoleBinding.
+3. **Delete the sessions** (`kubectl delete breakglasssessions --all`) and
+   wait until they are gone, again while the old manager runs.
+4. **Preserve evidence.** Export all access objects for the audit record:
+   ```bash
+   kubectl get accessprofiles,breakglassrequests,breakglassapprovals -o yaml > breakglass-pre-adr-004.yaml
+   ```
+   This export is evidence, not a backup to restore: the objects have no
+   namespace and cannot be applied to the new CRDs.
+5. **Remove the old operator**, including its webhook configurations (Helm:
+   `helm uninstall`; Kustomize: `make undeploy`). The old approval webhook
+   denies every approval delete and would otherwise block step 6.
+6. **Delete the CRDs** (`kubectl delete crd accessprofiles.access.breakglass.io
+   breakglassrequests.access.breakglass.io breakglassapprovals.access.breakglass.io
+   breakglasssessions.access.breakglass.io`, or `make uninstall`) and wait until
+   `kubectl get crd | grep access.breakglass.io` prints nothing. If a CRD stays
+   in `InstanceDeletionInProgress`, a session still holds its finalizer: verify
+   from the export of step 2 that its recorded RoleBinding namespace, name and
+   UID no longer exist, and only then remove the finalizer by hand. A
+   remaining binding is a security investigation, not a cleanup chore.
+7. **Install the new release**: create the control namespaces (label them
+   `access.breakglass.io/control-namespace=true` for the default and production
+   Kustomize profiles), then install with Helm or Kustomize, which creates the
+   namespaced CRDs.
+8. **Recreate the policy**: write each profile again with
+   `metadata.namespace` set to a control namespace, bind requester, approver,
+   revoker and auditor roles with RoleBindings in that namespace, and run the
+   harmless request check above.
 
 The Kind suite proves rollout continuity for a single rendered version. It is
 not a cross-version compatibility or downgrade guarantee. Add a pinned

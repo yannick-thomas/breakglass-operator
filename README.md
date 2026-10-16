@@ -179,6 +179,15 @@ The installer intentionally does **not** include generic Kubebuilder
 requester permissions explicitly; a broad profile-editor role could otherwise
 delete and recreate a profile name with a different policy.
 
+### Upgrade from cluster-scoped access objects (ADR-004)
+
+The access CRDs changed from cluster-scoped to namespaced. Kubernetes rejects
+changing a CRD's scope in place, so an existing installation cannot be
+upgraded with `kubectl apply` or `helm upgrade`, not even after every session
+is drained. The upgrade deletes the CRDs and every access object and installs
+the new release from scratch; follow the
+[destructive upgrade procedure](docs/production-operations.md#upgrading-from-cluster-scoped-access-objects-adr-004-destructive).
+
 ### Upgrade from the original free-form API
 
 This `v1alpha1` revision is intentionally incompatible with the original

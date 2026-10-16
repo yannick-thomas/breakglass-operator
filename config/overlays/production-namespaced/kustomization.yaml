@@ -104,10 +104,10 @@ patches:
       name: breakglass-operator-validating-webhook-configuration
     patch: |-
       - op: test
-        path: /webhooks/3/name
+        path: /webhooks/4/name
         value: vcontrolnamespace-v1.kb.io
       - op: replace
-        path: /webhooks/3/namespaceSelector
+        path: /webhooks/4/namespaceSelector
         value:
           matchExpressions:
             - key: kubernetes.io/metadata.name

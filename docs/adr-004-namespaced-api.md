@@ -64,9 +64,12 @@ is cheapest now.
    the managed-by label but no complete session identity claims no session;
    it is listed as ignored and does not fail the run.
 7. **No migration from the cluster-scoped API.** The version stays
-   `v1alpha1`. Existing installations delete the CRDs (and with them every
-   access object) and reinstall. No release with the cluster-scoped API was
-   published.
+   `v1alpha1`. Kubernetes rejects a change of `spec.scope` in place, so
+   applying the new CRDs over an existing installation fails even when every
+   session is drained. Existing installations delete the CRDs (and with them
+   every access object) and reinstall, following
+   [Upgrading from cluster-scoped access objects](production-operations.md#upgrading-from-cluster-scoped-access-objects-adr-004-destructive).
+   No release with the cluster-scoped API was published.
 
 ## Consequences
 
@@ -78,7 +81,13 @@ is cheapest now.
   silently exempt every access object from admission; the chart test fails on
   it.
 - Validating and mutating webhooks reject an access object outside the
-  control namespaces before any other check.
+  control namespaces before any other check. This holds for all four kinds:
+  an AccessProfile is validated on creation with the same semantic and
+  placement rules that later decide whether it may be used, so a principal
+  allowed to create profiles cannot place one in a target or unrelated
+  namespace. Its spec is immutable, so creation is the only point to check.
+  Like every access kind, profile creation now fails closed while admission
+  is unavailable; GitOps tools retry until the webhook answers.
 - Approvals are append-only evidence of a human decision. Deleting the
   request does not release its approval; otherwise a requester could delete
   the request and then erase the decision. An approval may be deleted only

@@ -23,7 +23,13 @@ metadata:
   annotations:
     cert-manager.io/inject-ca-from: {{ printf "%s/%s-serving-cert" $.Release.Namespace $name | quote }}
 webhooks:
-  {{- range $resource := list "breakglassapproval" "breakglassrequest" "breakglasssession" }}
+  {{- /* AccessProfile is validated on creation only: its spec is immutable,
+  so placement is decided once (ADR-004). Order matches config/webhook. */}}
+  {{- $resources := list "breakglassapproval" "breakglassrequest" "breakglasssession" }}
+  {{- if eq $mode "validate" }}
+  {{- $resources = prepend $resources "accessprofile" }}
+  {{- end }}
+  {{- range $resource := $resources }}
   - name: {{ if eq $mode "mutate" }}m{{ else }}v{{ end }}{{ $resource }}-v1alpha1.kb.io
     admissionReviewVersions: [v1]
     clientConfig:
@@ -41,7 +47,7 @@ webhooks:
         apiVersions: [v1alpha1]
         operations:
           - CREATE
-          {{- if eq $mode "validate" }}
+          {{- if and (eq $mode "validate") (ne $resource "accessprofile") }}
           - UPDATE
           {{- if eq $resource "breakglassapproval" }}
           - DELETE

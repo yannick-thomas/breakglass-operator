@@ -125,6 +125,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := webhookv1alpha1.SetupAccessProfileWebhookWithManager(mgr, placement); err != nil {
+		setupLog.Error(err, "Failed to create webhook", "webhook", "AccessProfile")
+		os.Exit(1)
+	}
 	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(
 		mgr, placement, requestControllerUsername,
 	); err != nil {

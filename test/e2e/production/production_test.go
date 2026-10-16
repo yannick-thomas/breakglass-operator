@@ -157,12 +157,16 @@ var _ = Describe("Production installation", Ordered, func() {
 		}
 
 		By("creating a namespaced curated profile and a least-privilege requester")
+		// Profiles pass admission (ADR-004), which fails closed: retry until
+		// the webhook Service routes to the just-started admission pods.
 		for _, path := range []string{
 			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
 			"config/samples/access_v1alpha1_accessprofile.yaml",
 		} {
-			_, err = utils.Run(exec.Command("kubectl", "apply", "-f", path))
-			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() error {
+				_, applyErr := utils.Run(exec.Command("kubectl", "apply", "-f", path))
+				return applyErr
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
 		}
 		_, err = applyManifest(requesterRBAC)
 		Expect(err).NotTo(HaveOccurred())

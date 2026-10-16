@@ -217,6 +217,18 @@ func (p Placement) AllowsControl(namespace string) bool {
 	return namespace != "" && p.Control.Allows(namespace)
 }
 
+// AdmitProfile decides whether a profile may be created. It applies the
+// same semantic and placement rules that later decide whether the profile
+// may be used, so a profile outside the control namespaces, or one granting
+// in a namespace this manager does not serve, is rejected when it is written
+// rather than only when someone tries to use it. It returns a denial reason.
+func (p Placement) AdmitProfile(profile Profile) error {
+	if _, defect := profile.Check(); defect != ProfileValid {
+		return profile.DefectError(defect)
+	}
+	return p.CheckProfile(profile)
+}
+
 // CheckProfile decides whether a profile may be used at all: it must live in
 // a control namespace and grant in an allowed target namespace that is not a
 // control namespace. It returns a denial reason.

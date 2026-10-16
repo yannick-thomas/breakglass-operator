@@ -223,6 +223,13 @@ For each upgrade:
 4. Upgrade the pinned chart/image; verify certificates, webhook CA injection, an
    attributed test request and confirmed cleanup.
 
+**Installations with the cluster-scoped CRDs (before ADR-004) cannot be
+upgraded.** Kubernetes rejects changing `spec.scope` in place, so step 2 fails
+and Helm never replaces existing CRDs. Uninstall the old release, delete the
+four CRDs (which deletes every access object) and install this chart fresh,
+following the
+[destructive upgrade procedure](../../docs/production-operations.md#upgrading-from-cluster-scoped-access-objects-adr-004-destructive).
+
 Helm upgrade E2E qualifies a rollout **within this chart version** that retains the
 exact active RoleBinding UID. It is not a cross-version API/rollback guarantee.
 Never roll back to the removed free-form access API.

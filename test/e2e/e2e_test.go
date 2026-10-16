@@ -102,18 +102,24 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
 		By("creating the target and control namespaces and the curated profile")
-		for _, ns := range []string{targetNamespace, controlNamespace} {
-			cmd = exec.Command("kubectl", "create", "namespace", ns)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create namespace "+ns)
-		}
+		cmd = exec.Command("kubectl", "create", "namespace", targetNamespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace "+targetNamespace)
+		// The sample control namespace carries the opt-in label of the drain
+		// check, as the default profile selects control namespaces by label.
+		cmd = exec.Command("kubectl", "apply", "-f", "config/samples/namespace_breakglass_access.yaml")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace "+controlNamespace)
+		// Profiles pass admission (ADR-004), which fails closed: retry until
+		// the webhook Service routes to the just-started admission pods.
 		for _, path := range []string{
 			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
 			"config/samples/access_v1alpha1_accessprofile.yaml",
 		} {
-			cmd = exec.Command("kubectl", "apply", "-f", path)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to apply curated access policy")
+			Eventually(func() error {
+				_, applyErr := utils.Run(exec.Command("kubectl", "apply", "-f", path))
+				return applyErr
+			}, 2*time.Minute, 2*time.Second).Should(Succeed(), "Failed to apply curated access policy")
 		}
 		_, err = applyManifest(`
 apiVersion: access.breakglass.io/v1alpha1
@@ -220,7 +226,10 @@ subjects:
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up breakglass e2e policy")
-		cmd := exec.Command("kubectl", "delete", "breakglasssession", e2eSessionName, "-n", controlNamespace, "--ignore-not-found")
+		// Every session must be gone before the labelled control namespace
+		// can be deleted (drain check, ADR-004).
+		cmd := exec.Command("kubectl", "delete", "breakglasssessions", "--all", "-n", controlNamespace,
+			"--ignore-not-found", "--timeout=2m")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName, "-n", controlNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -710,6 +719,35 @@ spec:
 			Expect(output).To(ContainSubstring("< HTTP/1.1 200 OK"))
 			Expect(output).To(ContainSubstring("breakglass_admission_requests_total"),
 				"admission decisions must be exported by the admission pods")
+		})
+
+		It("enforces placement for profiles and draining for control namespaces", func() {
+			By("rejecting a profile that would grant in its own namespace")
+			_, err := applyManifest(`
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  name: e2e-profile-in-target
+  namespace: production
+spec:
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m
+`)
+			Expect(err).To(HaveOccurred(), "admission must reject a profile outside its placement")
+			Expect(err.Error()).To(ContainSubstring("must not grant access in its own namespace"))
+
+			By("denying deletion of the labelled control namespace while it holds a session")
+			cmd := exec.Command("kubectl", "get", "breakglasssessions", "-n", controlNamespace, "-o", "name")
+			sessions, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(sessions)).NotTo(BeEmpty(), "the approval scenario must leave a session behind")
+			cmd = exec.Command("kubectl", "delete", "namespace", controlNamespace, "--wait=false")
+			output, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "the drain check must deny deleting a control namespace with sessions")
+			Expect(output + err.Error()).To(ContainSubstring("still holds"))
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks

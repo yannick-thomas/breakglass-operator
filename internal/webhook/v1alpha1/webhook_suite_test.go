@@ -112,6 +112,9 @@ var _ = BeforeSuite(func() {
 
 	err = SetupBreakGlassSessionWebhookWithManager(mgr, access.Placement{}, "")
 	Expect(err).NotTo(HaveOccurred())
+	err = SetupAccessProfileWebhookWithManager(mgr, access.Placement{})
+	Expect(err).NotTo(HaveOccurred())
+
 	err = SetupControlNamespaceWebhookWithManager(mgr, access.Placement{})
 	Expect(err).NotTo(HaveOccurred())
 

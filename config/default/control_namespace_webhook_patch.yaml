@@ -11,13 +11,13 @@
 # Overlays with explicit --control-namespaces replace this selector with the
 # exact namespace names.
 - op: test
-  path: /webhooks/3/name
+  path: /webhooks/4/name
   value: vcontrolnamespace-v1.kb.io
 - op: add
-  path: /webhooks/3/namespaceSelector
+  path: /webhooks/4/namespaceSelector
   value:
     matchLabels:
       access.breakglass.io/control-namespace: "true"
 - op: add
-  path: /webhooks/3/rules/0/scope
+  path: /webhooks/4/rules/0/scope
   value: Cluster

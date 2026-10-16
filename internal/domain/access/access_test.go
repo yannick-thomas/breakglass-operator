@@ -565,3 +565,24 @@ func TestApprovalIsErasableOnlyWithItsNamespace(t *testing.T) {
 		t.Fatal("an approval must not block the deletion of its control namespace")
 	}
 }
+
+func TestAdmitProfileAppliesSemanticAndPlacementRules(t *testing.T) {
+	placement := Placement{Control: NamespaceScope{controlNS: {}}, Target: NamespaceScope{"production": {}}}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Profile)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*Profile) {}},
+		{name: "outside control namespaces", mutate: func(p *Profile) { p.Namespace = "team-b" }, wantErr: "not in a control namespace"},
+		{name: "own namespace", mutate: func(p *Profile) { p.TargetNamespace = controlNS }, wantErr: "must not grant access in its own namespace"},
+		{name: "target not allowed", mutate: func(p *Profile) { p.TargetNamespace = "kube-system" }, wantErr: "outside this manager's allowed namespace set"},
+		{name: "invalid role", mutate: func(p *Profile) { p.RoleRef.Kind = "Role" }, wantErr: "curated ClusterRole"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := validProfile()
+			tc.mutate(&profile)
+			assertErr(t, placement.AdmitProfile(profile), tc.wantErr)
+		})
+	}
+}

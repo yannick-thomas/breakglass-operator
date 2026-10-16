@@ -76,6 +76,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-access-breakglass-io-v1alpha1-accessprofile
+  failurePolicy: Fail
+  name: vaccessprofile-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - access.breakglass.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    resources:
+    - accessprofiles
+  sideEffects: None
+  timeoutSeconds: 5
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-access-breakglass-io-v1alpha1-breakglassapproval
   failurePolicy: Fail
   name: vbreakglassapproval-v1alpha1.kb.io
