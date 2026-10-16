@@ -1,4 +1,5 @@
-# This patch ensures the webhook certificates are properly mounted in the manager container.
+# This patch ensures the webhook certificates are properly mounted in the admission container
+# (ADR-005). The manager Deployment never receives the serving certificate.
 # It configures the necessary arguments, volumes, volume mounts, and container ports.
 
 # Add the --webhook-cert-path argument for configuring the webhook certificate path

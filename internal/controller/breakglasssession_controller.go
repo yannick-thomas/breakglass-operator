@@ -133,6 +133,8 @@ func (r *BreakGlassSessionReconciler) lifecycle(namespace string) *sessionlifecy
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=breakglass-pod-observer,verbs=get;bind
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// NamespaceAbsent confirms a deleted target namespace during cleanup.
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 
 // Reconcile hands one BreakGlassSession to the lifecycle use case.
 func (r *BreakGlassSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

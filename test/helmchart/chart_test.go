@@ -140,17 +140,20 @@ func TestRenderedSecurityBoundary(t *testing.T) {
 			verifyGuardNamespaceObservation(t, objects, tc.release, tc.namespace,
 				observedNamespaces(tc.targets, tc.controls))
 			verifyAdmission(t, objects, tc.release, tc.namespace, tc.controls)
+			verifyAdmissionTopology(t, objects, tc.release, tc.namespace)
+			verifyAdmissionRBAC(t, objects, tc.release, tc.namespace, tc.targets, tc.controls)
 			verifySourceParity(t, objects, tc.release, tc.controls, tc.targets, tc.roles)
 			manager := object(t, objects, "Deployment", tc.release+"-controller-manager", tc.namespace)
 			managerPod := field(t, manager, "spec", "template", "spec").(map[string]any)
 			verifyPod(t, managerPod, tc.release+"-controller-manager", tc.targets, tc.controls)
 			container := field(t, managerPod, "containers").([]any)[0].(map[string]any)
 			args, _, _ := unstructured.NestedStringSlice(container, "args")
-			identity := "--request-controller-username=system:serviceaccount:" +
-				tc.namespace + ":" + tc.release + "-controller-manager"
-			if !slices.Contains(args, identity) {
-				t.Fatal("admission controller identity does not match rendered ServiceAccount")
+			if !slices.Contains(args, controllerIdentityArg(tc.release, tc.namespace)) {
+				t.Fatal("request controller identity does not match rendered ServiceAccount")
 			}
+			admission := object(t, objects, "Deployment", tc.release+"-admission", tc.namespace)
+			admissionPod := field(t, admission, "spec", "template", "spec").(map[string]any)
+			verifyPod(t, admissionPod, tc.release+"-admission", tc.targets, tc.controls)
 			guard := object(t, objects, "CronJob", tc.release+"-expiry-guard", tc.namespace)
 			guardPod := field(t, guard, "spec", "jobTemplate", "spec", "template", "spec").(map[string]any)
 			verifyPod(t, guardPod, tc.release+"-expiry-guard", tc.targets, tc.controls)
@@ -164,8 +167,8 @@ func TestRenderedSecurityBoundary(t *testing.T) {
 	}
 }
 
-// observedNamespaces is the ordered, duplicate-free set of namespaces the
-// manager may get: the targets (cleanup recovery) and the control namespaces
+// observedNamespaces is the ordered, duplicate-free set of namespaces that
+// admission and the guard may get: the targets and the control namespaces
 // (approval deletion during namespace deletion).
 func observedNamespaces(targets, controls []string) []string {
 	var names []string
@@ -209,8 +212,14 @@ func verifyRoleBoundary(
 				}
 				if slices.Contains(resources, "namespaces") {
 					names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
-					if !reflect.DeepEqual(names, observedNamespaces(targets, controls)) || !reflect.DeepEqual(verbs, []string{"get"}) {
-						t.Fatal("namespace observation must match the explicit target and control sets")
+					// The manager confirms only target namespace absence; admission
+					// and the guard also observe the control namespaces (ADR-005).
+					want := observedNamespaces(targets, controls)
+					if item.GetName() == release+"-manager-role" {
+						want = targets
+					}
+					if !reflect.DeepEqual(names, want) || !reflect.DeepEqual(verbs, []string{"get"}) {
+						t.Fatalf("namespace observation in %s must match the explicit namespace sets", item.GetName())
 					}
 				}
 			}
@@ -261,7 +270,8 @@ func verifyControlBoundary(
 ) {
 	t.Helper()
 	for _, name := range []string{
-		release + "-manager-role", release + "-expiry-guard-role", release + "-expiry-guard-namespaces",
+		release + "-manager-role", release + "-admission-role", release + "-expiry-guard-role",
+		release + "-expiry-guard-namespaces",
 	} {
 		for _, item := range objects {
 			if item.GetKind() != "ClusterRole" || item.GetName() != name {
@@ -277,6 +287,7 @@ func verifyControlBoundary(
 	}
 	for _, item := range objects {
 		if item.GetKind() == "Role" && (strings.HasSuffix(item.GetName(), "-manager-access") ||
+			strings.HasSuffix(item.GetName(), "-admission-access") ||
 			strings.HasSuffix(item.GetName(), "-expiry-guard-sessions")) && !slices.Contains(controls, item.GetNamespace()) {
 			t.Fatal("access object permissions outside configured control namespaces")
 		}
@@ -292,6 +303,7 @@ func verifyControlBoundary(
 		}
 		for _, component := range []struct{ role, sa string }{
 			{release + "-manager-access", release + "-controller-manager"},
+			{release + "-admission-access", release + "-admission"},
 			{release + "-expiry-guard-sessions", release + "-expiry-guard"},
 		} {
 			object(t, objects, "Role", component.role, control)
@@ -507,7 +519,7 @@ func verifySourceParity(
 	}
 	expectedRules = append(expectedRules, map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"namespaces"},
-		"resourceNames": stringItems(observedNamespaces(targets, controls)), "verbs": []any{"get"},
+		"resourceNames": stringItems(targets), "verbs": []any{"get"},
 	})
 	managerRole := object(t, objects, "ClusterRole", release+"-manager-role", "")
 	if !reflect.DeepEqual(field(t, managerRole, "rules"), expectedRules) {
@@ -519,6 +531,7 @@ func verifySourceParity(
 			t.Fatal("manager control-namespace RBAC has drifted from the generated controller contract")
 		}
 	}
+	verifyAdmissionSourceParity(t, objects, release, controls, targets)
 	for _, source := range read("config/webhook/manifests.yaml") {
 		rendered := object(t, objects, source.GetKind(), release+"-"+source.GetName(), "")
 		expected := field(t, source.Object, "webhooks").([]any)
@@ -605,7 +618,7 @@ func TestReleasePackagePinsBothImages(t *testing.T) {
 	}
 	objects := decode(t, output)
 	for _, component := range []struct{ suffix, image string }{
-		{"controller-manager", managerImage}, {"webui", webuiImage},
+		{"controller-manager", managerImage}, {"admission", managerImage}, {"webui", webuiImage},
 	} {
 		deployment := object(t, objects, "Deployment", "release-"+component.suffix, "release-system")
 		containers := field(t, deployment, "spec", "template", "spec", "containers").([]any)
@@ -660,5 +673,331 @@ func TestReleaseRequiresSuccessfulCIForExactRevision(t *testing.T) {
 				t.Fatalf("unexpected release authorization: %v\n%s", err, output)
 			}
 		})
+	}
+}
+
+// admissionSourcePath is the ClusterRole controller-gen derives from the
+// webhook RBAC markers (ADR-005); it is also the Kustomize admission role.
+const admissionSourcePath = "config/rbac/admission_role.yaml"
+
+// verifyAdmissionSourceParity requires the chart's admission rights to equal
+// those the webhook markers declare, with namespace reads narrowed to explicit
+// names and access-object reads moved into the control namespaces.
+func verifyAdmissionSourceParity(
+	t *testing.T, objects []unstructured.Unstructured, release string, controls, targets []string,
+) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), admissionSourcePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := decode(t, data)
+	if len(sources) != 1 || sources[0].GetKind() != "ClusterRole" {
+		t.Fatalf("%s must hold exactly one ClusterRole", admissionSourcePath)
+	}
+	sourceRules := field(t, sources[0].Object, "rules").([]any)
+	expectedRules := make([]any, 0, len(sourceRules))
+	expectedControlRules := make([]any, 0, len(sourceRules))
+	for _, raw := range sourceRules {
+		rule := raw.(map[string]any)
+		groups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
+		resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+		switch {
+		case slices.Equal(groups, []string{"access.breakglass.io"}):
+			expectedControlRules = append(expectedControlRules, rule)
+			continue
+		case slices.Equal(resources, []string{"namespaces"}):
+			rule["resourceNames"] = stringItems(observedNamespaces(targets, controls))
+		}
+		expectedRules = append(expectedRules, rule)
+	}
+	admissionRole := object(t, objects, "ClusterRole", release+"-admission-role", "")
+	if !sameRules(t, field(t, admissionRole, "rules").([]any), expectedRules) {
+		t.Fatal("admission RBAC has drifted from the generated webhook contract")
+	}
+	for _, control := range controls {
+		access := object(t, objects, "Role", release+"-admission-access", control)
+		if !sameRules(t, field(t, access, "rules").([]any), expectedControlRules) {
+			t.Fatal("admission control-namespace RBAC has drifted from the generated webhook contract")
+		}
+	}
+}
+
+// sameRules compares two rule lists regardless of their order.
+func sameRules(t *testing.T, a, b []any) bool {
+	t.Helper()
+	encode := func(rules []any) []string {
+		encoded := make([]string, len(rules))
+		for i, rule := range rules {
+			data, err := json.Marshal(rule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded[i] = string(data)
+		}
+		slices.Sort(encoded)
+		return encoded
+	}
+	return slices.Equal(encode(a), encode(b))
+}
+
+func controllerIdentityArg(release, namespace string) string {
+	return "--request-controller-username=system:serviceaccount:" + namespace + ":" + release + "-controller-manager"
+}
+
+// placementArgPrefixes name the arguments the manager and admission must
+// share: the namespace scope and the trusted controller identity (ADR-005).
+var placementArgPrefixes = []string{
+	"--allowed-target-namespaces=", "--control-namespaces=", "--request-controller-username=",
+}
+
+func placementArgs(args []string) []string {
+	var placement []string
+	for _, arg := range args {
+		for _, prefix := range placementArgPrefixes {
+			if strings.HasPrefix(arg, prefix) {
+				placement = append(placement, arg)
+			}
+		}
+	}
+	return placement
+}
+
+func soleContainer(t *testing.T, deployment map[string]any) map[string]any {
+	t.Helper()
+	containers := field(t, deployment, "spec", "template", "spec", "containers").([]any)
+	if len(containers) != 1 {
+		t.Fatal("unexpected sidecar at the security boundary")
+	}
+	return containers[0].(map[string]any)
+}
+
+func hasArgPrefix(args []string, prefix string) bool {
+	return slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, prefix) })
+}
+
+// verifyAdmissionTopology checks the separate admission Deployment (ADR-005):
+// only admission serves webhooks and mounts the serving certificate, and both
+// Deployments run the same image, scope, availability and trust anchor.
+func verifyAdmissionTopology(t *testing.T, objects []unstructured.Unstructured, release, namespace string) {
+	t.Helper()
+	object(t, objects, "ServiceAccount", release+"-admission", namespace)
+	manager := object(t, objects, "Deployment", release+"-controller-manager", namespace)
+	admission := object(t, objects, "Deployment", release+"-admission", namespace)
+	managerContainer, admissionContainer := soleContainer(t, manager), soleContainer(t, admission)
+	managerArgs, _, _ := unstructured.NestedStringSlice(managerContainer, "args")
+	admissionArgs, _, _ := unstructured.NestedStringSlice(admissionContainer, "args")
+
+	if !reflect.DeepEqual(field(t, managerContainer, "command"), []any{"/manager"}) ||
+		!reflect.DeepEqual(field(t, admissionContainer, "command"), []any{"/admission"}) {
+		t.Fatal("manager and admission must run their own binaries")
+	}
+	if managerContainer["image"] != admissionContainer["image"] {
+		t.Fatal("manager and admission must run the same operator image")
+	}
+	if len(placementArgs(managerArgs)) != len(placementArgPrefixes) ||
+		!reflect.DeepEqual(placementArgs(managerArgs), placementArgs(admissionArgs)) {
+		t.Fatal("manager and admission placement arguments differ")
+	}
+	if !slices.Contains(admissionArgs, controllerIdentityArg(release, namespace)) {
+		t.Fatal("admission must trust exactly the manager's ServiceAccount for request-sourced sessions")
+	}
+	if hasArgPrefix(admissionArgs, "--leader-elect") || !slices.Contains(managerArgs, "--leader-elect") {
+		t.Fatal("only the manager uses leader election")
+	}
+	if !slices.Contains(admissionArgs, "--metrics-secure=true") {
+		t.Fatal("admission metrics must be served securely")
+	}
+	if field(t, manager, "spec", "replicas") != field(t, admission, "spec", "replicas") {
+		t.Fatal("admission must run as many replicas as the manager")
+	}
+	verifyWebhookServing(t, objects, release, namespace, manager, admission)
+	verifyAdmissionAvailability(t, objects, release, namespace, manager, admission)
+}
+
+// verifyWebhookServing requires that only admission serves webhooks, holds the
+// serving certificate and backs the webhook and admission metrics Services.
+func verifyWebhookServing(
+	t *testing.T, objects []unstructured.Unstructured, release, namespace string, manager, admission map[string]any,
+) {
+	t.Helper()
+	managerContainer, admissionContainer := soleContainer(t, manager), soleContainer(t, admission)
+	managerArgs, _, _ := unstructured.NestedStringSlice(managerContainer, "args")
+	admissionArgs, _, _ := unstructured.NestedStringSlice(admissionContainer, "args")
+	if hasArgPrefix(managerArgs, "--webhook-") {
+		t.Fatal("manager must not serve webhooks")
+	}
+	if !slices.Contains(admissionArgs, "--webhook-port=9443") ||
+		!slices.Contains(admissionArgs, "--webhook-cert-path=/tmp/k8s-webhook-server/serving-certs") {
+		t.Fatal("admission must serve webhooks with the mounted serving certificate")
+	}
+	webhookSecret := release + "-webhook-server-cert"
+	for _, component := range []struct {
+		deployment, container map[string]any
+		serves                bool
+	}{{manager, managerContainer, false}, {admission, admissionContainer, true}} {
+		ports, _, _ := unstructured.NestedSlice(component.container, "ports")
+		servesPort := slices.ContainsFunc(ports, func(raw any) bool {
+			port := raw.(map[string]any)
+			return port["name"] == "webhook-server" || port["containerPort"] == float64(9443)
+		})
+		volumes, _, _ := unstructured.NestedSlice(component.deployment, "spec", "template", "spec", "volumes")
+		mountsCert := slices.ContainsFunc(volumes, func(raw any) bool {
+			name, _, _ := unstructured.NestedString(raw.(map[string]any), "secret", "secretName")
+			return name == webhookSecret
+		})
+		if servesPort != component.serves || mountsCert != component.serves {
+			t.Fatal("only admission may expose the webhook port and mount the serving certificate")
+		}
+	}
+
+	// The webhook Service selects the admission pods and never the manager.
+	admissionLabels, _, _ := unstructured.NestedStringMap(admission, "spec", "template", "metadata", "labels")
+	managerLabels, _, _ := unstructured.NestedStringMap(manager, "spec", "template", "metadata", "labels")
+	if admissionLabels["app.kubernetes.io/component"] != "admission" {
+		t.Fatal("admission pods must carry the admission component label")
+	}
+	selectorMatches := func(selector, labels map[string]string) bool {
+		for key, value := range selector {
+			if labels[key] != value {
+				return false
+			}
+		}
+		return len(selector) > 0
+	}
+	service := object(t, objects, "Service", release+"-webhook-service", namespace)
+	selector, _, _ := unstructured.NestedStringMap(service, "spec", "selector")
+	if !selectorMatches(selector, admissionLabels) || selectorMatches(selector, managerLabels) {
+		t.Fatal("webhook Service must select only the admission pods")
+	}
+	deploymentSelector, _, _ := unstructured.NestedStringMap(admission, "spec", "selector", "matchLabels")
+	if !reflect.DeepEqual(deploymentSelector, selector) || selectorMatches(deploymentSelector, managerLabels) {
+		t.Fatal("admission Deployment selector must not overlap the manager pods")
+	}
+	metrics := object(t, objects, "Service", release+"-admission-metrics-service", namespace)
+	metricsSelector, _, _ := unstructured.NestedStringMap(metrics, "spec", "selector")
+	if !reflect.DeepEqual(metricsSelector, selector) {
+		t.Fatal("admission metrics Service must select the admission pods")
+	}
+}
+
+// verifyAdmissionAvailability requires admission to follow the manager's
+// host spreading and PodDisruptionBudget policy, each for its own pods.
+func verifyAdmissionAvailability(
+	t *testing.T, objects []unstructured.Unstructured, release, namespace string, manager, admission map[string]any,
+) {
+	t.Helper()
+	deploymentSelector, _, _ := unstructured.NestedStringMap(admission, "spec", "selector", "matchLabels")
+	spread := func(deployment map[string]any) ([]any, bool) {
+		constraints, found, _ := unstructured.NestedSlice(deployment, "spec", "template", "spec", "topologySpreadConstraints")
+		return constraints, found
+	}
+	managerSpread, managerSpreads := spread(manager)
+	admissionSpread, admissionSpreads := spread(admission)
+	if managerSpreads != admissionSpreads || len(managerSpread) != len(admissionSpread) {
+		t.Fatal("admission host spreading must follow the manager")
+	}
+	if admissionSpreads {
+		spreadSelector, _, _ := unstructured.NestedStringMap(
+			admissionSpread[0].(map[string]any), "labelSelector", "matchLabels")
+		if !reflect.DeepEqual(spreadSelector, deploymentSelector) {
+			t.Fatal("admission spreading must select the admission pods")
+		}
+	}
+	var managerPDB, admissionPDB map[string]any
+	for _, item := range objects {
+		if item.GetKind() == "PodDisruptionBudget" && item.GetNamespace() == namespace {
+			switch item.GetName() {
+			case release + "-controller-manager":
+				managerPDB = item.Object
+			case release + "-admission":
+				admissionPDB = item.Object
+			}
+		}
+	}
+	if (managerPDB == nil) != (admissionPDB == nil) {
+		t.Fatal("admission must have a PodDisruptionBudget exactly when the manager has one")
+	}
+	if admissionPDB != nil {
+		pdbSelector, _, _ := unstructured.NestedStringMap(admissionPDB, "spec", "selector", "matchLabels")
+		if !reflect.DeepEqual(pdbSelector, deploymentSelector) ||
+			field(t, admissionPDB, "spec", "minAvailable") != field(t, managerPDB, "spec", "minAvailable") {
+			t.Fatal("admission PodDisruptionBudget must protect the admission pods like the manager's")
+		}
+	}
+}
+
+// verifyAdmissionRBAC bounds admission to reading (ADR-005): it may ask
+// authorization questions, get the target and control namespaces by name and
+// read the access kinds in the control namespaces. It must never grant,
+// extend or repair access.
+func verifyAdmissionRBAC(
+	t *testing.T, objects []unstructured.Unstructured, release, namespace string, targets, controls []string,
+) {
+	t.Helper()
+	subject := map[string]any{"kind": "ServiceAccount", "name": release + "-admission", "namespace": namespace}
+	allowed := map[string]bool{
+		"ClusterRole/" + release + "-admission-role":    true,
+		"ClusterRole/" + release + "-metrics-auth-role": true,
+		"Role/" + release + "-admission-access":         true,
+	}
+	for _, item := range objects {
+		if item.GetKind() != "ClusterRoleBinding" && item.GetKind() != "RoleBinding" {
+			continue
+		}
+		subjects, _, _ := unstructured.NestedSlice(item.Object, "subjects")
+		if !slices.ContainsFunc(subjects, func(raw any) bool { return reflect.DeepEqual(raw, subject) }) {
+			continue
+		}
+		ref := field(t, item.Object, "roleRef", "kind").(string) + "/" + field(t, item.Object, "roleRef", "name").(string)
+		if !allowed[ref] {
+			t.Fatalf("admission is bound to unexpected %s through %s", ref, item.GetName())
+		}
+		if ref == "Role/"+release+"-admission-access" && !slices.Contains(controls, item.GetNamespace()) {
+			t.Fatal("admission reads access objects outside the control namespaces")
+		}
+	}
+
+	want := []any{
+		map[string]any{
+			"apiGroups": []any{"authorization.k8s.io"}, "resources": []any{"subjectaccessreviews"},
+			"verbs": []any{"create"},
+		},
+		map[string]any{
+			"apiGroups": []any{""}, "resources": []any{"namespaces"},
+			"resourceNames": stringItems(observedNamespaces(targets, controls)), "verbs": []any{"get"},
+		},
+	}
+	role := object(t, objects, "ClusterRole", release+"-admission-role", "")
+	if rules := field(t, role, "rules"); !reflect.DeepEqual(rules, want) {
+		t.Fatalf("admission ClusterRole exceeds its read-only contract: %v", rules)
+	}
+	binding := object(t, objects, "ClusterRoleBinding", release+"-admission-rolebinding", "")
+	if field(t, binding, "roleRef", "name") != release+"-admission-role" ||
+		!reflect.DeepEqual(field(t, binding, "subjects"), []any{subject}) {
+		t.Fatal("admission ClusterRole is bound to the wrong identity")
+	}
+	wantAccess := []any{map[string]any{
+		"apiGroups": []any{"access.breakglass.io"},
+		"resources": []any{"accessprofiles", "breakglassapprovals", "breakglassrequests", "breakglasssessions"},
+		"verbs":     []any{"get", "list"},
+	}}
+	for _, control := range controls {
+		access := object(t, objects, "Role", release+"-admission-access", control)
+		if !reflect.DeepEqual(field(t, access, "rules"), wantAccess) {
+			t.Fatalf("admission may only get and list access objects in %s", control)
+		}
+		binding := object(t, objects, "RoleBinding", release+"-admission-access", control)
+		if !reflect.DeepEqual(field(t, binding, "subjects"), []any{subject}) {
+			t.Fatal("admission access Role is bound to the wrong identity")
+		}
+	}
+
+	// The manager no longer answers admission questions (ADR-005).
+	for _, raw := range field(t, object(t, objects, "ClusterRole", release+"-manager-role", ""), "rules").([]any) {
+		resources, _, _ := unstructured.NestedStringSlice(raw.(map[string]any), "resources")
+		if slices.Contains(resources, "subjectaccessreviews") {
+			t.Fatal("manager must not keep the webhooks' SubjectAccessReview right")
+		}
 	}
 }

@@ -1,3 +1,4 @@
 resources:
 - manager.yaml
 - expiry_guard_cronjob.yaml
+- admission.yaml

@@ -55,12 +55,6 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
-- apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - clusterroles

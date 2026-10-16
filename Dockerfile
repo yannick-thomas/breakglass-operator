@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Build the manager binary
+# Build the manager, admission and expiry-guard binaries
 # Override BASE_IMAGE to build from another registry, e.g. docker.io/library/golang:1.26
 ARG BASE_IMAGE=golang:1.26
 # Go can cross-compile a static manager binary. Keeping the builder on the
@@ -28,6 +28,7 @@ COPY . .
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o manager ./cmd/main.go
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o expiry-guard ./cmd/expiry-guard
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -o admission ./cmd/admission
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -36,6 +37,9 @@ WORKDIR /
 COPY --from=builder /workspace/manager .
 # The independent expiry guard ships in the same image and runs as a CronJob.
 COPY --from=builder /workspace/expiry-guard .
+# The admission server ships in the same image and runs as its own Deployment
+# (ADR-005).
+COPY --from=builder /workspace/admission .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

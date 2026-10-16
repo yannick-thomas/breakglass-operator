@@ -43,6 +43,9 @@ finish() {
     "$kubectl_bin" --context "$context" -n breakglass-operator-system logs \
       -l control-plane=controller-manager --all-containers=true --prefix=true --tail=1000 \
       > "$artifacts/manager.log" 2>&1 || true
+    "$kubectl_bin" --context "$context" -n breakglass-operator-system logs \
+      -l app.kubernetes.io/component=admission --all-containers=true --prefix=true --tail=1000 \
+      > "$artifacts/admission.log" 2>&1 || true
     "$kind_bin" export logs "$artifacts/kind-logs" --name "$cluster" >/dev/null 2>&1 || true
   fi
   if [[ "$status" == 0 && "${KEEP_TEST_CLUSTER:-false}" != true ]]; then

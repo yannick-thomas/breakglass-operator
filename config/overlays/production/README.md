@@ -1,11 +1,20 @@
 # Production overlay
 
-This overlay consumes `config/default` and adds controller availability:
+This overlay consumes `config/default` and adds availability to both
+Deployments (ADR-005):
 
-* two manager replicas with leader election;
-* a `PodDisruptionBudget` that keeps one replica available during voluntary
-  disruptions; and
-* hostname spreading plus preferred pod anti-affinity.
+* two manager replicas with leader election, and two admission replicas
+  (admission needs no leader election; every replica serves);
+* one `PodDisruptionBudget` per Deployment
+  (`breakglass-operator-controller-manager`, `breakglass-operator-admission`)
+  that keeps one replica available during voluntary disruptions; and
+* hostname spreading plus preferred pod anti-affinity, per Deployment.
+
+The manager runs the reconcilers and serves no webhook. The admission
+Deployment serves every webhook behind `breakglass-operator-webhook-service`
+and alone mounts the serving certificate. Rolling one never removes the
+other: a manager rollout no longer blocks requests, and an admission rollout
+keeps one replica serving.
 
 Render it with:
 
@@ -19,7 +28,9 @@ a separately reviewed non-HA overlay; silently weakening this production
 configuration would make the availability claim misleading.
 
 This overlay inherits the default's cert-manager-issued webhook certificate,
-CA injection, fail-closed webhooks, and authenticated HTTPS metrics endpoint.
+CA injection, fail-closed webhooks, and authenticated HTTPS metrics endpoints
+(`breakglass-operator-controller-manager-metrics-service` and
+`breakglass-operator-admission-metrics-service`).
 It does not enable the generated Prometheus `ServiceMonitor`: that scaffold
 uses `insecureSkipVerify` until a cluster-specific, CA-validating scraper
 configuration is supplied. It also does not add a network policy because the

@@ -7,8 +7,9 @@ metadata:
   labels:
     {{- include "breakglass.labels" . | nindent 4 }}
 spec:
+  # Only the admission pods serve webhooks (ADR-005).
   selector:
-    {{- include "breakglass.managerSelector" . | nindent 4 }}
+    {{- include "breakglass.admissionSelector" . | nindent 4 }}
   ports:
     - {name: https, port: 443, targetPort: webhook-server, protocol: TCP}
 {{- range $mode := list "mutate" "validate" }}
@@ -56,7 +57,7 @@ webhooks:
   # deleted only after its sessions are gone, because the manager's rights on
   # them are the Roles in that namespace. It fails closed, so the selector
   # limits it to exactly the control namespaces; no other namespace deletion
-  # depends on the manager.
+  # depends on admission.
   - name: vcontrolnamespace-v1.kb.io
     admissionReviewVersions: [v1]
     clientConfig:

@@ -10,3 +10,8 @@ subjects:
 - kind: ServiceAccount
   name: controller-manager
   namespace: system
+# Both Deployments serve authenticated metrics (TokenReview and
+# SubjectAccessReview for the scraper).
+- kind: ServiceAccount
+  name: admission
+  namespace: system

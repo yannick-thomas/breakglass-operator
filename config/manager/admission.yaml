@@ -1,0 +1,74 @@
+# Admission server (ADR-005): serves every admission webhook from the same
+# image as the manager, under its own ServiceAccount. It runs no reconciler
+# and no leader election, so every replica serves. config/default adds the
+# webhook serving certificate, the metrics endpoint and the request
+# controller identity; the production overlays add replicas, spreading and
+# a PodDisruptionBudget.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admission
+  namespace: system
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: breakglass-operator
+      app.kubernetes.io/component: admission
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: admission
+      labels:
+        app.kubernetes.io/name: breakglass-operator
+        app.kubernetes.io/component: admission
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - command:
+        - /admission
+        args:
+          - --health-probe-bind-address=:8081
+        image: controller:latest
+        name: admission
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts: []
+      volumes: []
+      serviceAccountName: admission
+      terminationGracePeriodSeconds: 30

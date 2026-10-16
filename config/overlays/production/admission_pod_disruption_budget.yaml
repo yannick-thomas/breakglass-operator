@@ -1,0 +1,18 @@
+# Keeps one admission replica serving during voluntary disruptions. Admission
+# fails closed, so losing every replica blocks requests, approvals, sessions
+# and control-namespace deletion (ADR-005).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: breakglass-operator-admission
+  namespace: breakglass-operator-system
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: breakglass-operator
+      app.kubernetes.io/component: admission

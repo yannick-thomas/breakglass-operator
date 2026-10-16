@@ -11,19 +11,24 @@ spec:
   selfSigned: {}
 ---
 {{- end }}
-{{- range $component := list "webhook" "metrics" }}
+{{- /* certificate name, Service it serves, Secret name */ -}}
+{{- $certs := list
+  (list "serving-cert" "webhook-service" "webhook-server-cert")
+  (list "metrics-cert" "controller-manager-metrics-service" "metrics-server-cert")
+  (list "admission-metrics-cert" "admission-metrics-service" "admission-metrics-server-cert") }}
+{{- range $cert := $certs }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ $name }}-{{ if eq $component "webhook" }}serving-cert{{ else }}metrics-cert{{ end }}
+  name: {{ $name }}-{{ index $cert 0 }}
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "breakglass.labels" $ | nindent 4 }}
 spec:
   dnsNames:
-    - {{ $name }}-{{ if eq $component "webhook" }}webhook-service{{ else }}controller-manager-metrics-service{{ end }}.{{ $.Release.Namespace }}.svc
-    - {{ $name }}-{{ if eq $component "webhook" }}webhook-service{{ else }}controller-manager-metrics-service{{ end }}.{{ $.Release.Namespace }}.svc.cluster.local
-  secretName: {{ $name }}-{{ $component }}-server-cert
+    - {{ $name }}-{{ index $cert 1 }}.{{ $.Release.Namespace }}.svc
+    - {{ $name }}-{{ index $cert 1 }}.{{ $.Release.Namespace }}.svc.cluster.local
+  secretName: {{ $name }}-{{ index $cert 2 }}
   issuerRef:
     {{- if $.Values.certManager.issuerRef }}
     {{- toYaml $.Values.certManager.issuerRef | nindent 4 }}

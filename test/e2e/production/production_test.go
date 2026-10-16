@@ -34,10 +34,15 @@ import (
 )
 
 const (
-	managerImage     = "example.com/breakglass-operator:v0.0.1"
-	managerName      = "breakglass-operator-controller-manager"
-	managerNamespace = "breakglass-operator-system"
-	targetNamespace  = "production"
+	managerImage = "example.com/breakglass-operator:v0.0.1"
+	managerName  = "breakglass-operator-controller-manager"
+	// admissionName is the separate Deployment, PDB and ServiceAccount that
+	// serves every webhook (ADR-005); both installers use this name.
+	admissionName     = "breakglass-operator-admission"
+	managerSelector   = "control-plane=controller-manager"
+	admissionSelector = "app.kubernetes.io/component=admission"
+	managerNamespace  = "breakglass-operator-system"
+	targetNamespace   = "production"
 	// controlNamespace holds the access objects (ADR-004); it matches the
 	// production overlay and the chart default.
 	controlNamespace = "breakglass-access"
@@ -53,6 +58,7 @@ const (
 
 	haSessionName                  = "production-ha-session"
 	outageSessionName              = "production-webhook-outage-session"
+	managerOutageSessionName       = "production-manager-outage-session"
 	recoverySessionName            = "production-recovery-session"
 	ruleDriftSessionName           = "production-role-drift-session"
 	roleReuseSessionName           = "production-role-reuse-session"
@@ -141,6 +147,15 @@ var _ = Describe("Production installation", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
+		By("waiting until the manager and the separate admission Deployment are available")
+		for _, name := range []string{managerName, admissionName} {
+			_, err = utils.Run(exec.Command(
+				"kubectl", "wait", "--for=condition=Available", "deployment/"+name,
+				"-n", managerNamespace, "--timeout=5m",
+			))
+			Expect(err).NotTo(HaveOccurred())
+		}
+
 		By("creating a namespaced curated profile and a least-privilege requester")
 		for _, path := range []string{
 			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
@@ -154,14 +169,18 @@ var _ = Describe("Production installation", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		// A failed outage assertion can leave the manager scaled to zero. Ask for
-		// recovery before deleting sessions so their finalizers have a controller
-		// available; the deletes below are still non-blocking as a final guard.
-		_, _ = utils.Run(exec.Command(
-			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
-		))
+		// A failed outage assertion can leave the manager or admission scaled to
+		// zero. Ask for recovery before deleting sessions so their finalizers have
+		// a controller and their updates an admission server; the deletes below
+		// are still non-blocking as a final guard.
+		for _, name := range []string{managerName, admissionName} {
+			_, _ = utils.Run(exec.Command(
+				"kubectl", "scale", "deployment", name, "-n", managerNamespace, "--replicas=2",
+			))
+		}
 		for _, session := range []string{
-			haSessionName, outageSessionName, recoverySessionName, ruleDriftSessionName, roleReuseSessionName,
+			haSessionName, outageSessionName, managerOutageSessionName, recoverySessionName,
+			ruleDriftSessionName, roleReuseSessionName,
 			certificateRotationSessionName, expiryRecoverySessionName, rollingRestartSessionName,
 			rollingRestartRecoverySession, namespaceDeletionSessionName, expiryGuardSessionName,
 		} {
@@ -204,15 +223,20 @@ var _ = Describe("Production installation", Ordered, func() {
 		}
 	})
 
-	It("keeps the admission boundary safe through pod loss and total manager outage", func() {
-		By("waiting for two ready managers, ready webhook endpoints, a ready certificate, and a PDB")
+	It("keeps the admission boundary safe through pod loss and total admission outage", func() {
+		By("waiting for two ready managers, two ready admission webhook endpoints, a ready certificate, and PDBs")
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 
-		By("deleting one manager pod and waiting for HA recovery")
-		pods := readyManagerPods()
-		Expect(pods).To(HaveLen(2))
-		_, err := utils.Run(exec.Command("kubectl", "delete", "pod", pods[0], "-n", managerNamespace))
-		Expect(err).NotTo(HaveOccurred())
+		By("verifying that admission runs under its own least-privilege identity")
+		verifyAdmissionIdentity()
+
+		By("deleting one manager pod and one admission pod and waiting for HA recovery")
+		for _, selector := range []string{managerSelector, admissionSelector} {
+			pods := readyPods(selector)
+			Expect(pods).To(HaveLen(2))
+			_, err := utils.Run(exec.Command("kubectl", "delete", "pod", pods[0], "-n", managerNamespace))
+			Expect(err).NotTo(HaveOccurred())
+		}
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 
 		By("granting an attributed, namespaced session after the pod loss")
@@ -220,28 +244,38 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(sessionIsActive(haSessionName), 2*time.Minute, time.Second).Should(Succeed())
 		revokeSession(haSessionName)
 
-		By("scaling every manager down without changing the fail-closed webhook configuration")
-		_, err = utils.Run(exec.Command(
-			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0",
-		))
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(restoreProductionManager)
-		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
+		By("scaling every admission pod down without changing the fail-closed webhook configuration")
+		scaleDeployment(admissionName, 0)
+		DeferCleanup(restoreDeployment, admissionName)
+		Eventually(deploymentIsStopped(admissionName, admissionSelector), 2*time.Minute, time.Second).Should(Succeed())
 
-		By("proving that a new protected request is rejected while every manager is unavailable")
-		Expect(createSession(outageSessionName)).To(MatchError(ContainSubstring("failed")))
+		By("proving that a new protected request is rejected while admission is unavailable")
+		Expect(createSession(outageSessionName)).To(MatchError(ContainSubstring("failed calling webhook")))
 
-		By("restoring the manager deployment and proving that admission recovers")
-		_, err = utils.Run(exec.Command(
-			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
-		))
-		Expect(err).NotTo(HaveOccurred())
+		By("restoring the admission deployment and proving that admission recovers")
+		scaleDeployment(admissionName, 2)
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(func() error {
 			return createSession(recoverySessionName)
 		}, 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionIsActive(recoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
 		revokeSession(recoverySessionName)
+
+		By("stopping every manager while admission stays available")
+		scaleDeployment(managerName, 0)
+		DeferCleanup(restoreDeployment, managerName)
+		Eventually(deploymentIsStopped(managerName, managerSelector), 2*time.Minute, time.Second).Should(Succeed())
+
+		By("proving that a manager outage does not block admission, only provisioning")
+		Expect(createSession(managerOutageSessionName)).To(Succeed())
+		Expect(sessionPhase(managerOutageSessionName)).NotTo(Equal("Active"),
+			"no controller may have provisioned the session during the manager outage")
+
+		By("restoring the managers and requiring the admitted session to be provisioned")
+		scaleDeployment(managerName, 2)
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+		Eventually(sessionIsActive(managerOutageSessionName), 2*time.Minute, time.Second).Should(Succeed())
+		revokeSession(managerOutageSessionName)
 	})
 
 	It("suspends active sessions when the curated role changes or is recreated", func() {
@@ -289,28 +323,54 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
 		bindingName, bindingUID := sessionBindingReference(rollingRestartSessionName)
 		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
-		previousManagerUIDs := managerPodUIDs()
-		Expect(previousManagerUIDs).To(HaveLen(2))
 
-		var err error
 		if usesHelm() {
-			By("upgrading the Helm release without changing the active grant")
-			_, err = utils.Run(helmInstallCommand(true))
-		} else {
-			By("restarting the high-availability deployment without changing the active grant")
-			_, err = utils.Run(exec.Command(
-				"kubectl", "rollout", "restart", "deployment", managerName, "-n", managerNamespace,
-			))
+			By("upgrading the Helm release, which rolls the manager and admission, without changing the active grant")
+			previousUIDs := append(podUIDs(managerSelector), podUIDs(admissionSelector)...)
+			Expect(previousUIDs).To(HaveLen(4))
+			_, err := utils.Run(helmInstallCommand(true))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				assertProductionReady(g)
+				for _, selector := range []string{managerSelector, admissionSelector} {
+					current := podUIDs(selector)
+					g.Expect(current).To(HaveLen(2))
+					for _, previousUID := range previousUIDs {
+						g.Expect(current).NotTo(ContainElement(previousUID))
+					}
+				}
+			}, 5*time.Minute, time.Second).Should(Succeed())
+			Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
+			currentBindingName, currentBindingUID := sessionBindingReference(rollingRestartSessionName)
+			Expect(currentBindingName).To(Equal(bindingName))
+			Expect(currentBindingUID).To(Equal(bindingUID))
 		}
+
+		By("restarting only the manager deployment without changing the active grant")
+		previousManagerUIDs := podUIDs(managerSelector)
+		Expect(previousManagerUIDs).To(HaveLen(2))
+		admissionUIDs := podUIDs(admissionSelector)
+		Expect(admissionUIDs).To(HaveLen(2))
+		_, err := utils.Run(exec.Command(
+			"kubectl", "rollout", "restart", "deployment", managerName, "-n", managerNamespace,
+		))
 		Expect(err).NotTo(HaveOccurred())
+
+		By("admitting a new least-privilege request while the manager rollout is still in progress")
+		// Admission runs separately (ADR-005): a manager rollout must not
+		// remove a single webhook endpoint, so no retry is allowed here.
+		Expect(createSession(rollingRestartRecoverySession)).To(Succeed())
+
 		Eventually(func(g Gomega) {
 			assertProductionReady(g)
-			currentManagerUIDs := managerPodUIDs()
+			currentManagerUIDs := podUIDs(managerSelector)
 			g.Expect(currentManagerUIDs).To(HaveLen(2))
 			for _, previousUID := range previousManagerUIDs {
 				g.Expect(currentManagerUIDs).NotTo(ContainElement(previousUID))
 			}
 		}, 5*time.Minute, time.Second).Should(Succeed())
+		Expect(podUIDs(admissionSelector)).To(ConsistOf(admissionUIDs),
+			"a manager rollout must not restart the admission pods")
 
 		By("requiring the exact session and RoleBinding identity to remain unchanged")
 		Eventually(sessionIsActive(rollingRestartSessionName), 2*time.Minute, time.Second).Should(Succeed())
@@ -319,8 +379,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		Expect(currentBindingUID).To(Equal(bindingUID))
 		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
 
-		By("proving that a new least-privilege request is admitted after recovery")
-		Expect(createSession(rollingRestartRecoverySession)).To(Succeed())
+		By("requiring the request admitted during the rollout to be provisioned")
 		Eventually(sessionIsActive(rollingRestartRecoverySession), 2*time.Minute, time.Second).Should(Succeed())
 		revokeSession(rollingRestartRecoverySession)
 		revokeSession(rollingRestartSessionName)
@@ -341,13 +400,11 @@ var _ = Describe("Production installation", Ordered, func() {
 		Expect(createSession(expiryRecoverySessionName)).To(Succeed())
 		Eventually(sessionIsActive(expiryRecoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
 		bindingName := sessionBindingName(expiryRecoverySessionName)
-		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0"))
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(restoreProductionManager)
+		scaleDeployment(managerName, 0)
+		DeferCleanup(restoreDeployment, managerName)
 		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPassedExpiry(expiryRecoverySessionName), 2*time.Minute, time.Second).Should(Succeed())
-		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2"))
-		Expect(err).NotTo(HaveOccurred())
+		scaleDeployment(managerName, 2)
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(sessionHasPhase(expiryRecoverySessionName, "Expired"), 2*time.Minute, time.Second).Should(Succeed())
 		Eventually(bindingIsDeleted(bindingName), time.Minute, time.Second).Should(Succeed())
@@ -367,9 +424,8 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(sessionIsActive(expiryGuardSessionName), 2*time.Minute, time.Second).Should(Succeed())
 		bindingName, bindingUID := sessionBindingReference(expiryGuardSessionName)
 		Expect(roleBindingUID(bindingName)).To(Equal(bindingUID))
-		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0"))
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(restoreProductionManager)
+		scaleDeployment(managerName, 0)
+		DeferCleanup(restoreDeployment, managerName)
 		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
 
 		By("requiring the guard to delete exactly the recorded binding without any manager")
@@ -385,8 +441,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		Eventually(expiryGuardRemovedBinding(bindingName), time.Minute, 5*time.Second).Should(Succeed())
 
 		By("restoring the managers and requiring a clean expiry without a drift incident")
-		_, err = utils.Run(exec.Command("kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2"))
-		Expect(err).NotTo(HaveOccurred())
+		scaleDeployment(managerName, 2)
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 		Eventually(func(g Gomega) {
 			output, err := utils.Run(exec.Command(
@@ -398,7 +453,7 @@ var _ = Describe("Production installation", Ordered, func() {
 		}, 2*time.Minute, time.Second).Should(Succeed())
 	})
 
-	It("denies retiring a control namespace until its sessions are drained, also during a manager outage", func() {
+	It("denies retiring a control namespace until its sessions are drained, also during outages", func() {
 		if !usesHelm() {
 			Skip("the second control namespace is configured only by the Helm installation")
 		}
@@ -417,37 +472,35 @@ var _ = Describe("Production installation", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(bindingName).NotTo(BeEmpty())
 
-		By("stopping every manager")
-		_, err = utils.Run(exec.Command(
-			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0",
-		))
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(restoreProductionManager)
+		By("stopping every manager while admission stays available")
+		scaleDeployment(managerName, 0)
+		DeferCleanup(restoreDeployment, managerName)
 		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
 
-		By("proving that the fail-closed drain check denies the deletion while no manager is available")
+		By("proving that admission alone still denies the deletion while a session exists")
+		requireDrainDenial()
+
+		By("stopping every admission pod as well")
+		scaleDeployment(admissionName, 0)
+		DeferCleanup(restoreDeployment, admissionName)
+		Eventually(deploymentIsStopped(admissionName, admissionSelector), 2*time.Minute, time.Second).Should(Succeed())
+
+		By("proving that the fail-closed drain check denies the deletion while admission is unavailable")
 		output, err := utils.Run(exec.Command("kubectl", "delete", "namespace", teardownNamespace, "--wait=false"))
-		Expect(err).To(HaveOccurred(), "namespace deletion was admitted during the manager outage: %s", output)
+		Expect(err).To(HaveOccurred(), "namespace deletion was admitted during the admission outage: %s", output)
+		Expect(err.Error()).To(ContainSubstring("failed calling webhook"))
 		Expect(err.Error()).To(ContainSubstring("vcontrolnamespace-v1.kb.io"))
 		Expect(namespacePhase(teardownNamespace)).To(Equal("Active"))
 		_, err = utils.Run(exec.Command("kubectl", "-n", teardownNamespace, "get", "breakglasssession", teardownSessionName))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("restoring the managers")
-		_, err = utils.Run(exec.Command(
-			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
-		))
-		Expect(err).NotTo(HaveOccurred())
+		By("restoring admission and the managers")
+		scaleDeployment(admissionName, 2)
+		scaleDeployment(managerName, 2)
 		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
 
-		By("proving that the running manager still denies the deletion while a session exists")
-		Eventually(func(g Gomega) {
-			_, deleteErr := utils.Run(exec.Command("kubectl", "delete", "namespace", teardownNamespace, "--wait=false"))
-			g.Expect(deleteErr).To(HaveOccurred())
-			g.Expect(deleteErr.Error()).To(ContainSubstring(
-				"still holds 1 BreakGlassSession(s) (" + teardownSessionName + ")"))
-		}, time.Minute, time.Second).Should(Succeed())
-		Expect(namespacePhase(teardownNamespace)).To(Equal("Active"))
+		By("proving that the restored installation still denies the deletion while a session exists")
+		requireDrainDenial()
 
 		By("draining the session and waiting until the manager removed its RoleBinding")
 		_, err = utils.Run(exec.Command(
@@ -499,20 +552,26 @@ var _ = Describe("Production installation", Ordered, func() {
 })
 
 func assertProductionReady(g Gomega) {
-	deployment, err := utils.Run(exec.Command(
-		"kubectl", "get", "deployment", managerName, "-n", managerNamespace,
-		"-o", "jsonpath={.spec.replicas},{.status.readyReplicas},{.status.availableReplicas}",
-	))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(deployment).To(Equal("2,2,2"))
-	g.Expect(readyManagerPods()).To(HaveLen(2))
+	for _, component := range []struct{ name, selector string }{
+		{managerName, managerSelector}, {admissionName, admissionSelector},
+	} {
+		deployment, err := utils.Run(exec.Command(
+			"kubectl", "get", "deployment", component.name, "-n", managerNamespace,
+			"-o", "jsonpath={.spec.replicas},{.status.readyReplicas},{.status.availableReplicas}",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(deployment).To(Equal("2,2,2"), component.name)
+		pods, err := runningPods(component.selector)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(pods).To(HaveLen(2), component.name)
 
-	pdb, err := utils.Run(exec.Command(
-		"kubectl", "get", "pdb", managerName, "-n", managerNamespace,
-		"-o", "jsonpath={.spec.minAvailable}",
-	))
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(pdb).To(Equal("1"))
+		pdb, err := utils.Run(exec.Command(
+			"kubectl", "get", "pdb", component.name, "-n", managerNamespace,
+			"-o", "jsonpath={.spec.minAvailable}",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(pdb).To(Equal("1"), component.name)
+	}
 
 	certificate, err := utils.Run(exec.Command(
 		"kubectl", "get", "certificate", "breakglass-operator-serving-cert", "-n", managerNamespace,
@@ -521,21 +580,87 @@ func assertProductionReady(g Gomega) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(certificate).To(Equal("True"))
 
-	endpoints, err := readyWebhookEndpointCount()
+	// The webhook Service must route only to the admission pods (ADR-005).
+	endpoints, err := readyWebhookEndpointAddresses()
 	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(endpoints).To(Equal(2))
+	g.Expect(endpoints).To(HaveLen(2))
+	admissionIPs, err := utils.Run(exec.Command(
+		"kubectl", "get", "pods", "-n", managerNamespace, "-l", admissionSelector,
+		"-o", "jsonpath={range .items[*]}{.status.podIP}{'\\n'}{end}",
+	))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(utils.GetNonEmptyLines(admissionIPs)).To(ContainElements(endpoints))
 }
 
-func readyManagerPods() []string {
-	pods, err := managerPods()
+// verifyAdmissionIdentity proves that admission runs as its own ServiceAccount,
+// which may read access objects but can neither grant nor change access
+// (ADR-005), while the manager keeps the grant rights.
+func verifyAdmissionIdentity() {
+	serviceAccount, err := utils.Run(exec.Command(
+		"kubectl", "get", "deployment", admissionName, "-n", managerNamespace,
+		"-o", "jsonpath={.spec.template.spec.serviceAccountName}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(serviceAccount).To(Equal(admissionName))
+
+	admission := "system:serviceaccount:" + managerNamespace + ":" + admissionName
+	manager := "system:serviceaccount:" + managerNamespace + ":" + managerName
+	for _, check := range []struct {
+		user, namespace string
+		verbResource    []string
+		allowed         bool
+	}{
+		{admission, controlNamespace, []string{"list", "breakglasssessions.access.breakglass.io"}, true},
+		{admission, controlNamespace, []string{"get", "accessprofiles.access.breakglass.io"}, true},
+		{admission, "", []string{"create", "subjectaccessreviews.authorization.k8s.io"}, true},
+		{admission, controlNamespace, []string{"create", "breakglasssessions.access.breakglass.io"}, false},
+		{admission, controlNamespace, []string{
+			"update", "breakglasssessions.access.breakglass.io", "--subresource=status",
+		}, false},
+		{admission, targetNamespace, []string{"create", "rolebindings.rbac.authorization.k8s.io"}, false},
+		{admission, "", []string{"bind", "clusterroles.rbac.authorization.k8s.io/" + curatedRoleName}, false},
+		{admission, "", []string{"escalate", "clusterroles.rbac.authorization.k8s.io"}, false},
+		{manager, targetNamespace, []string{"create", "rolebindings.rbac.authorization.k8s.io"}, true},
+		{manager, "", []string{"bind", "clusterroles.rbac.authorization.k8s.io/" + curatedRoleName}, true},
+	} {
+		args := append([]string{"auth", "can-i", "--as=" + check.user}, check.verbResource...)
+		if check.namespace != "" {
+			args = append(args, "-n", check.namespace)
+		}
+		output, _ := utils.Run(exec.Command("kubectl", args...))
+		want := "no"
+		if check.allowed {
+			want = "yes"
+		}
+		// kubectl may print warnings (for example for cluster-scoped
+		// resources) before the answer, which is always the last line.
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		answer := strings.TrimSpace(lines[len(lines)-1])
+		Expect(answer).To(Equal(want), "%s %v in %q", check.user, check.verbResource, check.namespace)
+	}
+}
+
+// requireDrainDenial requires the drain check to deny deleting the teardown
+// namespace because it still holds the teardown session.
+func requireDrainDenial() {
+	Eventually(func(g Gomega) {
+		_, deleteErr := utils.Run(exec.Command("kubectl", "delete", "namespace", teardownNamespace, "--wait=false"))
+		g.Expect(deleteErr).To(HaveOccurred())
+		g.Expect(deleteErr.Error()).To(ContainSubstring(
+			"still holds 1 BreakGlassSession(s) (" + teardownSessionName + ")"))
+	}, time.Minute, time.Second).Should(Succeed())
+	Expect(namespacePhase(teardownNamespace)).To(Equal("Active"))
+}
+
+func readyPods(selector string) []string {
+	pods, err := runningPods(selector)
 	Expect(err).NotTo(HaveOccurred())
 	return pods
 }
 
-func managerPods() ([]string, error) {
+func runningPods(selector string) ([]string, error) {
 	output, err := utils.Run(exec.Command(
-		"kubectl", "get", "pods", "-n", managerNamespace,
-		"-l", "control-plane=controller-manager",
+		"kubectl", "get", "pods", "-n", managerNamespace, "-l", selector,
 		"-o", "jsonpath={range .items[?(@.status.phase=='Running')]}{.metadata.name}{'\\n'}{end}",
 	))
 	if err != nil {
@@ -544,22 +669,13 @@ func managerPods() ([]string, error) {
 	return utils.GetNonEmptyLines(output), nil
 }
 
-func managerPodUIDs() []string {
+func podUIDs(selector string) []string {
 	output, err := utils.Run(exec.Command(
-		"kubectl", "get", "pods", "-n", managerNamespace,
-		"-l", "control-plane=controller-manager",
+		"kubectl", "get", "pods", "-n", managerNamespace, "-l", selector,
 		"-o", "jsonpath={range .items[?(@.status.phase=='Running')]}{.metadata.uid}{'\\n'}{end}",
 	))
 	Expect(err).NotTo(HaveOccurred())
 	return utils.GetNonEmptyLines(output)
-}
-
-func readyWebhookEndpointCount() (int, error) {
-	endpoints, err := readyWebhookEndpointAddresses()
-	if err != nil {
-		return 0, err
-	}
-	return len(endpoints), nil
 }
 
 func readyWebhookEndpointAddresses() ([]string, error) {
@@ -575,35 +691,50 @@ func readyWebhookEndpointAddresses() ([]string, error) {
 }
 
 func managerIsStopped() error {
-	replicas, err := utils.Run(exec.Command(
-		"kubectl", "get", "deployment", managerName, "-n", managerNamespace,
-		"-o", "jsonpath={.spec.replicas}",
-	))
-	if err != nil {
-		return fmt.Errorf("read manager replica target: %w", err)
-	}
-
-	pods, err := managerPods()
-	if err != nil {
-		return fmt.Errorf("read manager pods: %w", err)
-	}
-
-	if strings.TrimSpace(replicas) != "0" || len(pods) != 0 {
-		return fmt.Errorf(
-			"manager outage has not converged: desired replicas=%q, running pods=%v",
-			strings.TrimSpace(replicas), pods,
-		)
-	}
-	return nil
+	return deploymentIsStopped(managerName, managerSelector)()
 }
 
-func restoreProductionManager() {
-	By("restoring manager replicas after the outage simulation")
+// deploymentIsStopped reports whether a Deployment targets zero replicas and
+// none of its pods runs any more.
+func deploymentIsStopped(name, selector string) func() error {
+	return func() error {
+		replicas, err := utils.Run(exec.Command(
+			"kubectl", "get", "deployment", name, "-n", managerNamespace,
+			"-o", "jsonpath={.spec.replicas}",
+		))
+		if err != nil {
+			return fmt.Errorf("read %s replica target: %w", name, err)
+		}
+
+		pods, err := runningPods(selector)
+		if err != nil {
+			return fmt.Errorf("read %s pods: %w", name, err)
+		}
+
+		if strings.TrimSpace(replicas) != "0" || len(pods) != 0 {
+			return fmt.Errorf(
+				"%s outage has not converged: desired replicas=%q, running pods=%v",
+				name, strings.TrimSpace(replicas), pods,
+			)
+		}
+		return nil
+	}
+}
+
+func scaleDeployment(name string, replicas int) {
 	_, err := utils.Run(exec.Command(
-		"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
+		"kubectl", "scale", "deployment", name, "-n", managerNamespace, fmt.Sprintf("--replicas=%d", replicas),
+	))
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func restoreDeployment(name string) {
+	By("restoring " + name + " replicas after the outage simulation")
+	_, err := utils.Run(exec.Command(
+		"kubectl", "scale", "deployment", name, "-n", managerNamespace, "--replicas=2",
 	))
 	if err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "warning: could not restore manager replicas: %v\\n", err)
+		_, _ = fmt.Fprintf(GinkgoWriter, "warning: could not restore %s replicas: %v\n", name, err)
 	}
 }
 
@@ -612,13 +743,16 @@ func reportProductionDiagnostics() {
 		name string
 		args []string
 	}{
-		{"manager deployment", []string{"get", "deployment", managerName, "-n", managerNamespace, "-o", "wide"}},
-		{"manager pods", []string{"get", "pods", "-n", managerNamespace, "-o", "wide"}},
+		{"deployments", []string{"get", "deployment", managerName, admissionName, "-n", managerNamespace, "-o", "wide"}},
+		{"pods", []string{"get", "pods", "-n", managerNamespace, "-o", "wide"}},
 		{"webhook endpoint slices", []string{
 			"get", "endpointslices.discovery.k8s.io", "-n", managerNamespace,
 			"-l", "kubernetes.io/service-name=breakglass-operator-webhook-service", "-o", "yaml",
 		}},
-		{"manager events", []string{"get", "events", "-n", managerNamespace, "--sort-by=.lastTimestamp"}},
+		{"admission logs", []string{
+			"logs", "-n", managerNamespace, "-l", admissionSelector, "--tail=50", "--prefix",
+		}},
+		{"events", []string{"get", "events", "-n", managerNamespace, "--sort-by=.lastTimestamp"}},
 	}
 	for _, command := range commands {
 		output, err := utils.Run(exec.Command("kubectl", command.args...))
@@ -689,6 +823,14 @@ func sessionIsActiveIn(namespace, name string) func(Gomega) {
 		g.Expect(parts[1]).To(Equal(requesterName))
 		g.Expect(parts[2]).NotTo(BeEmpty())
 	}
+}
+
+func sessionPhase(name string) string {
+	output, err := utils.Run(exec.Command(
+		"kubectl", "-n", controlNamespace, "get", "breakglasssession", name, "-o", "jsonpath={.status.phase}",
+	))
+	Expect(err).NotTo(HaveOccurred())
+	return output
 }
 
 func sessionHasPhase(name, phase string) func(Gomega) {

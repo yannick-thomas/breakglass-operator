@@ -30,6 +30,7 @@ const (
 	expiryGuardNamespacesRole = "breakglass-operator-expiry-guard-namespaces"
 
 	verbGet    = "get"
+	verbCreate = "create"
 	verbList   = "list"
 	verbDelete = "delete"
 )
@@ -88,7 +89,7 @@ func verifyExpiryGuard(objects []unstructured.Unstructured, namespaced bool) err
 		}
 	}
 
-	role, err := requiredObjectInNamespace(objects, "Role", expiryGuardNamespacedRole, "production")
+	role, err := requiredObjectInNamespace(objects, "Role", expiryGuardNamespacedRole, targetNamespace)
 	if err != nil {
 		return err
 	}
@@ -163,7 +164,8 @@ func verifyExpiryGuardNamespaces(objects []unstructured.Unstructured, namespaced
 		return err
 	}
 	if namespaced {
-		if len(nestedRules(role)) != 1 || !roleHasExactNamespaceObservation(role) {
+		names := []string{targetNamespace, controlNamespace}
+		if len(nestedRules(role)) != 1 || !roleHasExactNamespaceObservation(role, names) {
 			return fmt.Errorf("expiry guard may get only the production and %s namespaces", controlNamespace)
 		}
 	} else if !rulesAreExactly(role, []guardRule{{"", namespaceRule, []string{verbGet}}}) {
@@ -183,7 +185,7 @@ func verifyExpiryGuardNamespaces(objects []unstructured.Unstructured, namespaced
 		return fmt.Errorf("expiry guard namespace ClusterRoleBinding must have exactly one subject")
 	}
 	subject, ok := subjects[0].(map[string]any)
-	if !ok || subject["kind"] != "ServiceAccount" || subject["name"] != expiryGuardName ||
+	if !ok || subject["kind"] != serviceAccountKind || subject["name"] != expiryGuardName ||
 		subject["namespace"] != managerNamespace {
 		return fmt.Errorf("expiry guard namespace ClusterRoleBinding must bind the expiry guard ServiceAccount")
 	}

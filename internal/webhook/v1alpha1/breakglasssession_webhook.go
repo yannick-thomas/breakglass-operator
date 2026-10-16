@@ -41,7 +41,11 @@ import (
 // log request reasons or identities at a verbosity intended for shared logs.
 var breakglasssessionlog = logf.Log.WithName("breakglasssession-resource")
 
-// +kubebuilder:rbac:groups=access.breakglass.io,resources=accessprofiles,verbs=get
+// The admission markers generate config/rbac/admission_role.yaml (role
+// admission-role), never the manager role (ADR-005). Admission reads the four
+// access kinds directly from the API server and creates SubjectAccessReviews;
+// it writes nothing else.
+// +kubebuilder:rbac:groups=access.breakglass.io,resources=accessprofiles;breakglassrequests;breakglassapprovals;breakglasssessions,verbs=get;list
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 
 // SetupBreakGlassSessionWebhookWithManager registers the required mutating and

@@ -17,9 +17,7 @@ limitations under the License.
 package main
 
 import (
-	"crypto/tls"
 	"flag"
-	"fmt"
 	"os"
 	"time"
 
@@ -36,15 +34,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/adapter/startup"
 	"github.com/yannick-thomas/breakglass-operator/internal/controller"
 	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
-	webhookv1alpha1 "github.com/yannick-thomas/breakglass-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -60,62 +55,24 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
-// nolint:gocyclo
 func main() {
-	var metricsAddr string
-	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
-	var webhookPort int
+	var serving startup.ServingFlags
+	var placementFlags startup.PlacementFlags
 	var enableLeaderElection bool
 	var maxSessionDuration time.Duration
-	var requestTTL time.Duration
 	var requestControllerUsername string
 	var probeAddr string
-	var secureMetrics bool
-	var enableHTTP2 bool
-	var allowedTargetNamespacesValue, controlNamespacesValue string
-	var tlsOpts []func(*tls.Config)
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
-		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
+	serving.Bind(flag.CommandLine)
+	placementFlags.Bind(flag.CommandLine)
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.DurationVar(&maxSessionDuration, "max-session-duration", 4*time.Hour,
 		"Maximum lifetime allowed for a BreakGlassSession. Set to 0 to disable the controller-side limit.")
-	flag.DurationVar(&requestTTL, "request-ttl", 15*time.Minute,
-		"Maximum time a BreakGlassRequest may await a decision. Must be greater than zero.")
 	flag.StringVar(&requestControllerUsername, "request-controller-username", "",
-		"Exact Kubernetes username permitted to create a session sourced from an approved "+
-			"BreakGlassRequest. Empty disables request provisioning.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
-		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server listens on. "+
-		"Defaults to 9443. Set -1 to disable the webhook server.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
-		"The directory that contains the metrics server certificate.")
-	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
-	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.StringVar(
-		&allowedTargetNamespacesValue,
-		"allowed-target-namespaces",
-		"",
-		"Comma-separated namespaces in which this manager may grant and watch RoleBindings. "+
-			"Empty permits all namespaces and is for development only.",
-	)
-	flag.StringVar(
-		&controlNamespacesValue,
-		"control-namespaces",
-		"",
-		"Comma-separated namespaces in which AccessProfiles, requests, approvals, and sessions may live. "+
-			"Must not overlap allowed-target-namespaces and is required when that is set. "+
-			"Empty permits all namespaces and is for development only.",
-	)
+		"Exact Kubernetes username of this manager's ServiceAccount. Empty disables request provisioning. "+
+			"The admission server must trust the same username.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -124,98 +81,19 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
-	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("Disabling HTTP/2")
-		c.NextProtos = []string{"http/1.1"}
-	}
+	// The manager serves no admission webhook (ADR-005); cmd/admission does.
+	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'.
+	metricsServerOptions := serving.MetricsOptions(setupLog, serving.TLSOptions(setupLog))
 
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
-	}
-
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
-	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
-		Port:    webhookPort,
-	}
-
-	if len(webhookCertPath) > 0 {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
-
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
-	}
-
-	webhookServer := webhook.NewServer(webhookServerOptions)
-
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
-	metricsServerOptions := metricsserver.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
-		TLSOpts:       tlsOpts,
-	}
-
-	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
-		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
-	}
-
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
-	if len(metricsCertPath) > 0 {
-		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
-			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
-
-		metricsServerOptions.CertDir = metricsCertPath
-		metricsServerOptions.CertName = metricsCertName
-		metricsServerOptions.KeyName = metricsCertKey
-	}
-
-	allowedTargetNamespaces, err := parseNamespaceFlag("allowed-target-namespaces", allowedTargetNamespacesValue)
+	placement, err := placementFlags.Placement()
 	if err != nil {
-		setupLog.Error(err, "Invalid allowed target namespaces")
-		os.Exit(1)
-	}
-	controlNamespaces, err := parseNamespaceFlag("control-namespaces", controlNamespacesValue)
-	if err != nil {
-		setupLog.Error(err, "Invalid control namespaces")
-		os.Exit(1)
-	}
-	placement := access.Placement{Control: controlNamespaces, Target: allowedTargetNamespaces}
-	if err := placement.Validate(); err != nil {
 		setupLog.Error(err, "Invalid namespace placement")
-		os.Exit(1)
-	}
-	if requestTTL <= 0 {
-		setupLog.Error(fmt.Errorf("request-ttl must be greater than zero"), "Invalid request TTL")
 		os.Exit(1)
 	}
 
 	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "d0d95bf7.breakglass.io",
@@ -248,8 +126,8 @@ func main() {
 		Recorder:                mgr.GetEventRecorderFor("breakglass-controller"),
 		MaxSessionDuration:      maxSessionDuration,
 		Metrics:                 breakglassmetrics.DefaultRecorder,
-		AllowedTargetNamespaces: allowedTargetNamespaces,
-		ControlNamespaces:       controlNamespaces,
+		AllowedTargetNamespaces: placement.Target,
+		ControlNamespaces:       placement.Control,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "breakglasssession")
 		os.Exit(1)
@@ -258,8 +136,8 @@ func main() {
 		Client:                  mgr.GetClient(),
 		APIReader:               mgr.GetAPIReader(),
 		Scheme:                  mgr.GetScheme(),
-		AllowedTargetNamespaces: allowedTargetNamespaces,
-		ControlNamespaces:       controlNamespaces,
+		AllowedTargetNamespaces: placement.Target,
+		ControlNamespaces:       placement.Control,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "accessprofile")
 		os.Exit(1)
@@ -274,26 +152,6 @@ func main() {
 	}
 	if _, err := breakglassmetrics.RegisterSessionStateCollector(mgr.GetClient(), controller.SessionScope); err != nil {
 		setupLog.Error(err, "Failed to register BreakGlass session metrics")
-		os.Exit(1)
-	}
-	if err := webhookv1alpha1.SetupBreakGlassSessionWebhookWithManager(
-		mgr, placement, requestControllerUsername,
-	); err != nil {
-		setupLog.Error(err, "Failed to create webhook", "webhook", "BreakGlassSession")
-		os.Exit(1)
-	}
-	if err := webhookv1alpha1.SetupBreakGlassRequestWebhookWithManager(
-		mgr, placement, requestTTL,
-	); err != nil {
-		setupLog.Error(err, "unable to create BreakGlassRequest webhook")
-		os.Exit(1)
-	}
-	if err := webhookv1alpha1.SetupBreakGlassApprovalWebhookWithManager(mgr, placement); err != nil {
-		setupLog.Error(err, "unable to create BreakGlassApproval webhook")
-		os.Exit(1)
-	}
-	if err := webhookv1alpha1.SetupControlNamespaceWebhookWithManager(mgr, placement); err != nil {
-		setupLog.Error(err, "Failed to create webhook", "webhook", "ControlNamespace")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
@@ -312,16 +170,6 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
-}
-
-// parseNamespaceFlag parses a comma-separated namespace scope and names the
-// flag in any error.
-func parseNamespaceFlag(flagName, value string) (map[string]struct{}, error) {
-	scope, err := access.ParseNamespaceScope(value)
-	if err != nil {
-		return nil, fmt.Errorf("%s %w", flagName, err)
-	}
-	return scope, nil
 }
 
 // cacheOptions scopes each informer to the namespaces its RBAC covers.

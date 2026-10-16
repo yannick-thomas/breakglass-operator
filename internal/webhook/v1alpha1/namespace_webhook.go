@@ -33,8 +33,6 @@ import (
 // controlNamespaceWebhookPath serves the drain check for control namespaces.
 const controlNamespaceWebhookPath = "/validate-core-v1-namespace"
 
-// +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglasssessions,verbs=list
-
 // SetupControlNamespaceWebhookWithManager installs the drain check for
 // control namespaces: a control namespace may be deleted only after its
 // sessions are gone, because the manager's rights on them may be granted by

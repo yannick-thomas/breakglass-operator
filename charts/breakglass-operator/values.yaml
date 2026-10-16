@@ -19,6 +19,8 @@ controlNamespaces:
 curatedClusterRoles:
   - breakglass-pod-observer
 
+# Replicas, availability, resources and scheduling apply to the manager and the
+# separate admission Deployment alike (ADR-005); each gets its own PDB.
 # Two schedulable hosts are required with the default topology policy.
 replicaCount: 2
 availability:

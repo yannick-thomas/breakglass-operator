@@ -37,6 +37,10 @@ const (
 	managerRoleName  = "breakglass-operator-manager-role"
 	roleBindingRule  = "rolebindings"
 	namespaceRule    = "namespaces"
+
+	// targetNamespace is the one target namespace of the namespaced profile.
+	targetNamespace    = "production"
+	serviceAccountKind = "ServiceAccount"
 )
 
 func main() {
@@ -67,6 +71,12 @@ func validateProfile(profile string, input io.Reader) error {
 		return err
 	}
 	if err := verifyManagerPodSecurity(objects); err != nil {
+		return err
+	}
+	if err := verifyManagerRole(objects); err != nil {
+		return err
+	}
+	if err := verifyAdmission(objects, profile); err != nil {
 		return err
 	}
 	if err := verifyExpiryGuard(objects, profile == namespacedProfile); err != nil {
@@ -197,24 +207,18 @@ func verifyProductionAvailability(objects []unstructured.Unstructured) error {
 	if err != nil {
 		return err
 	}
-	replicas, found, err := unstructured.NestedFieldNoCopy(manager.Object, "spec", "replicas")
-	if err != nil || !found || !hasIntValue(replicas, 2) {
-		return fmt.Errorf("manager Deployment must have exactly two replicas")
-	}
-	constraints, found, err := unstructured.NestedSlice(
-		manager.Object, "spec", "template", "spec", "topologySpreadConstraints",
-	)
-	if err != nil || !found || !hasHostnameSpreadConstraint(constraints) {
-		return fmt.Errorf("manager Deployment must spread replicas across hostnames with DoNotSchedule")
-	}
+	return verifyAvailability(objects, manager, managerName, "manager")
+}
 
-	pdb, err := requiredObject(objects, "PodDisruptionBudget", managerName)
+// verifyManagerRole keeps webhook-only permissions out of the manager role
+// (ADR-005): SubjectAccessReviews are created only by admission.
+func verifyManagerRole(objects []unstructured.Unstructured) error {
+	managerRole, err := requiredObject(objects, "ClusterRole", managerRoleName)
 	if err != nil {
 		return err
 	}
-	minAvailable, found, err := unstructured.NestedFieldNoCopy(pdb.Object, "spec", "minAvailable")
-	if err != nil || !found || !hasIntValue(minAvailable, 1) {
-		return fmt.Errorf("manager PodDisruptionBudget must set minAvailable: 1")
+	if roleHasResource(managerRole, "subjectaccessreviews") {
+		return fmt.Errorf("manager ClusterRole must not create SubjectAccessReviews; only admission does")
 	}
 	return nil
 }
@@ -259,11 +263,11 @@ func verifyNamespacedRBACBoundary(objects []unstructured.Unstructured) error {
 	if !roleHasNamedClusterRoleBind(managerRole) {
 		return fmt.Errorf("manager ClusterRole must retain the scoped curated-role bind permission")
 	}
-	if !roleHasExactNamespaceObservation(managerRole) {
-		return fmt.Errorf("manager must have only get on the named production and %s namespaces", controlNamespace)
+	if !roleHasExactNamespaceObservation(managerRole, []string{targetNamespace}) {
+		return fmt.Errorf("manager must have only get on the named production namespace")
 	}
 
-	role, err := requiredObjectInNamespace(objects, "Role", "breakglass-operator-manager-rolebindings", "production")
+	role, err := requiredObjectInNamespace(objects, "Role", "breakglass-operator-manager-rolebindings", targetNamespace)
 	if err != nil {
 		return err
 	}
@@ -306,9 +310,12 @@ func namedContainer(deployment unstructured.Unstructured, name string) (map[stri
 }
 
 // roleHasExactNamespaceObservation requires exactly one Namespace rule: get on
-// the target namespace (cleanup recovery) and the control namespace (approval
-// deletion during namespace deletion), and nothing else.
-func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
+// exactly the named namespaces, and nothing else. The manager gets only the
+// target namespace (cleanup recovery); the expiry guard and admission also the
+// control namespace (orphan sweeping, approval deletion during namespace
+// deletion).
+func roleHasExactNamespaceObservation(role unstructured.Unstructured, want []string) bool {
+	want = slices.Sorted(slices.Values(want))
 	rules, _, _ := unstructured.NestedSlice(role.Object, "rules")
 	found := false
 	for _, raw := range rules {
@@ -328,7 +335,7 @@ func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
 		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
 		names = slices.Sorted(slices.Values(names))
 		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{namespaceRule}) ||
-			!slices.Equal(verbs, []string{verbGet}) || !slices.Equal(names, []string{controlNamespace, "production"}) {
+			!slices.Equal(verbs, []string{verbGet}) || !slices.Equal(names, want) {
 			return false
 		}
 		found = true
@@ -373,7 +380,7 @@ func allowedTargetNamespaceArguments(container map[string]any) int {
 
 func verifyManagerRoleBinding(objects []unstructured.Unstructured) error {
 	binding, err := requiredObjectInNamespace(
-		objects, "RoleBinding", "breakglass-operator-manager-rolebindings", "production",
+		objects, "RoleBinding", "breakglass-operator-manager-rolebindings", targetNamespace,
 	)
 	if err != nil {
 		return err
@@ -388,7 +395,7 @@ func verifyManagerRoleBinding(objects []unstructured.Unstructured) error {
 		return fmt.Errorf("production manager RoleBinding must have exactly one ServiceAccount subject")
 	}
 	subject, ok := subjects[0].(map[string]any)
-	if !ok || subject["kind"] != "ServiceAccount" ||
+	if !ok || subject["kind"] != serviceAccountKind ||
 		subject["name"] != managerName || subject["namespace"] != managerNamespace {
 		return fmt.Errorf("production manager RoleBinding must bind the manager ServiceAccount")
 	}
@@ -421,7 +428,8 @@ func roleHasNamedClusterRoleBind(role unstructured.Unstructured) bool {
 func roleHasExactRoleBindingVerbs(role unstructured.Unstructured) bool {
 	for _, item := range nestedRules(role) {
 		if containsString(item["resources"], roleBindingRule) {
-			return sameStrings(stringValues(item["verbs"]), []string{"create", verbDelete, verbGet, verbList, "update", "watch"})
+			want := []string{verbCreate, verbDelete, verbGet, verbList, "update", "watch"}
+			return sameStrings(stringValues(item["verbs"]), want)
 		}
 	}
 	return false

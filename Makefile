@@ -45,8 +45,12 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+manifests: controller-gen ## Generate WebhookConfiguration, ClusterRoles and CustomResourceDefinition objects.
+	"$(CONTROLLER_GEN)" crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@# Two identities (ADR-005): reconciler markers generate the manager role,
+	@# webhook markers the admission role. Neither role sees the other's markers.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role paths="{./internal/controller/...,./cmd/...}" output:rbac:artifacts:config=config/rbac
+	"$(CONTROLLER_GEN)" rbac:roleName=admission-role,fileName=admission_role.yaml paths="./internal/webhook/..." output:rbac:artifacts:config=config/rbac
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -182,8 +186,9 @@ package-helm: verify-helm ## Package a chart with digest-pinned IMG and WEBUI_IM
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate fmt vet ## Build manager, admission and expiry-guard binaries.
 	go build -o bin/manager cmd/main.go
+	go build -o bin/admission ./cmd/admission
 	go build -o bin/expiry-guard ./cmd/expiry-guard
 
 WEBUI_FRONTEND_DIR := internal/webui/frontend
@@ -207,6 +212,10 @@ build-webui: webui-frontend fmt vet ## Build WebUI binary.
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
+
+.PHONY: run-admission
+run-admission: manifests generate fmt vet ## Run the admission webhook server from your host (needs webhook certificates).
+	go run ./cmd/admission
 
 .PHONY: run-webui
 run-webui: webui-frontend fmt vet ## Run WebUI locally in dev mode.

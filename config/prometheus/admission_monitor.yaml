@@ -1,0 +1,23 @@
+# Prometheus Monitor Service for the admission metrics (ADR-005).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+  name: admission-metrics-monitor
+  namespace: system
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        # See monitor.yaml: use cert-manager certificates in production.
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: breakglass-operator
+      app.kubernetes.io/component: admission

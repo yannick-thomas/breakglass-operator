@@ -38,31 +38,7 @@ spec:
       securityContext:
         {{- include "breakglass.podSecurity" . | nindent 8 }}
       terminationGracePeriodSeconds: 10
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.priorityClassName }}
-      priorityClassName: {{ . | quote }}
-      {{- end }}
-      {{- if .Values.availability.spreadAcrossHosts }}
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
-          nodeTaintsPolicy: Honor
-          labelSelector:
-            matchLabels:
-              {{- include "breakglass.managerSelector" . | nindent 14 }}
-      {{- end }}
+      {{- include "breakglass.podScheduling" (dict "root" . "selector" (include "breakglass.managerSelector" .)) | nindent 6 }}
       containers:
         - name: manager
           image: {{ include "breakglass.image" .Values.image | quote }}
@@ -71,17 +47,12 @@ spec:
           args:
             - --leader-elect
             - --health-probe-bind-address=:8081
-            - --webhook-port=9443
-            - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
             - --metrics-bind-address=:8443
             - --metrics-secure=true
             - --metrics-cert-path=/tmp/k8s-metrics-server/serving-certs
-            - {{ printf "--allowed-target-namespaces=%s" (join "," .Values.allowedTargetNamespaces) | quote }}
-            - {{ printf "--control-namespaces=%s" (join "," .Values.controlNamespaces) | quote }}
-            - {{ printf "--request-controller-username=system:serviceaccount:%s:%s-controller-manager" .Release.Namespace $name | quote }}
+            {{- include "breakglass.placementArgs" . | nindent 12 }}
           ports:
             - {name: health, containerPort: 8081, protocol: TCP}
-            - {name: webhook-server, containerPort: 9443, protocol: TCP}
             - {name: https, containerPort: 8443, protocol: TCP}
           securityContext:
             {{- include "breakglass.containerSecurity" . | nindent 12 }}
@@ -96,16 +67,10 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            - name: webhook-certs
-              mountPath: /tmp/k8s-webhook-server/serving-certs
-              readOnly: true
             - name: metrics-certs
               mountPath: /tmp/k8s-metrics-server/serving-certs
               readOnly: true
       volumes:
-        - name: webhook-certs
-          secret:
-            secretName: {{ $name }}-webhook-server-cert
         - name: metrics-certs
           secret:
             secretName: {{ $name }}-metrics-server-cert

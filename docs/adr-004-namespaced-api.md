@@ -98,8 +98,9 @@ is cheapest now.
   control namespace that still holds any BreakGlassSession, including one that
   is already being deleted (its finalizer still needs the manager). The
   sessions are listed from the API server, not a cache, and any read error
-  denies. The webhook uses `failurePolicy: Fail`: while no manager is
-  available, the deletion is denied rather than risked. Its
+  denies. The webhook uses `failurePolicy: Fail`: while no admission pod is
+  available (ADR-005), the deletion is denied rather than risked; while only
+  the manager is down, sessions still block it. Its
   `namespaceSelector` keeps that outage behaviour away from every other
   namespace: Helm and the namespaced overlay select exactly the control
   namespaces by `kubernetes.io/metadata.name`; the all-namespaces Kustomize

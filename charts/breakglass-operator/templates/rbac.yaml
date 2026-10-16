@@ -6,19 +6,15 @@ metadata:
   labels:
     {{- include "breakglass.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [authorization.k8s.io]
-    resources: [subjectaccessreviews]
-    verbs: [create]
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [clusterroles]
     resourceNames: {{ .Values.curatedClusterRoles | toJson }}
     verbs: [bind, get]
-  # Target namespaces: confirm absence during cleanup recovery. Control
-  # namespaces: release append-only approvals only while their namespace is
-  # being deleted (ADR-004).
+  # Target namespaces: confirm absence during cleanup recovery. Admission,
+  # not the manager, reads control namespaces (ADR-005).
   - apiGroups: [""]
     resources: [namespaces]
-    resourceNames: {{ concat .Values.allowedTargetNamespaces .Values.controlNamespaces | uniq | toJson }}
+    resourceNames: {{ .Values.allowedTargetNamespaces | toJson }}
     verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -81,8 +77,10 @@ metadata:
   labels:
     {{- include "breakglass.labels" . | nindent 4 }}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-metrics-auth-role}
+# Both secure metrics endpoints authenticate and authorize their scrapers.
 subjects:
   - {kind: ServiceAccount, name: {{ $name }}-controller-manager, namespace: {{ .Release.Namespace }}}
+  - {kind: ServiceAccount, name: {{ $name }}-admission, namespace: {{ .Release.Namespace }}}
 {{- range .Values.allowedTargetNamespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

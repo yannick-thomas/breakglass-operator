@@ -35,7 +35,7 @@ func TestNamespaceObservationMustBeNarrow(t *testing.T) {
 				t.Fatal(err)
 			}
 			role := unstructured.Unstructured{Object: map[string]any{"rules": []any{rule}}}
-			if got := roleHasExactNamespaceObservation(role); got != tc.want {
+			if got := roleHasExactNamespaceObservation(role, []string{"production", "breakglass-access"}); got != tc.want {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})

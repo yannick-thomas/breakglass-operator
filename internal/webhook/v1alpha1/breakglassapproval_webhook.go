@@ -46,7 +46,7 @@ type ProfileApprovalReviewer interface {
 // interface directly.
 type authenticationUserInfo = authenticationv1.UserInfo
 
-// +kubebuilder:rbac:groups=access.breakglass.io,resources=breakglassrequests,verbs=get
+// Approval deletion reads the approval's Namespace (control namespace).
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 
 // SetupBreakGlassApprovalWebhookWithManager installs the append-only human

@@ -2,20 +2,22 @@
 #
 # It starts from the HA production overlay, removes the manager's cluster-wide
 # RoleBinding CRUD and Namespace get rules, grants RoleBinding CRUD only in
-# `production`, and reads only the `production` and `breakglass-access`
-# namespaces.
-# The manager's cache and admission/controller policy are restricted by the
+# `production`, and reads only the `production` namespace. The admission
+# server (ADR-005) reads access objects only in `breakglass-access` and gets
+# only the `production` and `breakglass-access` namespaces.
+# The manager's cache and both Deployments' policy are restricted by the
 # matching --allowed-target-namespaces flag below. Access objects are accepted
 # only in the control namespace breakglass-access (ADR-004).
 resources:
   - ../production
   - manager-rolebindings-production.yaml
   - expiry-guard-rolebindings-production.yaml
+  - admission-access-breakglass-access.yaml
 
 patches:
   # The generated manager rules are removed by index: the cluster-wide
   # Namespace get is currently the second rule and the RoleBinding CRUD rule
-  # the tenth. If controller-gen changes this ordering, the test guards make
+  # the ninth. If controller-gen changes this ordering, the test guards make
   # rendering fail review rather than silently removing a different
   # permission. The higher index is removed first so the lower stays valid.
   - target:
@@ -23,13 +25,13 @@ patches:
       name: breakglass-operator-manager-role
     patch: |-
       - op: test
-        path: /rules/9/apiGroups/0
+        path: /rules/8/apiGroups/0
         value: rbac.authorization.k8s.io
       - op: test
-        path: /rules/9/resources/0
+        path: /rules/8/resources/0
         value: rolebindings
       - op: remove
-        path: /rules/9
+        path: /rules/8
       - op: test
         path: /rules/1/apiGroups/0
         value: ""
@@ -51,11 +53,41 @@ patches:
         value:
           apiGroups: [""]
           resources: ["namespaces"]
+          resourceNames: ["production"]
+          verbs: ["get"]
+  # The manager gets only the target namespace: it confirms a deleted target
+  # namespace during cleanup. Admission (ADR-005) gets the target and the
+  # control namespace: approval deletion reads the control namespace. Its
+  # cluster-wide reads of access objects are replaced by the Role in
+  # breakglass-access; it keeps only SubjectAccessReview create cluster-wide.
+  # Generated order: namespaces get, access-object get/list, SAR create.
+  - target:
+      kind: ClusterRole
+      name: breakglass-operator-admission-role
+    patch: |-
+      - op: test
+        path: /rules/1/apiGroups/0
+        value: access.breakglass.io
+      - op: remove
+        path: /rules/1
+      - op: test
+        path: /rules/0/resources/0
+        value: namespaces
+      - op: remove
+        path: /rules/0
+      - op: test
+        path: /rules/0/resources
+        value: ["subjectaccessreviews"]
+      - op: add
+        path: /rules/-
+        value:
+          apiGroups: [""]
+          resources: ["namespaces"]
           resourceNames: ["production", "breakglass-access"]
           verbs: ["get"]
+  # Both Deployments get identical placement flags (ADR-005).
   - target:
       kind: Deployment
-      labelSelector: control-plane=controller-manager
     patch: |-
       - op: add
         path: /spec/template/spec/containers/0/args/-

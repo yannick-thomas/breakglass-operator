@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"testing"
 
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -29,52 +28,6 @@ import (
 )
 
 const productionNamespace = "production"
-
-func TestParseNamespaceFlag(t *testing.T) {
-	tests := []struct {
-		name    string
-		value   string
-		want    map[string]struct{}
-		wantErr string
-	}{
-		{name: "empty permits the development default", want: map[string]struct{}{}},
-		{name: "one namespace", value: productionNamespace, want: map[string]struct{}{productionNamespace: {}}},
-		{
-			name:  "multiple namespaces ignore surrounding whitespace",
-			value: productionNamespace + ", staging",
-			want:  map[string]struct{}{productionNamespace: {}, "staging": {}},
-		},
-		{
-			name:    "rejects empty item and names the flag",
-			value:   "production,,staging",
-			wantErr: "allowed-target-namespaces contains an empty namespace",
-		},
-		{name: "rejects invalid namespace", value: "Production", wantErr: "invalid namespace"},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := parseNamespaceFlag("allowed-target-namespaces", test.value)
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("parseNamespaceFlag(%q) error = %v, want substring %q", test.value, err, test.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseNamespaceFlag(%q) error = %v", test.value, err)
-			}
-			if len(got) != len(test.want) {
-				t.Fatalf("parseNamespaceFlag(%q) = %#v, want %#v", test.value, got, test.want)
-			}
-			for namespace := range test.want {
-				if _, ok := got[namespace]; !ok {
-					t.Fatalf("parseNamespaceFlag(%q) = %#v, missing %q", test.value, got, namespace)
-				}
-			}
-		})
-	}
-}
 
 func TestCacheOptionsScopesEachKindToItsRBAC(t *testing.T) {
 	placement := access.Placement{
