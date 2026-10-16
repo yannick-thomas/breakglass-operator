@@ -6,6 +6,7 @@
 resources:
   - ../../default
   - pod_disruption_budget.yaml
+  - admission_pod_disruption_budget.yaml
 
 patches:
   - target:
@@ -38,3 +39,36 @@ patches:
                     matchLabels:
                       control-plane: controller-manager
                       app.kubernetes.io/name: breakglass-operator
+  # Admission (ADR-005) gets the same availability as the manager, with its
+  # own spreading and PodDisruptionBudget, so a controller rollout never
+  # removes webhook endpoints and the reverse.
+  - target:
+      kind: Deployment
+      labelSelector: app.kubernetes.io/component=admission
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            nodeTaintsPolicy: Honor
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: breakglass-operator
+                app.kubernetes.io/component: admission
+      - op: add
+        path: /spec/template/spec/affinity
+        value:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: breakglass-operator
+                      app.kubernetes.io/component: admission

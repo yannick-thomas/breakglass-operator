@@ -23,7 +23,7 @@ describe('Approvals', () => {
     await user.type(within(dialog).getByRole('textbox', { name: /Kommentar/ }), ' passt ');
     await user.click(confirm);
 
-    expect(api.decide).toHaveBeenCalledWith('bgr-abc12', 'Approved', 'passt');
+    expect(api.decide).toHaveBeenCalledWith('breakglass-access', 'bgr-abc12', 'Approved', 'passt');
     expect(approvals.reload).toHaveBeenCalled();
     expect(await screen.findByText('Antrag bgr-abc12 freigegeben.')).toBeInTheDocument();
   });
@@ -37,7 +37,7 @@ describe('Approvals', () => {
     expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Ablehnen' }));
 
-    expect(api.decide).toHaveBeenCalledWith('bgr-abc12', 'Denied', '');
+    expect(api.decide).toHaveBeenCalledWith('breakglass-access', 'bgr-abc12', 'Denied', '');
   });
 
   it('closes and refreshes when someone else decided first', async () => {

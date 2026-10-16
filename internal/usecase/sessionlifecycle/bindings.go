@@ -58,7 +58,6 @@ func (l *Lifecycle) ReserveBinding(ctx context.Context, s *access.Session) (*acc
 		Name:      expected.Name,
 		Namespace: expected.Namespace,
 		Labels:    s.ManagedLabels(),
-		Owner:     access.SessionOwner{Name: s.Name, UID: s.UID},
 		RoleRef:   s.ExpectedRoleRef(),
 	})
 	if err == nil {
@@ -183,7 +182,7 @@ func (l *Lifecycle) NamespaceConfirmedAbsent(ctx context.Context, namespace stri
 // findUnrecordedReservation discovers only an empty-subject reservation made
 // in the window between creating it and persisting its UID. The namespace
 // cannot be recovered from blank status, so the high-entropy session UID label
-// is searched and the deterministic name and owner reference corroborate it.
+// is searched and the deterministic name and ownership labels corroborate it.
 // A namespaced manager searches only its configured namespaces and needs no
 // broader binding permissions than the grant path itself.
 //

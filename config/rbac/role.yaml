@@ -12,6 +12,12 @@ rules:
   - create
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
   - access.breakglass.io
   resources:
   - accessprofiles
@@ -48,12 +54,6 @@ rules:
   - breakglasssessions/finalizers
   verbs:
   - update
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:

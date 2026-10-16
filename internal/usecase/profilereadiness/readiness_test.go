@@ -43,7 +43,7 @@ func (f fakeRoles) Role(_ context.Context, name string) (access.Role, error) {
 
 func profile() access.Profile {
 	return access.Profile{
-		Name: "observer", UID: "uid", RoleRef: access.RoleRef{Kind: access.ClusterRoleKind, Name: "pod-observer"},
+		Name: "observer", Namespace: "breakglass-access", UID: "uid", RoleRef: access.RoleRef{Kind: access.ClusterRoleKind, Name: "pod-observer"},
 		TargetNamespace: "production", MaxDuration: "30m",
 	}
 }
@@ -51,26 +51,28 @@ func profile() access.Profile {
 func TestEvaluate(t *testing.T) {
 	existing := fakeRoles{roles: map[string]access.Role{"pod-observer": {Name: "pod-observer", UID: "role-uid"}}}
 	for _, tc := range []struct {
-		name   string
-		mutate func(*access.Profile)
-		roles  fakeRoles
-		scope  access.NamespaceScope
-		status access.ConditionStatus
-		reason string
+		name      string
+		mutate    func(*access.Profile)
+		roles     fakeRoles
+		placement access.Placement
+		status    access.ConditionStatus
+		reason    string
 	}{
-		{"ready", func(*access.Profile) {}, existing, nil, access.ConditionTrue, ReasonReady},
-		{"role kind", func(p *access.Profile) { p.RoleRef.Kind = "Role" }, existing, nil, access.ConditionFalse, ReasonInvalidRoleReference},
-		{"namespace", func(p *access.Profile) { p.TargetNamespace = "" }, existing, nil, access.ConditionFalse, ReasonInvalidTargetNamespace},
-		{"duration", func(p *access.Profile) { p.MaxDuration = "forever" }, existing, nil, access.ConditionFalse, ReasonInvalidDuration},
-		{"mode", func(p *access.Profile) { p.DeliveryMode = "Magic" }, existing, nil, access.ConditionFalse, ReasonInvalidDeliveryMode},
-		{"scope", func(*access.Profile) {}, existing, access.NamespaceScope{"staging": {}}, access.ConditionFalse, ReasonNamespaceOutOfScope},
-		{"role missing", func(*access.Profile) {}, fakeRoles{}, nil, access.ConditionFalse, ReasonClusterRoleMissing},
-		{"role without UID", func(*access.Profile) {}, fakeRoles{roles: map[string]access.Role{"pod-observer": {Name: "pod-observer"}}}, nil, access.ConditionFalse, ReasonClusterRoleNotReady},
+		{"ready", func(*access.Profile) {}, existing, access.Placement{}, access.ConditionTrue, ReasonReady},
+		{"role kind", func(p *access.Profile) { p.RoleRef.Kind = "Role" }, existing, access.Placement{}, access.ConditionFalse, ReasonInvalidRoleReference},
+		{"namespace", func(p *access.Profile) { p.TargetNamespace = "" }, existing, access.Placement{}, access.ConditionFalse, ReasonInvalidTargetNamespace},
+		{"duration", func(p *access.Profile) { p.MaxDuration = "forever" }, existing, access.Placement{}, access.ConditionFalse, ReasonInvalidDuration},
+		{"mode", func(p *access.Profile) { p.DeliveryMode = "Magic" }, existing, access.Placement{}, access.ConditionFalse, ReasonInvalidDeliveryMode},
+		{"own namespace", func(p *access.Profile) { p.TargetNamespace = p.Namespace }, existing, access.Placement{}, access.ConditionFalse, ReasonInvalidTargetNamespace},
+		{"scope", func(*access.Profile) {}, existing, access.Placement{Target: access.NamespaceScope{"staging": {}}}, access.ConditionFalse, ReasonNamespaceOutOfScope},
+		{"outside control namespaces", func(*access.Profile) {}, existing, access.Placement{Control: access.NamespaceScope{"team-b": {}}}, access.ConditionFalse, ReasonNamespaceOutOfScope},
+		{"role missing", func(*access.Profile) {}, fakeRoles{}, access.Placement{}, access.ConditionFalse, ReasonClusterRoleMissing},
+		{"role without UID", func(*access.Profile) {}, fakeRoles{roles: map[string]access.Role{"pod-observer": {Name: "pod-observer"}}}, access.Placement{}, access.ConditionFalse, ReasonClusterRoleNotReady},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := profile()
 			tc.mutate(&p)
-			got, err := Evaluator{Roles: tc.roles, Scope: tc.scope}.Evaluate(context.Background(), p)
+			got, err := Evaluator{Roles: tc.roles, Placement: tc.placement}.Evaluate(context.Background(), p)
 			if err != nil {
 				t.Fatalf("Evaluate() error = %v", err)
 			}

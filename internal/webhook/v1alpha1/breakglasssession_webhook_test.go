@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -27,8 +28,11 @@ import (
 
 var _ = Describe("BreakGlassSession Webhook", func() {
 	It("attributes the authenticated requester and snapshots the profile UID", func() {
+		control := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "webhook-control"}}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, control))).To(Succeed())
+
 		profile := &accessv1alpha1.AccessProfile{
-			ObjectMeta: metav1.ObjectMeta{Name: "webhook-production-pod-observer"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: control.Name, Name: "webhook-production-pod-observer"},
 			Spec: accessv1alpha1.AccessProfileSpec{
 				RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
 				TargetNamespace: "default",
@@ -40,7 +44,7 @@ var _ = Describe("BreakGlassSession Webhook", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(profile), profile)).To(Succeed())
 
 		request := &accessv1alpha1.BreakGlassSession{
-			ObjectMeta: metav1.ObjectMeta{Name: "webhook-requester-attribution"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: control.Name, Name: "webhook-requester-attribution"},
 			Spec: accessv1alpha1.BreakGlassSessionSpec{
 				AccessProfile: "webhook-production-pod-observer",
 				Subject: accessv1alpha1.SubjectReference{

@@ -1,0 +1,34 @@
+# Admission (ADR-005) reads the four access kinds only in the control
+# namespace. It never writes them; status and session writes stay with the
+# manager.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: breakglass-operator-admission-access
+  namespace: breakglass-access
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: ["access.breakglass.io"]
+    resources: ["accessprofiles", "breakglassapprovals", "breakglassrequests", "breakglasssessions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: breakglass-operator-admission-access
+  namespace: breakglass-access
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: breakglass-operator-admission-access
+subjects:
+  - kind: ServiceAccount
+    name: breakglass-operator-admission
+    namespace: breakglass-operator-system

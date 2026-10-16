@@ -132,6 +132,7 @@ func TestAccessProfileReconcileRequeuesMissingCuratedRole(t *testing.T) {
 func testAccessProfileForReadiness() *accessv1alpha1.AccessProfile {
 	return &accessv1alpha1.AccessProfile{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  testControlNamespace,
 			Name:       testReadinessProfileName,
 			UID:        types.UID("profile-uid"),
 			Generation: 7,

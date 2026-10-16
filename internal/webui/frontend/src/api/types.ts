@@ -11,6 +11,8 @@ export interface Me {
 
 export interface Profile {
   name: string;
+  /** Control namespace of the profile; identifies it together with name. */
+  namespace: string;
   targetNamespace: string;
   maxDuration: string;
   deliveryMode: DeliveryMode;
@@ -27,6 +29,7 @@ export type Decision = 'Approved' | 'Denied';
 export interface AccessEntry {
   kind: AccessKind;
   name: string;
+  namespace: string;
   accessProfile: string;
   targetNamespace: string;
   requester: string;
@@ -49,6 +52,7 @@ export interface AccessEntry {
 }
 
 export interface CreateAccessInput {
+  namespace: string;
   accessProfile: string;
   duration: string;
   reason: string;

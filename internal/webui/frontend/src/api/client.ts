@@ -24,8 +24,8 @@ export interface Api {
   myAccess(): Promise<AccessEntry[]>;
   pendingApprovals(): Promise<AccessEntry[]>;
   createAccess(input: CreateAccessInput): Promise<AccessEntry>;
-  revokeSession(sessionName: string): Promise<void>;
-  decide(requestName: string, decision: Decision, comment: string): Promise<void>;
+  revokeSession(namespace: string, sessionName: string): Promise<void>;
+  decide(namespace: string, requestName: string, decision: Decision, comment: string): Promise<void>;
   logout(): Promise<string>;
 }
 
@@ -84,11 +84,14 @@ export function createApi(navigate: Navigate = (url) => window.location.assign(u
     myAccess: () => request<AccessEntry[]>('/api/v1/my-requests'),
     pendingApprovals: () => request<AccessEntry[]>('/api/v1/approvals/pending'),
     createAccess: (input) => request<AccessEntry>('/api/v1/requests', { method: 'POST', body: input }),
-    revokeSession: async (sessionName) => {
-      await request(`/api/v1/sessions/${encodeURIComponent(sessionName)}/revoke`, { method: 'POST' });
+    revokeSession: async (namespace, sessionName) => {
+      await request(
+        `/api/v1/namespaces/${encodeURIComponent(namespace)}/sessions/${encodeURIComponent(sessionName)}/revoke`,
+        { method: 'POST' },
+      );
     },
-    decide: async (requestName, decision, comment) => {
-      await request('/api/v1/approvals', { method: 'POST', body: { requestName, decision, comment } });
+    decide: async (namespace, requestName, decision, comment) => {
+      await request('/api/v1/approvals', { method: 'POST', body: { namespace, requestName, decision, comment } });
     },
     logout: async () => {
       const data = await request<{ redirect?: string }>('/auth/logout', { method: 'POST' });

@@ -5,6 +5,9 @@ metadata:
     app.kubernetes.io/name: breakglass-operator
     app.kubernetes.io/managed-by: kustomize
   name: production-pod-observer
+  # Access objects live in a control namespace, never in the target
+  # namespace they grant access in (ADR-004).
+  namespace: breakglass-access
 spec:
   # A ClusterRole is bound with a RoleBinding in this one namespace. It does
   # not grant cluster-wide access.

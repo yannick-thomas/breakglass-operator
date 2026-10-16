@@ -50,6 +50,7 @@ test('requests approval-required access end to end', async ({ page }) => {
     {
       path: '/api/v1/requests',
       body: {
+        namespace: 'breakglass-access',
         accessProfile: 'production-pod-observer-approval',
         duration: '15m',
         reason: 'INC-2001 Pods im production Namespace prüfen',
@@ -86,7 +87,10 @@ test('approves another person’s request only after confirming', async ({ page 
   await expect(page.getByText('Antrag bgr-other1 freigegeben.')).toBeVisible();
   await expect(page.getByText('Keine offenen Anträge.')).toBeVisible();
   expect(backend.writes).toEqual([
-    { path: '/api/v1/approvals', body: { requestName: 'bgr-other1', decision: 'Approved', comment: '' } },
+    {
+      path: '/api/v1/approvals',
+      body: { namespace: 'breakglass-access', requestName: 'bgr-other1', decision: 'Approved', comment: '' },
+    },
   ]);
 });
 
@@ -108,7 +112,9 @@ test('revokes active access and restores focus after dialogs', async ({ page }) 
   await page.getByRole('alertdialog').getByRole('button', { name: 'Zugriff beenden' }).click();
 
   await expect(page.getByText('Zugriff bgr-active1 wird beendet.')).toBeVisible();
-  expect(backend.writes.map((w) => w.path)).toEqual(['/api/v1/sessions/breakglass-request-1a2b/revoke']);
+  expect(backend.writes.map((w) => w.path)).toEqual([
+    '/api/v1/namespaces/breakglass-access/sessions/breakglass-request-1a2b/revoke',
+  ]);
 });
 
 test('shows the live situation and follows changes made elsewhere', async ({ page }) => {
@@ -137,6 +143,9 @@ test('shows the live situation and follows changes made elsewhere', async ({ pag
 
 test('is operable with the keyboard alone', async ({ page }) => {
   await page.goto('/#/request');
+  // The initial response contains the login/loading view. Start keyboard
+  // navigation only once the authenticated application has mounted.
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Zum Inhalt springen' })).toBeFocused();
 

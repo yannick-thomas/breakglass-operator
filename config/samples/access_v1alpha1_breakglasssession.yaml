@@ -2,6 +2,9 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
   name: incident-db-emergency
+  # Access objects live in a control namespace, never in the target
+  # namespace they grant access in (ADR-004).
+  namespace: breakglass-access
 spec:
   # The mutating webhook records both the authenticated requester as subject
   # and the server-assigned accessProfileUID. Do not supply either field.

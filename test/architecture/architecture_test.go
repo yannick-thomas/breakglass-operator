@@ -17,7 +17,8 @@ limitations under the License.
 // Package architecture enforces the dependency rule of
 // docs/adr-002-clean-architecture.md: source code dependencies point inward
 // only. It checks the transitive dependencies of every inner package, so an
-// indirect import through a helper package is caught as well.
+// indirect import through a helper package is caught as well. It also keeps
+// reconciler code out of the admission binary (ADR-005).
 package architecture
 
 import (
@@ -55,7 +56,7 @@ func TestDependenciesPointInward(t *testing.T) {
 		t.Run(layer.pattern, func(t *testing.T) {
 			for pkg, deps := range dependencies(t, layer.pattern) {
 				for _, dep := range deps {
-					if !allowed(dep, layer.allowed) {
+					if !matchesAny(dep, layer.allowed) {
 						t.Errorf("%s depends on %s, which is outside its layer", pkg, dep)
 					}
 				}
@@ -64,7 +65,41 @@ func TestDependenciesPointInward(t *testing.T) {
 	}
 }
 
-func allowed(dep string, prefixes []string) bool {
+// forbidden lists, per adapter, packages it must never depend on, directly
+// or transitively. The admission server (ADR-005) runs no reconciler: it must
+// not link controller wiring or the stateful lifecycles that grant access.
+var forbidden = []struct {
+	pattern string
+	denied  []string
+}{
+	{
+		pattern: module + "/cmd/admission/...",
+		denied: []string{
+			module + "/internal/controller",
+			module + "/internal/expiryguard",
+			module + "/internal/usecase/sessionlifecycle",
+			module + "/internal/usecase/requestlifecycle",
+			module + "/internal/usecase/profilereadiness",
+			module + "/internal/usecase/expirysweep",
+		},
+	},
+}
+
+func TestAdaptersAvoidForbiddenDependencies(t *testing.T) {
+	for _, rule := range forbidden {
+		t.Run(rule.pattern, func(t *testing.T) {
+			for pkg, deps := range dependencies(t, rule.pattern) {
+				for _, dep := range deps {
+					if matchesAny(dep, rule.denied) {
+						t.Errorf("%s depends on %s, which it must not link", pkg, dep)
+					}
+				}
+			}
+		})
+	}
+}
+
+func matchesAny(dep string, prefixes []string) bool {
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(dep, prefix) {
 			return true

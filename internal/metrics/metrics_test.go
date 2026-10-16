@@ -50,6 +50,7 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	recorder.RecordBindingOperation(BindingOperation("breakglass-engineer@example.com"), BindingOperationResult("failed: forbidden"), Scope("production-payments"))
 	recorder.ObserveExpiryCleanupLag(ScopeNamespaced, -time.Second)
 	recorder.RecordAdmissionRequest(AdmissionOperationCreate, AdmissionOutcomeAllowed)
+	recorder.RecordAdmissionRequest(AdmissionOperationDelete, AdmissionOutcomeDenied)
 	recorder.RecordAdmissionRequest(AdmissionOperation("engineer@example.com"), AdmissionOutcome("INC-1092"))
 	recorder.RecordRequestTransition(RequestTransitionPending)
 	recorder.RecordRequestTransition(RequestTransition("INC-1092"))
@@ -105,6 +106,10 @@ func TestRecorderNormalizesAllMetricLabels(t *testing.T) {
 	assertMetricValue(t, registry, "breakglass_admission_requests_total", map[string]string{
 		metricLabelOperation: string(AdmissionOperationCreate),
 		metricLabelOutcome:   string(AdmissionOutcomeAllowed),
+	}, 1)
+	assertMetricValue(t, registry, "breakglass_admission_requests_total", map[string]string{
+		metricLabelOperation: string(AdmissionOperationDelete),
+		metricLabelOutcome:   string(AdmissionOutcomeDenied),
 	}, 1)
 	assertMetricValue(t, registry, "breakglass_request_transitions_total", map[string]string{
 		metricLabelTransition: string(RequestTransitionPending),
@@ -334,6 +339,7 @@ func assertOnlyBoundedLabels(t *testing.T, registry *prometheus.Registry) {
 			string(BindingOperationUnknown):            true,
 			string(AdmissionOperationCreate):           true,
 			string(AdmissionOperationUpdate):           true,
+			string(AdmissionOperationDelete):           true,
 		},
 		metricLabelResult: {
 			string(BindingOperationSuccess):       true,

@@ -8,26 +8,58 @@ metadata:
     {{- include "breakglass.labels" . | nindent 4 }}
     app.kubernetes.io/component: expiry-guard
 ---
+# Get on exactly the target and control namespaces. Namespaced Roles below go
+# with their namespace; this ClusterRole does not, so the guard can confirm
+# that a namespace whose listing became Forbidden was deleted (NotFound) and
+# keep sweeping the others. Forbidden or terminating is never absence.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $name }}-expiry-guard-role
+  name: {{ $name }}-expiry-guard-namespaces
   labels:
     {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expiry-guard
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: {{ concat .Values.allowedTargetNamespaces .Values.controlNamespaces | uniq | toJson }}
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-expiry-guard-namespaces
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expiry-guard
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-expiry-guard-namespaces}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-expiry-guard, namespace: {{ .Release.Namespace }}}
+{{- range .Values.controlNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-expiry-guard-sessions
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
 rules:
   - apiGroups: [access.breakglass.io]
     resources: [breakglasssessions]
     verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ $name }}-expiry-guard-rolebinding
+  name: {{ $name }}-expiry-guard-sessions
+  namespace: {{ . }}
   labels:
-    {{- include "breakglass.labels" . | nindent 4 }}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-expiry-guard-role}
+    {{- include "breakglass.labels" $ | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-expiry-guard-sessions}
 subjects:
-  - {kind: ServiceAccount, name: {{ $name }}-expiry-guard, namespace: {{ .Release.Namespace }}}
+  - {kind: ServiceAccount, name: {{ $name }}-expiry-guard, namespace: {{ $.Release.Namespace }}}
+{{- end }}
 {{- range .Values.allowedTargetNamespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -40,7 +72,7 @@ metadata:
 rules:
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [rolebindings]
-    verbs: [get, delete]
+    verbs: [get, list, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -107,6 +139,7 @@ spec:
                 - {{ printf "--grace=%s" .Values.expiryGuard.grace | quote }}
                 - {{ printf "--timeout=%s" .Values.expiryGuard.timeout | quote }}
                 - {{ printf "--allowed-target-namespaces=%s" (join "," .Values.allowedTargetNamespaces) | quote }}
+                - {{ printf "--control-namespaces=%s" (join "," .Values.controlNamespaces) | quote }}
               securityContext:
                 {{- include "breakglass.containerSecurity" . | nindent 16 }}
               resources:

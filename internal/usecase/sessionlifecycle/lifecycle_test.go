@@ -76,7 +76,7 @@ func (f *fakeBindings) Create(_ context.Context, d BindingDraft) (access.Binding
 	b := access.Binding{
 		Kind: access.RoleBindingKind, Name: d.Name, Namespace: d.Namespace,
 		UID: fmt.Sprintf("binding-%d", f.nextUID), Labels: d.Labels,
-		SessionOwners: []access.SessionOwner{d.Owner}, RoleRef: d.RoleRef, Subjects: d.Subjects, Version: "1",
+		RoleRef: d.RoleRef, Subjects: d.Subjects, Version: "1",
 	}
 	f.objects[key(d.Namespace, d.Name)] = b
 	return b, nil
@@ -134,7 +134,7 @@ func newFixture() (*Lifecycle, *fakeBindings, *time.Time) {
 	l := &Lifecycle{
 		Policy: &fakePolicy{
 			profiles: map[string]access.Profile{"observer": {
-				Name: "observer", UID: "profile-uid", RoleRef: access.RoleRef{Kind: access.ClusterRoleKind, Name: "pod-observer"},
+				Name: "observer", Namespace: "breakglass-access", UID: "profile-uid", RoleRef: access.RoleRef{Kind: access.ClusterRoleKind, Name: "pod-observer"},
 				TargetNamespace: "production", MaxDuration: "30m",
 			}},
 			roles: map[string]access.Role{"pod-observer": {Name: "pod-observer", UID: "role-uid", RulesHash: "hash"}},
@@ -147,7 +147,7 @@ func newFixture() (*Lifecycle, *fakeBindings, *time.Time) {
 
 func newSession() *access.Session {
 	return &access.Session{
-		Name: "incident", UID: "session-uid",
+		Name: "incident", Namespace: "breakglass-access", UID: "session-uid",
 		Spec: access.SessionSpec{
 			AccessProfile: "observer", AccessProfileUID: "profile-uid",
 			Subject:  access.Subject{Kind: access.SubjectKindUser, Name: "jane@example.com"},

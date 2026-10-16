@@ -18,8 +18,17 @@ limitations under the License.
 // meant to run as a CronJob with its own ServiceAccount, so expired access is
 // removed even while the controller manager is unavailable.
 //
-// Exit codes: 0 sweep completed, 1 sweep could not complete, 2 sweep completed
-// but at least one expired binding needs a human (see the logs).
+// Sessions and bindings are listed per configured namespace. A namespace that
+// was deleted counts as empty; any other namespace that cannot be listed is
+// skipped and reported, and the sweep goes on in the others.
+//
+// Exit codes:
+//   - 0: the sweep completed in every configured namespace.
+//   - 1: the sweep could not complete at all (invalid flags, no client, a
+//     failed cluster-wide list, an unexpected API error, or the timeout).
+//   - 2: the sweep completed, but at least one binding was refused or at
+//     least one configured namespace could not be read and was not swept. It
+//     needs a human (see the logs).
 package main
 
 import (
@@ -44,19 +53,21 @@ import (
 )
 
 const (
-	exitError    = 1
-	exitRefusals = 2
+	exitError      = 1
+	exitNeedsHuman = 2
 )
 
 func main() {
 	var grace, timeout time.Duration
-	var allowedNamespaces string
+	var allowedNamespaces, controlNamespaces string
 	var dryRun bool
 	flag.DurationVar(&grace, "grace", expirysweep.DefaultGrace,
 		"Time after a session's expiry before the guard removes its binding. Leaves the controller time to clean up first.")
 	flag.DurationVar(&timeout, "timeout", time.Minute, "Maximum duration of one sweep.")
 	flag.StringVar(&allowedNamespaces, "allowed-target-namespaces", "",
 		"Comma-separated namespaces the guard may act in. Keep in sync with the manager. Empty permits all namespaces.")
+	flag.StringVar(&controlNamespaces, "control-namespaces", "",
+		"Comma-separated namespaces in which sessions live. Keep in sync with the manager. Empty reads all namespaces.")
 	flag.BoolVar(&dryRun, "dry-run", false, "Report what would be removed without deleting anything.")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
@@ -72,6 +83,15 @@ func main() {
 	scope, err := access.ParseNamespaceScope(allowedNamespaces)
 	if err != nil {
 		log.Error(err, "Invalid allowed-target-namespaces")
+		os.Exit(exitError)
+	}
+	control, err := access.ParseNamespaceScope(controlNamespaces)
+	if err != nil {
+		log.Error(err, "Invalid control-namespaces")
+		os.Exit(exitError)
+	}
+	if err := (access.Placement{Control: control, Target: scope}).Validate(); err != nil {
+		log.Error(err, "Invalid namespace placement")
 		os.Exit(exitError)
 	}
 
@@ -95,15 +115,16 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctrl.SetupSignalHandler(), timeout)
 	defer cancel()
 
-	guard := expiryguard.New(c)
+	guard := expiryguard.New(c, control)
 	guard.Grace, guard.Scope, guard.DryRun, guard.Log = grace, scope, dryRun, log
 	report, err := guard.Sweep(ctx)
-	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused), "dryRun", dryRun)
+	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused),
+		"ignored", len(report.Ignored), "unreadableNamespaces", len(report.Unreadable), "dryRun", dryRun)
 	if err != nil {
 		log.Error(err, "Could not complete expiry sweep")
 		os.Exit(exitError)
 	}
 	if report.Failed() {
-		os.Exit(exitRefusals)
+		os.Exit(exitNeedsHuman)
 	}
 }

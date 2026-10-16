@@ -1,6 +1,8 @@
-# The expiry guard may read and delete RoleBindings only in the namespace
+# The expiry guard may list, read, and delete RoleBindings only in the namespace
 # named by the overlay. Keep this resource and the guard's
-# --allowed-target-namespaces in sync with the manager.
+# --allowed-target-namespaces in sync with the manager. This Role goes with its
+# namespace; the guard then confirms the deletion through its namespaces
+# ClusterRole (expiry-guard-namespaces-production.yaml) and keeps sweeping.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -13,7 +15,7 @@ metadata:
 rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
-    verbs: ["get", "delete"]
+    verbs: ["get", "list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

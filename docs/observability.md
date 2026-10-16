@@ -34,7 +34,7 @@ Only bounded labels are exposed:
   phase, TTL, and expiry failures; it never includes an object identifier.
 * binding `operation`: `reserve`, `recover_reservation`, `grant`, `restore`, `cleanup`, or `unknown`
 * `result`: `success`, `error`, or `unknown`
-* admission `operation`: `create`, `update`, or `unknown`
+* admission `operation`: `create`, `update`, `delete`, or `unknown`
 * admission `outcome`: `allowed`, `denied`, `error`, or `unknown`
 
 ## Metrics

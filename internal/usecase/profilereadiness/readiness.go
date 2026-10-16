@@ -56,8 +56,8 @@ type Readiness struct {
 
 // Evaluator evaluates profile readiness.
 type Evaluator struct {
-	Roles RoleSource
-	Scope access.NamespaceScope
+	Roles     RoleSource
+	Placement access.Placement
 }
 
 // Evaluate returns the readiness of the profile. Invalid configuration is
@@ -69,13 +69,15 @@ func (e Evaluator) Evaluate(ctx context.Context, profile access.Profile) (Readin
 		return notReady(ReasonInvalidRoleReference, "The profile must reference a named curated ClusterRole"), nil
 	case access.ProfileTargetNamespaceMissing:
 		return notReady(ReasonInvalidTargetNamespace, "The profile must specify a target namespace"), nil
+	case access.ProfileTargetIsControlNamespace:
+		return notReady(ReasonInvalidTargetNamespace, "The profile must not grant access in its own namespace"), nil
 	case access.ProfileMaxDurationInvalid:
 		return notReady(ReasonInvalidDuration, "The profile must specify a positive maximum duration"), nil
 	case access.ProfileDeliveryModeUnsupported:
 		return notReady(ReasonInvalidDeliveryMode, "The profile must specify a supported access delivery mode"), nil
 	}
-	if !e.Scope.Allows(profile.TargetNamespace) {
-		return notReady(ReasonNamespaceOutOfScope, fmt.Sprintf("Target namespace %q is outside this manager's allowed namespace set", profile.TargetNamespace)), nil
+	if err := e.Placement.CheckProfile(profile); err != nil {
+		return notReady(ReasonNamespaceOutOfScope, err.Error()), nil
 	}
 
 	role, err := e.Roles.Role(ctx, profile.RoleRef.Name)

@@ -7,6 +7,10 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+# Admission (ADR-005): separate identity and generated least-privilege role.
+- admission_service_account.yaml
+- admission_role.yaml
+- admission_role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # Independent expiry guard (SR-06): own identity, read sessions, delete only

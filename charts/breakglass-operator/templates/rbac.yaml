@@ -6,28 +6,12 @@ metadata:
   labels:
     {{- include "breakglass.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: [events]
-    verbs: [create, patch]
-  - apiGroups: [access.breakglass.io]
-    resources: [accessprofiles, breakglassapprovals, breakglassrequests]
-    verbs: [get, list, watch]
-  - apiGroups: [access.breakglass.io]
-    resources: [accessprofiles/status, breakglassrequests/status, breakglasssessions/status]
-    verbs: [get, patch, update]
-  - apiGroups: [access.breakglass.io]
-    resources: [breakglasssessions]
-    verbs: [create, get, list, patch, update, watch]
-  - apiGroups: [access.breakglass.io]
-    resources: [breakglasssessions/finalizers]
-    verbs: [update]
-  - apiGroups: [authorization.k8s.io]
-    resources: [subjectaccessreviews]
-    verbs: [create]
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [clusterroles]
     resourceNames: {{ .Values.curatedClusterRoles | toJson }}
     verbs: [bind, get]
+  # Target namespaces: confirm absence during cleanup recovery. Admission,
+  # not the manager, reads control namespaces (ADR-005).
   - apiGroups: [""]
     resources: [namespaces]
     resourceNames: {{ .Values.allowedTargetNamespaces | toJson }}
@@ -93,8 +77,10 @@ metadata:
   labels:
     {{- include "breakglass.labels" . | nindent 4 }}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-metrics-auth-role}
+# Both secure metrics endpoints authenticate and authorize their scrapers.
 subjects:
   - {kind: ServiceAccount, name: {{ $name }}-controller-manager, namespace: {{ .Release.Namespace }}}
+  - {kind: ServiceAccount, name: {{ $name }}-admission, namespace: {{ .Release.Namespace }}}
 {{- range .Values.allowedTargetNamespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -117,6 +103,44 @@ metadata:
   labels:
     {{- include "breakglass.labels" $ | nindent 4 }}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-manager-rolebindings}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-controller-manager, namespace: {{ $.Release.Namespace }}}
+{{- end }}
+{{- range .Values.controlNamespaces }}
+---
+# Access objects are read and written only in the control namespaces (ADR-004).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-manager-access
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [access.breakglass.io]
+    resources: [accessprofiles, breakglassapprovals, breakglassrequests]
+    verbs: [get, list, watch]
+  - apiGroups: [access.breakglass.io]
+    resources: [accessprofiles/status, breakglassrequests/status, breakglasssessions/status]
+    verbs: [get, patch, update]
+  - apiGroups: [access.breakglass.io]
+    resources: [breakglasssessions]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [access.breakglass.io]
+    resources: [breakglasssessions/finalizers]
+    verbs: [update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-manager-access
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-manager-access}
 subjects:
   - {kind: ServiceAccount, name: {{ $name }}-controller-manager, namespace: {{ $.Release.Namespace }}}
 {{- end }}

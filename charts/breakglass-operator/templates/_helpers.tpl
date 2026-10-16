@@ -42,3 +42,49 @@ allowPrivilegeEscalation: false
 capabilities:
   drop: [ALL]
 {{- end -}}
+
+{{- define "breakglass.admissionSelector" -}}
+app.kubernetes.io/name: breakglass-operator
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: admission
+{{- end -}}
+
+{{/*
+Placement and trust-anchor arguments shared by the manager and admission
+(ADR-005). Both Deployments render them from this one definition so their
+namespace scope and the trusted controller identity cannot differ.
+*/}}
+{{- define "breakglass.placementArgs" -}}
+- {{ printf "--allowed-target-namespaces=%s" (join "," .Values.allowedTargetNamespaces) | quote }}
+- {{ printf "--control-namespaces=%s" (join "," .Values.controlNamespaces) | quote }}
+- {{ printf "--request-controller-username=system:serviceaccount:%s:%s-controller-manager" .Release.Namespace (include "breakglass.fullname" .) | quote }}
+{{- end -}}
+
+{{/* Pod placement shared by the manager and admission Deployments. */}}
+{{- define "breakglass.podScheduling" -}}
+{{- with .root.Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .root.Values.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .root.Values.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .root.Values.priorityClassName }}
+priorityClassName: {{ . | quote }}
+{{- end }}
+{{- if .root.Values.availability.spreadAcrossHosts }}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor
+    labelSelector:
+      matchLabels:
+        {{- .selector | nindent 8 }}
+{{- end }}
+{{- end -}}

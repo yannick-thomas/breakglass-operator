@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { FieldError, Label, Radio, RadioGroup, Text } from 'react-aria-components';
 import { useAppData } from '../AppContext';
 import { ApiError } from '../api/client';
+import { objectKey } from '../api/objectKey';
 import type { AccessEntry, Profile } from '../api/types';
 import { Button } from '../components/Button';
 import { EmptyState, Loading, Notice, StatusBadge } from '../components/Feedback';
@@ -56,7 +57,7 @@ function defaultDuration(profile: Profile): string {
 export function RequestAccess() {
   const { api, profiles, access, navigate } = useAppData();
   const [step, setStep] = useState<Step>('form');
-  const [profileName, setProfileName] = useState('');
+  const [profileKey, setProfileKey] = useState('');
   const [duration, setDuration] = useState('30m');
   const [reason, setReason] = useState('');
   const [showErrors, setShowErrors] = useState(false);
@@ -64,7 +65,7 @@ export function RequestAccess() {
   const [submitError, setSubmitError] = useState<ApiError>();
   const [created, setCreated] = useState<AccessEntry>();
 
-  const profile = profiles.data?.find((p) => p.name === profileName);
+  const profile = profiles.data?.find((p) => objectKey(p) === profileKey);
   const errors = validate(profile, duration, reason);
   const hasErrors = Object.keys(errors).length > 0;
 
@@ -81,15 +82,15 @@ export function RequestAccess() {
     return PRESETS.filter((p) => max === null || (parseDuration(p) ?? 0) <= max);
   }, [profile]);
 
-  function selectProfile(name: string) {
-    setProfileName(name);
-    const next = profiles.data?.find((p) => p.name === name);
+  function selectProfile(key: string) {
+    setProfileKey(key);
+    const next = profiles.data?.find((p) => objectKey(p) === key);
     if (next) setDuration(defaultDuration(next));
   }
 
   function reset() {
     setStep('form');
-    setProfileName('');
+    setProfileKey('');
     setDuration('30m');
     setReason('');
     setShowErrors(false);
@@ -103,6 +104,7 @@ export function RequestAccess() {
     setSubmitError(undefined);
     try {
       const result = await api.createAccess({
+        namespace: profile.namespace,
         accessProfile: profile.name,
         duration: duration.trim(),
         reason: reason.trim(),
@@ -262,7 +264,7 @@ export function RequestAccess() {
       >
         <div className={page.cardBody}>
           <RadioGroup
-            value={profileName}
+            value={profileKey}
             onChange={selectProfile}
             isInvalid={showErrors && Boolean(errors.profile)}
             className={styles.profileGroup}
@@ -273,7 +275,7 @@ export function RequestAccess() {
             </Text>
             <div className={styles.profiles}>
               {available.map((p) => (
-                <Radio key={p.name} value={p.name} isDisabled={!p.isReady} className={styles.profileCard}>
+                <Radio key={objectKey(p)} value={objectKey(p)} isDisabled={!p.isReady} className={styles.profileCard}>
                   <span className={styles.profileTop}>
                     <span className={styles.profileName}>{p.name}</span>
                     {p.isReady ? (

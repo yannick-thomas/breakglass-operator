@@ -1,5 +1,10 @@
 # 🔮 BreakGlass Operator – Zukunftsvision & Roadmap
 
+Die konkrete nächste Umsetzung für Helm, Images und WebUI folgt der
+[Helm-/WebUI-Roadmap mit M1–M5](docs/helm-webui-roadmap.md). M1 ist erst nach
+erfolgreicher Kind-/Release-Abnahme abgeschlossen; die dortige Checkliste
+unterscheidet implementierte Gates vom noch ausstehenden Betriebsnachweis.
+
 > **Mission Statement**  
 > Der **BreakGlass Operator** transformiert Kubernetes Access Management von einem statischen, überprivilegierten Modell (*„Entwickler haben permanente Admin-Rechte für Notfälle“*) in eine kompromisslose **Zero-Trust Just-In-Time (JIT) Privileged Access Management (PAM)** Plattform für Cloud-Native Workloads.
 
@@ -100,7 +105,8 @@ flowchart TD
 > **Ziel:** Verhindern, dass Entwickler die CRD missbrauchen, um sich unbeaufsichtigt unbegrenzte Rechte zu verschaffen.
 
 #### Aktueller `v1alpha1`-Stand
-* [x] **Cluster-scoped `AccessProfile` für namespaced Grants**: Das Profil fixiert eine kuratierte `ClusterRole`, genau einen Ziel-Namespace und eine maximale Dauer. Es ist unveränderlich; ein Request kann weder Rolle noch Namespace wählen.
+* [x] **Namespaced Zugriffsobjekte in Steuer-Namespaces (ADR-004)**: Profile, Requests, Approvals und Sessions liegen in einem Steuer-Namespace, der nie Ziel-Namespace ist; `use`, `approve` und `revoke` werden namespaced geprüft. Grundlage für die Mandantenfähigkeit.
+* [x] **`AccessProfile` für namespaced Grants**: Das Profil fixiert eine kuratierte `ClusterRole`, genau einen Ziel-Namespace und eine maximale Dauer. Es ist unveränderlich; ein Request kann weder Rolle noch Namespace wählen.
 * [x] **Requester-Attribution & Profil-UID**: Der Mutating Webhook überschreibt den Empfänger aus dem authentifizierten API-User und snapshottet die serverseitige Profil-UID. ServiceAccounts sind im Self-Service-Slice absichtlich ausgeschlossen.
 * [x] **Profil-`use`-Autorisierung**: Der Validating Webhook führt einen `SubjectAccessReview` für `use` auf dem konkret benannten Profil aus und prüft Profil-UID sowie maximale Dauer erneut.
 * [x] **Datensparsame Betriebsmetriken**: Lifecycle, Binding-Drift, Cleanup-Lag, aktive/überfällige Sessions sowie Admission-Allow/Deny/Error sind mit festen Enum-Labels instrumentiert; Identitäten, Rollen, Namespaces, Tickets und Gründe erscheinen nicht als Labels.

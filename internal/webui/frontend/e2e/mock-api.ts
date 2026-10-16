@@ -10,6 +10,7 @@ export class MockBackend {
   profiles: Profile[] = [
     {
       name: 'production-pod-observer-approval',
+      namespace: 'breakglass-access',
       targetNamespace: 'production',
       maxDuration: '1h',
       deliveryMode: 'ApprovalRequired',
@@ -19,6 +20,7 @@ export class MockBackend {
     },
     {
       name: 'staging-pod-observer',
+      namespace: 'breakglass-access',
       targetNamespace: 'staging',
       maxDuration: '2h',
       deliveryMode: 'SelfService',
@@ -36,6 +38,7 @@ export class MockBackend {
     return {
       kind: 'Request',
       name: 'bgr-x',
+      namespace: 'breakglass-access',
       accessProfile: 'production-pod-observer-approval',
       targetNamespace: 'production',
       requester: 'oidc:jane@example.com',
@@ -73,11 +76,12 @@ export class MockBackend {
       this.writes.push({ path, body });
 
       if (path === '/api/v1/requests') {
-        const profile = this.profiles.find((p) => p.name === body.accessProfile);
+        const profile = this.profiles.find((p) => p.namespace === body.namespace && p.name === body.accessProfile);
         const selfService = profile?.deliveryMode === 'SelfService';
         const created = MockBackend.entry({
           kind: selfService ? 'Session' : 'Request',
           name: `${selfService ? 'bgs' : 'bgr'}-new${++this.counter}`,
+          namespace: body.namespace,
           accessProfile: body.accessProfile,
           targetNamespace: profile?.targetNamespace ?? '',
           duration: body.duration,
@@ -89,12 +93,15 @@ export class MockBackend {
         return route.fulfill({ status: 201, json: created });
       }
       if (path === '/api/v1/approvals') {
-        this.pending = this.pending.filter((p) => p.name !== body.requestName);
+        this.pending = this.pending.filter((p) => p.namespace !== body.namespace || p.name !== body.requestName);
         return route.fulfill({ status: 201, json: { status: 'decision_recorded' } });
       }
-      const revoke = path.match(/^\/api\/v1\/sessions\/([^/]+)\/revoke$/);
+      const revoke = path.match(/^\/api\/v1\/namespaces\/([^/]+)\/sessions\/([^/]+)\/revoke$/);
       if (revoke) {
-        const entry = this.mine.find((e) => e.sessionName === decodeURIComponent(revoke[1] ?? ''));
+        const namespace = decodeURIComponent(revoke[1] ?? '');
+        const entry = this.mine.find(
+          (e) => e.namespace === namespace && e.sessionName === decodeURIComponent(revoke[2] ?? ''),
+        );
         if (entry) Object.assign(entry, { sessionPhase: 'Revoked', sessionRevoked: true, canRevoke: false });
         return route.fulfill({ json: { status: 'revoked' } });
       }

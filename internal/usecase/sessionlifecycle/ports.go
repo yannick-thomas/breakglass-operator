@@ -26,7 +26,8 @@ import (
 // PolicySource reads the policy objects a grant depends on. Implementations
 // must read directly from the API server: a stale cache must never authorize a
 // new grant or prolong an active one. Lookups of missing objects return an
-// error marked with port.ErrNotFound.
+// error marked with port.ErrNotFound. Profiles, requests, and approvals are
+// read in the namespace of the session being reconciled (ADR-004).
 type PolicySource interface {
 	Profile(ctx context.Context, name string) (access.Profile, error)
 	Role(ctx context.Context, name string) (access.Role, error)
@@ -43,7 +44,6 @@ type BindingDraft struct {
 	Name      string
 	Namespace string
 	Labels    map[string]string
-	Owner     access.SessionOwner
 	RoleRef   access.BindingRoleRef
 	Subjects  []access.BindingSubject
 }

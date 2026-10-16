@@ -1,0 +1,160 @@
+{{- /*
+Admission runs separately from the grant controller (ADR-005): it serves every
+webhook under its own read-only identity and never holds bind, escalate or
+RoleBinding rights. It shares image, placement arguments and availability
+values with the manager.
+*/ -}}
+{{- $name := include "breakglass.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-admission
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-admission
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "breakglass.admissionSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "breakglass.admissionSelector" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}-admission
+      securityContext:
+        {{- include "breakglass.podSecurity" . | nindent 8 }}
+      terminationGracePeriodSeconds: 30
+      {{- include "breakglass.podScheduling" (dict "root" . "selector" (include "breakglass.admissionSelector" .)) | nindent 6 }}
+      containers:
+        - name: admission
+          image: {{ include "breakglass.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/admission]
+          args:
+            - --health-probe-bind-address=:8081
+            - --webhook-port=9443
+            - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+            - --metrics-bind-address=:8443
+            - --metrics-secure=true
+            - --metrics-cert-path=/tmp/k8s-metrics-server/serving-certs
+            {{- include "breakglass.placementArgs" . | nindent 12 }}
+          ports:
+            - {name: health, containerPort: 8081, protocol: TCP}
+            - {name: webhook-server, containerPort: 9443, protocol: TCP}
+            - {name: https, containerPort: 8443, protocol: TCP}
+          securityContext:
+            {{- include "breakglass.containerSecurity" . | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+            - name: metrics-certs
+              mountPath: /tmp/k8s-metrics-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ $name }}-webhook-server-cert
+        - name: metrics-certs
+          secret:
+            secretName: {{ $name }}-admission-metrics-server-cert
+{{- if .Values.availability.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-admission
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  minAvailable: {{ .Values.availability.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "breakglass.admissionSelector" . | nindent 6 }}
+{{- end }}
+---
+# Admission reads only: authorization questions, namespace lifecycle by name
+# and the access objects in the control namespaces. No bind, escalate,
+# RoleBinding, Session or status writes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-admission-role
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: {{ concat .Values.allowedTargetNamespaces .Values.controlNamespaces | uniq | toJson }}
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-admission-rolebinding
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-admission-role}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-admission, namespace: {{ .Release.Namespace }}}
+{{- range .Values.controlNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-admission-access
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [access.breakglass.io]
+    resources: [accessprofiles, breakglassapprovals, breakglassrequests, breakglasssessions]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-admission-access
+  namespace: {{ . }}
+  labels:
+    {{- include "breakglass.labels" $ | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-admission-access}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-admission, namespace: {{ $.Release.Namespace }}}
+{{- end }}

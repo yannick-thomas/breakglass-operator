@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAppData } from '../AppContext';
 import { ApiError } from '../api/client';
+import { domId, objectKey } from '../api/objectKey';
 import type { AccessEntry, Decision } from '../api/types';
 import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
@@ -53,12 +54,12 @@ export function Approvals() {
       ) : (
         <ul className={page.list}>
           {items.map((entry) => (
-            <li key={entry.name}>
-              <article className={page.card} aria-labelledby={`approval-${entry.name}`}>
+            <li key={objectKey(entry)}>
+              <article className={page.card} aria-labelledby={domId('approval', entry)}>
                 <div className={`${page.cardBody} ${styles.body}`}>
                   <div className={styles.head}>
                     <div>
-                      <h2 id={`approval-${entry.name}`} className={styles.requester}>
+                      <h2 id={domId('approval', entry)} className={styles.requester}>
                         {entry.requester}
                       </h2>
                       <p className={page.sectionHint}>
@@ -133,7 +134,7 @@ export function DecisionDialog({ entry, decision, onClose, onDone }: { entry: Ac
     setPending(true);
     setError(undefined);
     try {
-      await api.decide(entry.name, decision, comment.trim());
+      await api.decide(entry.namespace, entry.name, decision, comment.trim());
       notify(approve ? `Antrag ${entry.name} freigegeben.` : `Antrag ${entry.name} abgelehnt.`, 'success');
       onDone();
     } catch (err) {

@@ -1,5 +1,8 @@
 .page {
   display: grid;
+  /* Long profile names must not set the minimum width of the page's track. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: var(--space-6);
 }
 
@@ -200,6 +203,8 @@
 
 .panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   align-content: start;
   justify-items: start;
   gap: var(--space-3);

@@ -14,8 +14,8 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      control-plane: controller-manager
       app.kubernetes.io/name: breakglass-operator
+      app.kubernetes.io/component: admission
   policyTypes:
     - Ingress
   ingress:

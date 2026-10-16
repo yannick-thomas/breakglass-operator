@@ -1,4 +1,5 @@
 allowedTargetNamespaces: [payments, inventory]
+controlNamespaces: [payments-access, inventory-access]
 curatedClusterRoles: [breakglass-logs-v1, breakglass-restart-v1]
 certManager:
   issuerRef:

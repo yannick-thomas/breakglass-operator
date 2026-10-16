@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { objectKey } from '../api/objectKey';
 import type { AccessEntry } from '../api/types';
 import { useNotify } from '../components/Toaster';
 import { statusOf } from '../lib/status';
@@ -19,14 +20,14 @@ export function useStatusNotifications(entries: AccessEntry[] | undefined): void
 
   useEffect(() => {
     if (!entries) return;
-    const current = new Map(entries.map((e) => [e.name, statusKey(e)]));
+    const current = new Map(entries.map((e) => [objectKey(e), statusKey(e)]));
     const before = previous.current;
     previous.current = current;
     if (!before) return;
 
     for (const entry of entries) {
-      const was = before.get(entry.name);
-      const now = current.get(entry.name);
+      const was = before.get(objectKey(entry));
+      const now = current.get(objectKey(entry));
       if (!was || was === now) continue;
 
       const status = statusOf(entry);

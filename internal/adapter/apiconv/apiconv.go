@@ -26,7 +26,6 @@ import (
 
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
@@ -34,15 +33,13 @@ import (
 	"github.com/yannick-thomas/breakglass-operator/internal/usecase/port"
 )
 
-// SessionKind is the kind of the BreakGlassSession API type.
-const SessionKind = "BreakGlassSession"
-
 // The translation is lossless for every field the domain reads or writes;
 // fields the domain does not know are left untouched on the API object.
 
 func ToDomainSession(obj *accessv1alpha1.BreakGlassSession) *access.Session {
 	return &access.Session{
 		Name:         obj.Name,
+		Namespace:    obj.Namespace,
 		UID:          string(obj.UID),
 		Generation:   obj.Generation,
 		Deleting:     !obj.DeletionTimestamp.IsZero(),
@@ -201,6 +198,7 @@ func ToAPIConditions(conditions []access.Condition) []metav1.Condition {
 func ToDomainProfile(p *accessv1alpha1.AccessProfile) access.Profile {
 	return access.Profile{
 		Name:            p.Name,
+		Namespace:       p.Namespace,
 		UID:             string(p.UID),
 		RoleRef:         access.RoleRef{Kind: p.Spec.RoleRef.Kind, Name: p.Spec.RoleRef.Name},
 		TargetNamespace: p.Spec.TargetNamespace,
@@ -253,8 +251,9 @@ func ToDomainApproval(a *accessv1alpha1.BreakGlassApproval) access.Approval {
 	}
 }
 
-// ToDomainBinding observes a RoleBinding. Only controller owner references to
-// a BreakGlassSession are reported; other owners prove nothing.
+// ToDomainBinding observes a RoleBinding. Owner references are not reported:
+// a session in a control namespace cannot own a binding in a target namespace
+// (ADR-004), so they prove nothing.
 func ToDomainBinding(rb *rbacv1.RoleBinding) access.Binding {
 	binding := access.Binding{
 		Kind:      access.RoleBindingKind,
@@ -264,11 +263,6 @@ func ToDomainBinding(rb *rbacv1.RoleBinding) access.Binding {
 		Labels:    rb.Labels,
 		RoleRef:   access.BindingRoleRef{APIGroup: rb.RoleRef.APIGroup, Kind: rb.RoleRef.Kind, Name: rb.RoleRef.Name},
 		Version:   rb.ResourceVersion,
-	}
-	for _, owner := range rb.OwnerReferences {
-		if IsSessionControllerOwner(owner) {
-			binding.SessionOwners = append(binding.SessionOwners, access.SessionOwner{Name: owner.Name, UID: string(owner.UID)})
-		}
 	}
 	if rb.Subjects != nil {
 		binding.Subjects = make([]access.BindingSubject, len(rb.Subjects))
@@ -288,24 +282,6 @@ func ToAPISubjects(subjects []access.BindingSubject) []rbacv1.Subject {
 		result[i] = rbacv1.Subject{APIGroup: s.APIGroup, Kind: s.Kind, Name: s.Name, Namespace: s.Namespace}
 	}
 	return result
-}
-
-func IsSessionControllerOwner(owner metav1.OwnerReference) bool {
-	return owner.APIVersion == accessv1alpha1.GroupVersion.String() &&
-		owner.Kind == SessionKind &&
-		owner.Controller != nil && *owner.Controller
-}
-
-func SessionControllerOwner(owner access.SessionOwner) metav1.OwnerReference {
-	controller := true
-	return metav1.OwnerReference{
-		APIVersion:         accessv1alpha1.GroupVersion.String(),
-		Kind:               SessionKind,
-		Name:               owner.Name,
-		UID:                types.UID(owner.UID),
-		Controller:         &controller,
-		BlockOwnerDeletion: &controller,
-	}
 }
 
 // Classify marks Kubernetes API errors with the port error kinds that use

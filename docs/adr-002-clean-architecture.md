@@ -1,7 +1,7 @@
 # ADR-002: Clean architecture inside the Kubebuilder layout
 
 **Status:** Accepted, implemented
-**Scope:** The manager (reconcilers and admission webhooks) and the expiry guard. The WebUI keeps its own layering (`internal/webui`).
+**Scope:** The manager (reconcilers), the admission binary (webhooks, ADR-005) and the expiry guard. The WebUI keeps its own layering (`internal/webui`).
 
 ## Context
 

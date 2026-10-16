@@ -170,6 +170,7 @@ type AdmissionOperation string
 const (
 	AdmissionOperationCreate  AdmissionOperation = "create"
 	AdmissionOperationUpdate  AdmissionOperation = "update"
+	AdmissionOperationDelete  AdmissionOperation = "delete"
 	AdmissionOperationUnknown AdmissionOperation = "unknown"
 )
 
@@ -499,7 +500,7 @@ func normalizeBindingOperationResult(result BindingOperationResult) BindingOpera
 
 func normalizeAdmissionOperation(operation AdmissionOperation) AdmissionOperation {
 	switch operation {
-	case AdmissionOperationCreate, AdmissionOperationUpdate, AdmissionOperationUnknown:
+	case AdmissionOperationCreate, AdmissionOperationUpdate, AdmissionOperationDelete, AdmissionOperationUnknown:
 		return operation
 	default:
 		return AdmissionOperationUnknown

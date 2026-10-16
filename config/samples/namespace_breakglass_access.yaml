@@ -1,0 +1,13 @@
+# Control namespace for AccessProfiles, requests, approvals, and sessions.
+# Bind the sample requester, approver, revoker, and auditor ClusterRoles here
+# with RoleBindings: they then apply only to this namespace's profiles.
+#
+# The label opts the namespace into the drain check of the default and
+# production Kustomize profiles: deleting it is denied while it still holds a
+# BreakGlassSession (ADR-004). Without the label, deletion bypasses the check.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: breakglass-access
+  labels:
+    access.breakglass.io/control-namespace: "true"

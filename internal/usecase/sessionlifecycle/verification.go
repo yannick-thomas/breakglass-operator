@@ -58,7 +58,7 @@ func (l *Lifecycle) ResolveGrant(ctx context.Context, s *access.Session) (*acces
 		}
 		return nil, 0, err
 	}
-	if err := access.CheckProfileForSession(s.Spec, duration, profile, l.Scope); err != nil {
+	if err := access.CheckProfileForSession(s.Spec, duration, profile, l.placement()); err != nil {
 		return nil, 0, denied(err)
 	}
 	role, err := l.Policy.Role(ctx, profile.RoleRef.Name)
@@ -88,7 +88,7 @@ func (l *Lifecycle) verifyProfile(ctx context.Context, s *access.Session) (*acce
 		}
 		return nil, err
 	}
-	return s.ProfileIssue(profile, l.Scope), nil
+	return s.ProfileIssue(profile, l.placement()), nil
 }
 
 // VerifyCuratedRole reads the curated role directly on every integrity check.

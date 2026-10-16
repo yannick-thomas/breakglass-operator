@@ -1,0 +1,20 @@
+# Admission metrics (breakglass_admission_requests_total) are served by the
+# admission pods with the same authenticated HTTPS endpoint as the manager.
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission
+    app.kubernetes.io/managed-by: kustomize
+  name: admission-metrics-service
+  namespace: system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: admission

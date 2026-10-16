@@ -36,6 +36,11 @@ const (
 	managerNamespace = "breakglass-operator-system"
 	managerRoleName  = "breakglass-operator-manager-role"
 	roleBindingRule  = "rolebindings"
+	namespaceRule    = "namespaces"
+
+	// targetNamespace is the one target namespace of the namespaced profile.
+	targetNamespace    = "production"
+	serviceAccountKind = "ServiceAccount"
 )
 
 func main() {
@@ -56,13 +61,25 @@ func validateProfile(profile string, input io.Reader) error {
 	if err != nil {
 		return err
 	}
+	if err := verifyAccessKindsAdmitted(objects); err != nil {
+		return err
+	}
 	if err := verifyWebhookSecurity(objects); err != nil {
+		return err
+	}
+	if err := verifyWebhookSelectors(objects, profile); err != nil {
 		return err
 	}
 	if err := verifyRequiredCRDs(objects); err != nil {
 		return err
 	}
 	if err := verifyManagerPodSecurity(objects); err != nil {
+		return err
+	}
+	if err := verifyManagerRole(objects); err != nil {
+		return err
+	}
+	if err := verifyAdmission(objects, profile); err != nil {
 		return err
 	}
 	if err := verifyExpiryGuard(objects, profile == namespacedProfile); err != nil {
@@ -129,7 +146,7 @@ func verifyWebhookSecurity(objects []unstructured.Unstructured) error {
 		name string
 	}{
 		{kind: "MutatingWebhookConfiguration", name: "breakglass-operator-mutating-webhook-configuration"},
-		{kind: "ValidatingWebhookConfiguration", name: "breakglass-operator-validating-webhook-configuration"},
+		{kind: validatingWebhookKind, name: validatingWebhookConfiguration},
 	} {
 		webhook, err := requiredObject(objects, configuration.kind, configuration.name)
 		if err != nil {
@@ -193,24 +210,18 @@ func verifyProductionAvailability(objects []unstructured.Unstructured) error {
 	if err != nil {
 		return err
 	}
-	replicas, found, err := unstructured.NestedFieldNoCopy(manager.Object, "spec", "replicas")
-	if err != nil || !found || !hasIntValue(replicas, 2) {
-		return fmt.Errorf("manager Deployment must have exactly two replicas")
-	}
-	constraints, found, err := unstructured.NestedSlice(
-		manager.Object, "spec", "template", "spec", "topologySpreadConstraints",
-	)
-	if err != nil || !found || !hasHostnameSpreadConstraint(constraints) {
-		return fmt.Errorf("manager Deployment must spread replicas across hostnames with DoNotSchedule")
-	}
+	return verifyAvailability(objects, manager, managerName, "manager")
+}
 
-	pdb, err := requiredObject(objects, "PodDisruptionBudget", managerName)
+// verifyManagerRole keeps webhook-only permissions out of the manager role
+// (ADR-005): SubjectAccessReviews are created only by admission.
+func verifyManagerRole(objects []unstructured.Unstructured) error {
+	managerRole, err := requiredObject(objects, "ClusterRole", managerRoleName)
 	if err != nil {
 		return err
 	}
-	minAvailable, found, err := unstructured.NestedFieldNoCopy(pdb.Object, "spec", "minAvailable")
-	if err != nil || !found || !hasIntValue(minAvailable, 1) {
-		return fmt.Errorf("manager PodDisruptionBudget must set minAvailable: 1")
+	if roleHasResource(managerRole, "subjectaccessreviews") {
+		return fmt.Errorf("manager ClusterRole must not create SubjectAccessReviews; only admission does")
 	}
 	return nil
 }
@@ -255,11 +266,11 @@ func verifyNamespacedRBACBoundary(objects []unstructured.Unstructured) error {
 	if !roleHasNamedClusterRoleBind(managerRole) {
 		return fmt.Errorf("manager ClusterRole must retain the scoped curated-role bind permission")
 	}
-	if !roleHasExactNamespaceObservation(managerRole) {
-		return fmt.Errorf("manager must have only get on the named production namespace for cleanup recovery")
+	if !roleHasExactNamespaceObservation(managerRole, []string{targetNamespace}) {
+		return fmt.Errorf("manager must have only get on the named production namespace")
 	}
 
-	role, err := requiredObjectInNamespace(objects, "Role", "breakglass-operator-manager-rolebindings", "production")
+	role, err := requiredObjectInNamespace(objects, "Role", "breakglass-operator-manager-rolebindings", targetNamespace)
 	if err != nil {
 		return err
 	}
@@ -278,10 +289,13 @@ func verifyNamespacedRBACBoundary(objects []unstructured.Unstructured) error {
 	if !found {
 		return fmt.Errorf("manager Deployment must contain a manager container")
 	}
-	if allowedTargetNamespaceArguments(container) == 1 {
-		return nil
+	if allowedTargetNamespaceArguments(container) != 1 {
+		return fmt.Errorf("manager Deployment must restrict allowed target namespaces to production")
 	}
-	return fmt.Errorf("manager Deployment must restrict allowed target namespaces to production")
+	if controlNamespaceArguments(container) != 1 {
+		return fmt.Errorf("manager Deployment must restrict control namespaces to %s", controlNamespace)
+	}
+	return nil
 }
 
 func namedContainer(deployment unstructured.Unstructured, name string) (map[string]any, bool) {
@@ -298,7 +312,13 @@ func namedContainer(deployment unstructured.Unstructured, name string) (map[stri
 	return nil, false
 }
 
-func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
+// roleHasExactNamespaceObservation requires exactly one Namespace rule: get on
+// exactly the named namespaces, and nothing else. The manager gets only the
+// target namespace (cleanup recovery); the expiry guard and admission also the
+// control namespace (orphan sweeping, approval deletion during namespace
+// deletion).
+func roleHasExactNamespaceObservation(role unstructured.Unstructured, want []string) bool {
+	want = slices.Sorted(slices.Values(want))
 	rules, _, _ := unstructured.NestedSlice(role.Object, "rules")
 	found := false
 	for _, raw := range rules {
@@ -316,13 +336,33 @@ func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
 		}
 		verbs, _, _ := unstructured.NestedStringSlice(rule, "verbs")
 		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
-		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{"namespaces"}) ||
-			!slices.Equal(verbs, []string{verbGet}) || !slices.Equal(names, []string{"production"}) {
+		names = slices.Sorted(slices.Values(names))
+		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{namespaceRule}) ||
+			!slices.Equal(verbs, []string{verbGet}) || !slices.Equal(names, want) {
 			return false
 		}
 		found = true
 	}
 	return found
+}
+
+// controlNamespace holds the access objects in the namespaced profiles
+// (ADR-004).
+const controlNamespace = "breakglass-access"
+
+// controlNamespaceArguments counts the exact control-namespace argument and
+// returns 0 if any other control-namespace argument is present.
+func controlNamespaceArguments(container map[string]any) int {
+	const controlFlag = "--control-namespaces="
+	count := 0
+	for _, arg := range stringValues(container["args"]) {
+		if arg == controlFlag+controlNamespace {
+			count++
+		} else if len(arg) >= len(controlFlag) && arg[:len(controlFlag)] == controlFlag {
+			return 0
+		}
+	}
+	return count
 }
 
 func allowedTargetNamespaceArguments(container map[string]any) int {
@@ -343,7 +383,7 @@ func allowedTargetNamespaceArguments(container map[string]any) int {
 
 func verifyManagerRoleBinding(objects []unstructured.Unstructured) error {
 	binding, err := requiredObjectInNamespace(
-		objects, "RoleBinding", "breakglass-operator-manager-rolebindings", "production",
+		objects, "RoleBinding", "breakglass-operator-manager-rolebindings", targetNamespace,
 	)
 	if err != nil {
 		return err
@@ -358,7 +398,7 @@ func verifyManagerRoleBinding(objects []unstructured.Unstructured) error {
 		return fmt.Errorf("production manager RoleBinding must have exactly one ServiceAccount subject")
 	}
 	subject, ok := subjects[0].(map[string]any)
-	if !ok || subject["kind"] != "ServiceAccount" ||
+	if !ok || subject["kind"] != serviceAccountKind ||
 		subject["name"] != managerName || subject["namespace"] != managerNamespace {
 		return fmt.Errorf("production manager RoleBinding must bind the manager ServiceAccount")
 	}
@@ -391,7 +431,8 @@ func roleHasNamedClusterRoleBind(role unstructured.Unstructured) bool {
 func roleHasExactRoleBindingVerbs(role unstructured.Unstructured) bool {
 	for _, item := range nestedRules(role) {
 		if containsString(item["resources"], roleBindingRule) {
-			return sameStrings(stringValues(item["verbs"]), []string{"create", verbDelete, verbGet, "list", "update", "watch"})
+			want := []string{verbCreate, verbDelete, verbGet, verbList, "update", "watch"}
+			return sameStrings(stringValues(item["verbs"]), want)
 		}
 	}
 	return false
@@ -466,4 +507,39 @@ func requiredObjectInNamespace(
 		return unstructured.Unstructured{}, fmt.Errorf("%s %q must be in namespace %q", kind, name, namespace)
 	}
 	return object, nil
+}
+
+// verifyAccessKindsAdmitted requires the validating configuration to intercept
+// the creation of every access kind. Placement (ADR-004) is an admission
+// boundary for all four kinds; a kind without a validating webhook could be
+// created in any namespace a principal may write to.
+func verifyAccessKindsAdmitted(objects []unstructured.Unstructured) error {
+	configuration, err := requiredObject(objects, validatingWebhookKind, validatingWebhookConfiguration)
+	if err != nil {
+		return err
+	}
+	webhooks, _, _ := unstructured.NestedSlice(configuration.Object, "webhooks")
+	admitted := map[string]bool{}
+	for _, item := range webhooks {
+		webhook, _ := item.(map[string]any)
+		rules, _, _ := unstructured.NestedSlice(webhook, "rules")
+		for _, rawRule := range rules {
+			rule, _ := rawRule.(map[string]any)
+			groups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
+			operations, _, _ := unstructured.NestedStringSlice(rule, "operations")
+			if !slices.Contains(groups, "access.breakglass.io") || !slices.Contains(operations, "CREATE") {
+				continue
+			}
+			resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+			for _, resource := range resources {
+				admitted[resource] = true
+			}
+		}
+	}
+	for _, kind := range accessKinds {
+		if !admitted[kind] {
+			return fmt.Errorf("validating admission must intercept the creation of %s", kind)
+		}
+	}
+	return nil
 }

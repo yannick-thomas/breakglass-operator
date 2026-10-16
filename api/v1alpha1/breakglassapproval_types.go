@@ -51,7 +51,7 @@ type BreakGlassApprovalSpec struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=bga
+// +kubebuilder:resource:scope=Namespaced,shortName=bga
 // +kubebuilder:printcolumn:name="Request",type="string",JSONPath=".spec.requestRef.name",description="Approved request"
 // +kubebuilder:printcolumn:name="Decision",type="string",JSONPath=".spec.decision",description="Immutable decision"
 // +kubebuilder:printcolumn:name="Approver",type="string",JSONPath=".spec.approver.name",description="Authenticated approver"

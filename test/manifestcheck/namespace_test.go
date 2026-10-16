@@ -14,8 +14,12 @@ func TestNamespaceObservationMustBeNarrow(t *testing.T) {
 		want   bool
 	}{
 		{"exact", "verbs", []string{"get"}, true},
+		{"any name order", "resourceNames", []string{"breakglass-access", "production"}, true},
 		{"no name constraint", "resourceNames", nil, false},
 		{"different name", "resourceNames", []string{"other"}, false},
+		{"target only", "resourceNames", []string{"production"}, false},
+		{"control only", "resourceNames", []string{"breakglass-access"}, false},
+		{"extra name", "resourceNames", []string{"production", "breakglass-access", "other"}, false},
 		{"list", "verbs", []string{"get", "list"}, false},
 		{"writes", "verbs", []string{"get", "delete"}, false},
 		{"all verbs", "verbs", []string{"*"}, false},
@@ -25,13 +29,13 @@ func TestNamespaceObservationMustBeNarrow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rule := map[string]any{
 				"apiGroups": []any{""}, "resources": []any{"namespaces"},
-				"resourceNames": []any{"production"}, "verbs": []any{"get"},
+				"resourceNames": []any{"production", "breakglass-access"}, "verbs": []any{"get"},
 			}
 			if err := unstructured.SetNestedStringSlice(rule, tc.values, tc.field); err != nil {
 				t.Fatal(err)
 			}
 			role := unstructured.Unstructured{Object: map[string]any{"rules": []any{rule}}}
-			if got := roleHasExactNamespaceObservation(role); got != tc.want {
+			if got := roleHasExactNamespaceObservation(role, []string{"production", "breakglass-access"}); got != tc.want {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})

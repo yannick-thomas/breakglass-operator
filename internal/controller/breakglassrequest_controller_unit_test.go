@@ -165,7 +165,7 @@ func TestRequestReconcileConsumesOneApprovedDecisionIntoOneReservedSession(t *te
 	request.Spec.Duration = "15m"
 	request.Spec.Reason = "Investigating active production incident"
 	approval := &accessv1alpha1.BreakGlassApproval{
-		ObjectMeta: metav1.ObjectMeta{Name: accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)), UID: types.UID("approval-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: request.Namespace, Name: accessv1alpha1.ApprovalNameForRequestUID(string(request.UID)), UID: types.UID("approval-uid")},
 		Spec: accessv1alpha1.BreakGlassApprovalSpec{
 			RequestRef: accessv1alpha1.BreakGlassRequestReference{Name: request.Name, UID: string(request.UID)},
 			Decision:   accessv1alpha1.ApprovalDecisionApproved,
@@ -242,6 +242,7 @@ func TestRequestReconcileConsumesOneApprovedDecisionIntoOneReservedSession(t *te
 func testBreakGlassRequestForController(createdAt time.Time) *accessv1alpha1.BreakGlassRequest {
 	return &accessv1alpha1.BreakGlassRequest{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testControlNamespace,
 			Name:              "request-incident",
 			UID:               types.UID("request-uid"),
 			Generation:        3,

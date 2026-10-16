@@ -24,7 +24,7 @@ describe('createApi', () => {
   it('surfaces the server error message', async () => {
     mockFetch(403, { error: 'duration exceeds AccessProfile maximum' });
     const err = await createApi(vi.fn())
-      .createAccess({ accessProfile: 'p', duration: '9h', reason: 'INC-1' })
+      .createAccess({ namespace: 'n', accessProfile: 'p', duration: '9h', reason: 'INC-1' })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(403);
@@ -33,10 +33,10 @@ describe('createApi', () => {
 
   it('sends unsafe requests as same-origin JSON', async () => {
     const fetchFn = mockFetch(200, { status: 'revoked' });
-    await createApi(vi.fn()).revokeSession('bgs/../x');
+    await createApi(vi.fn()).revokeSession('team/../a', 'bgs/../x');
 
     const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('/api/v1/sessions/bgs%2F..%2Fx/revoke');
+    expect(url).toBe('/api/v1/namespaces/team%2F..%2Fa/sessions/bgs%2F..%2Fx/revoke');
     expect(init.method).toBe('POST');
     expect(init.credentials).toBe('same-origin');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');

@@ -85,6 +85,17 @@
         "maxLength": 63
       }
     },
+    "controlNamespaces": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        "maxLength": 63
+      }
+    },
     "curatedClusterRoles": {
       "type": "array",
       "minItems": 1,
@@ -552,6 +563,7 @@
     "image",
     "imagePullSecrets",
     "allowedTargetNamespaces",
+    "controlNamespaces",
     "curatedClusterRoles",
     "replicaCount",
     "availability",

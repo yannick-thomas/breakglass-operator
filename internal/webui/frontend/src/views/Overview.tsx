@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useAppData } from '../AppContext';
+import { objectKey } from '../api/objectKey';
 import type { AccessEntry, Decision } from '../api/types';
 import { BrandMark } from '../components/Brand';
 import { Button } from '../components/Button';
@@ -82,7 +83,7 @@ export function Overview() {
           </h2>
           <ul className={styles.list}>
             {active.slice(1).map((e) => (
-              <li key={e.name}>
+              <li key={objectKey(e)}>
                 <MiniRow entry={e} now={now} onOpen={() => setDetail(e)} />
               </li>
             ))}
@@ -103,7 +104,7 @@ export function Overview() {
           ) : (
             <ul className={styles.list}>
               {waiting.slice(0, 4).map((e) => (
-                <li key={e.name} className={styles.approval}>
+                <li key={objectKey(e)} className={styles.approval}>
                   <span className={styles.pulseDot} aria-hidden="true" />
                   <div className={styles.approvalMain}>
                     <p className={styles.approvalWho}>{e.requester}</p>
@@ -144,7 +145,7 @@ export function Overview() {
           ) : (
             <ul className={styles.list}>
               {otherOpen.map((e) => (
-                <li key={e.name}>
+                <li key={objectKey(e)}>
                   <MiniRow entry={e} now={now} onOpen={() => setDetail(e)} />
                 </li>
               ))}
@@ -158,7 +159,7 @@ export function Overview() {
 
       {detail && (
         <AccessDetails
-          entry={access.data?.find((e) => e.name === detail.name) ?? detail}
+          entry={access.data?.find((e) => objectKey(e) === objectKey(detail)) ?? detail}
           now={now}
           onClose={() => setDetail(undefined)}
           onRevoke={() => {

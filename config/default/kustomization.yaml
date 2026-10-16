@@ -25,8 +25,9 @@ resources:
 - ../certmanager
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
 #- ../prometheus
-# [METRICS] Expose the controller manager metrics service.
+# [METRICS] Expose the controller manager and admission metrics services.
 - metrics_service.yaml
+- admission_metrics_service.yaml
 # [NETWORK POLICY] Control ingress to metrics and webhook ports.
 # Allow metrics traffic from pods in namespaces labeled 'metrics: enabled'.
 # Allow webhook traffic from all sources.
@@ -34,7 +35,8 @@ resources:
 
 # Uncomment the patches line if you enable Metrics
 patches:
-# [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443.
+# [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443
+# on both the manager and the admission Deployment.
 # More info: https://book.kubebuilder.io/reference/metrics
 - path: manager_metrics_patch.yaml
   target:
@@ -49,12 +51,21 @@ patches:
 
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
-- path: manager_webhook_patch.yaml
+# Only the admission Deployment serves webhooks and mounts the serving
+# certificate (ADR-005); the manager has no webhook port.
+- path: admission_webhook_patch.yaml
   target:
     kind: Deployment
+    labelSelector: app.kubernetes.io/component=admission
+# Both Deployments get the manager's identity: the manager to stamp sourced
+# sessions, admission to accept only that identity for them.
 - path: manager_request_workflow_patch.yaml
   target:
     kind: Deployment
+# Scope the fail-closed control-namespace drain check to labelled namespaces.
+- path: control_namespace_webhook_patch.yaml
+  target:
+    kind: ValidatingWebhookConfiguration
 
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
 # Uncomment the following replacements to add the cert-manager CA injection annotations

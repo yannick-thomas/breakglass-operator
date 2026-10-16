@@ -24,6 +24,7 @@ import (
 
 const (
 	profileName = "production-pod-observer"
+	controlNS   = "breakglass-access"
 	roleName    = "breakglass-pod-observer"
 	requester   = "jane@example.com"
 	approver    = "max@example.com"
@@ -33,7 +34,7 @@ var now = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 
 func validProfile() Profile {
 	return Profile{
-		Name: profileName, UID: "profile-uid",
+		Name: profileName, Namespace: controlNS, UID: "profile-uid",
 		RoleRef:         RoleRef{Kind: ClusterRoleKind, Name: roleName},
 		TargetNamespace: "production", MaxDuration: "30m",
 	}
@@ -51,7 +52,7 @@ func activeSession() *Session {
 	grant := NewGrant(validProfile(), Role{Name: roleName, UID: "role-uid", RulesHash: "hash"})
 	expires := now.Add(10 * time.Minute)
 	return &Session{
-		Name: "incident", UID: "session-uid", Spec: directSpec(),
+		Name: "incident", Namespace: controlNS, UID: "session-uid", Spec: directSpec(),
 		Status: SessionStatus{Phase: PhaseActive, Grant: &grant, ExpiresAt: &expires},
 	}
 }
@@ -83,6 +84,7 @@ func TestProfileCheckReportsFirstDefectInOrder(t *testing.T) {
 		{"valid", func(*Profile) {}, ProfileValid},
 		{"role kind", func(p *Profile) { p.RoleRef.Kind = "Role"; p.TargetNamespace = "" }, ProfileRoleRefInvalid},
 		{"namespace", func(p *Profile) { p.TargetNamespace = ""; p.MaxDuration = "x" }, ProfileTargetNamespaceMissing},
+		{"own namespace", func(p *Profile) { p.TargetNamespace = controlNS; p.MaxDuration = "x" }, ProfileTargetIsControlNamespace},
 		{"duration", func(p *Profile) { p.MaxDuration = "0s" }, ProfileMaxDurationInvalid},
 		{"mode", func(p *Profile) { p.DeliveryMode = "Magic" }, ProfileDeliveryModeUnsupported},
 	} {
@@ -152,22 +154,24 @@ func TestCheckProfileForSession(t *testing.T) {
 	approvalSpec := directSpec()
 	approvalSpec.RequestRef = &ObjectRef{Name: "bgr", UID: "bgr-uid"}
 	for _, tc := range []struct {
-		name     string
-		spec     SessionSpec
-		profile  Profile
-		duration time.Duration
-		scope    NamespaceScope
-		wantErr  string
+		name      string
+		spec      SessionSpec
+		profile   Profile
+		duration  time.Duration
+		placement Placement
+		wantErr   string
 	}{
 		{name: "valid", spec: directSpec(), profile: validProfile(), duration: 20 * time.Minute},
 		{name: "recreated profile", spec: directSpec(), profile: Profile{Name: profileName, UID: "other"}, wantErr: "no longer matches"},
 		{name: "approval profile used directly", spec: directSpec(), profile: approvalProfile, wantErr: "requires the approval workflow"},
 		{name: "self-service profile via workflow", spec: approvalSpec, profile: validProfile(), wantErr: "does not authorize a controller-sourced"},
 		{name: "too long", spec: directSpec(), profile: validProfile(), duration: time.Hour, wantErr: "exceeds AccessProfile maximum"},
-		{name: "out of scope", spec: directSpec(), profile: validProfile(), scope: NamespaceScope{"staging": {}}, wantErr: "outside this manager's allowed namespace set"},
+		{name: "out of scope", spec: directSpec(), profile: validProfile(), placement: Placement{Target: NamespaceScope{"staging": {}}}, wantErr: "outside this manager's allowed namespace set"},
+		{name: "outside control namespaces", spec: directSpec(), profile: validProfile(), placement: Placement{Control: NamespaceScope{"team-b": {}}}, wantErr: "is not in a control namespace"},
+		{name: "targets a control namespace", spec: directSpec(), profile: validProfile(), placement: Placement{Control: NamespaceScope{controlNS: {}, "production": {}}}, wantErr: "targets control namespace"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertErr(t, CheckProfileForSession(tc.spec, tc.duration, tc.profile, tc.scope), tc.wantErr)
+			assertErr(t, CheckProfileForSession(tc.spec, tc.duration, tc.profile, tc.placement), tc.wantErr)
 		})
 	}
 }
@@ -189,10 +193,9 @@ func ownedBinding(s *Session, subjects ...BindingSubject) Binding {
 	ref := s.ExpectedBindingRef()
 	return Binding{
 		Kind: RoleBindingKind, Name: ref.Name, Namespace: ref.Namespace, UID: "binding-uid",
-		Labels:        s.ManagedLabels(),
-		SessionOwners: []SessionOwner{{Name: s.Name, UID: s.UID}},
-		RoleRef:       s.ExpectedRoleRef(),
-		Subjects:      subjects,
+		Labels:   s.ManagedLabels(),
+		RoleRef:  s.ExpectedRoleRef(),
+		Subjects: subjects,
 	}
 }
 
@@ -212,7 +215,8 @@ func TestBindingChecks(t *testing.T) {
 		code   string
 	}{
 		{"moved", func(b *Binding) { b.Namespace = "other" }, BindingIssueReference},
-		{"foreign owner", func(b *Binding) { b.SessionOwners = []SessionOwner{{Name: s.Name, UID: "other"}} }, BindingIssueOwnership},
+		{"foreign session UID", func(b *Binding) { b.Labels = withLabel(s.ManagedLabels(), SessionUIDLabelKey, "other") }, BindingIssueOwnership},
+		{"foreign session namespace", func(b *Binding) { b.Labels = withLabel(s.ManagedLabels(), SessionNamespaceLabelKey, "team-b") }, BindingIssueOwnership},
 		{"label removed", func(b *Binding) { b.Labels = map[string]string{} }, BindingIssueOwnership},
 		{"role swapped", func(b *Binding) { b.RoleRef.Name = "cluster-admin" }, BindingIssueRoleRef},
 		{"subject added", func(b *Binding) { b.Subjects = append(b.Subjects, BindingSubject{Kind: "Group", Name: "devs"}) }, BindingIssueSubjects},
@@ -248,7 +252,7 @@ func TestUnrecordedReservationRecovery(t *testing.T) {
 	}
 	reservation := Binding{
 		Kind: RoleBindingKind, Name: BindingName(s.Name, s.UID), Namespace: "production", UID: "b",
-		Labels: s.ManagedLabels(), SessionOwners: []SessionOwner{{Name: s.Name, UID: s.UID}},
+		Labels: s.ManagedLabels(),
 	}
 	if !s.IsUnrecordedReservation(reservation) {
 		t.Fatal("exact empty-subject reservation not recognized")
@@ -261,25 +265,26 @@ func TestUnrecordedReservationRecovery(t *testing.T) {
 
 func TestProfileIssueFailsClosedOnDrift(t *testing.T) {
 	s := activeSession()
-	if issue := s.ProfileIssue(validProfile(), nil); issue != nil {
+	if issue := s.ProfileIssue(validProfile(), Placement{}); issue != nil {
 		t.Fatalf("unchanged profile rejected: %#v", issue)
 	}
 	for _, tc := range []struct {
-		name   string
-		mutate func(*Profile)
-		scope  NamespaceScope
-		reason string
+		name      string
+		mutate    func(*Profile)
+		placement Placement
+		reason    string
 	}{
-		{"recreated", func(p *Profile) { p.UID = "new" }, nil, "AccessProfileUIDMismatch"},
-		{"invalid", func(p *Profile) { p.MaxDuration = "" }, nil, "AccessProfileInvalid"},
-		{"out of scope", func(*Profile) {}, NamespaceScope{"staging": {}}, "AccessProfileOutOfScope"},
-		{"role changed", func(p *Profile) { p.RoleRef.Name = "other" }, nil, "AccessProfilePolicyDrift"},
-		{"mode changed", func(p *Profile) { p.DeliveryMode = DeliveryApprovalRequired }, nil, "AccessProfileDeliveryModeDrift"},
+		{"recreated", func(p *Profile) { p.UID = "new" }, Placement{}, "AccessProfileUIDMismatch"},
+		{"invalid", func(p *Profile) { p.MaxDuration = "" }, Placement{}, "AccessProfileInvalid"},
+		{"out of scope", func(*Profile) {}, Placement{Target: NamespaceScope{"staging": {}}}, "AccessProfileOutOfScope"},
+		{"control namespace removed", func(*Profile) {}, Placement{Control: NamespaceScope{"team-b": {}}}, "AccessProfileOutOfScope"},
+		{"role changed", func(p *Profile) { p.RoleRef.Name = "other" }, Placement{}, "AccessProfilePolicyDrift"},
+		{"mode changed", func(p *Profile) { p.DeliveryMode = DeliveryApprovalRequired }, Placement{}, "AccessProfileDeliveryModeDrift"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := validProfile()
 			tc.mutate(&p)
-			if issue := s.ProfileIssue(p, tc.scope); issue == nil || issue.Reason != tc.reason {
+			if issue := s.ProfileIssue(p, tc.placement); issue == nil || issue.Reason != tc.reason {
 				t.Fatalf("issue = %#v, want %q", issue, tc.reason)
 			}
 		})
@@ -501,5 +506,83 @@ func TestParseNamespaceScope(t *testing.T) {
 		if _, err := ParseNamespaceScope(value); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("ParseNamespaceScope(%q) error = %v, want %q", value, err, want)
 		}
+	}
+}
+
+func withLabel(labels map[string]string, key, value string) map[string]string {
+	labels[key] = value
+	return labels
+}
+
+func TestPlacementValidateKeepsControlAndTargetApart(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		placement Placement
+		wantErr   string
+	}{
+		{name: "development default", placement: Placement{}},
+		{name: "control only", placement: Placement{Control: NamespaceScope{controlNS: {}}}},
+		{name: "disjoint", placement: Placement{Control: NamespaceScope{controlNS: {}}, Target: NamespaceScope{"production": {}}}},
+		{name: "target without control", placement: Placement{Target: NamespaceScope{"production": {}}}, wantErr: "require explicit control namespaces"},
+		{name: "overlap", placement: Placement{Control: NamespaceScope{"production": {}}, Target: NamespaceScope{"production": {}}}, wantErr: "both a control and a target namespace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertErr(t, tc.placement.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func TestPlacementAllowsControlNeverForAnEmptyNamespace(t *testing.T) {
+	if (Placement{}).AllowsControl("") {
+		t.Fatal("a cluster-scoped object must never count as being in a control namespace")
+	}
+	if !(Placement{}).AllowsControl(controlNS) {
+		t.Fatal("the development default allows every namespace")
+	}
+}
+
+func TestManagedSessionRequiresCompleteIdentity(t *testing.T) {
+	s := activeSession()
+	claimed, ok := ownedBinding(s).ManagedSession()
+	if !ok || claimed != (ManagedSessionRef{Namespace: controlNS, Name: s.Name, UID: s.UID}) {
+		t.Fatalf("ManagedSession() = %#v, %v", claimed, ok)
+	}
+	for _, key := range []string{ManagedByLabelKey, SessionLabelKey, SessionNamespaceLabelKey, SessionUIDLabelKey} {
+		labels := s.ManagedLabels()
+		delete(labels, key)
+		if _, ok := (Binding{Labels: labels}).ManagedSession(); ok {
+			t.Errorf("a binding without %s must not claim a session", key)
+		}
+	}
+}
+
+func TestApprovalIsErasableOnlyWithItsNamespace(t *testing.T) {
+	approval := Approval{RequestRef: ObjectRef{Name: "bgr", UID: "bgr-uid"}}
+	if approval.ErasableWith(false) {
+		t.Fatal("an approval must stay append-only while its namespace exists, even once its request is gone")
+	}
+	if !approval.ErasableWith(true) {
+		t.Fatal("an approval must not block the deletion of its control namespace")
+	}
+}
+
+func TestAdmitProfileAppliesSemanticAndPlacementRules(t *testing.T) {
+	placement := Placement{Control: NamespaceScope{controlNS: {}}, Target: NamespaceScope{"production": {}}}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Profile)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*Profile) {}},
+		{name: "outside control namespaces", mutate: func(p *Profile) { p.Namespace = "team-b" }, wantErr: "not in a control namespace"},
+		{name: "own namespace", mutate: func(p *Profile) { p.TargetNamespace = controlNS }, wantErr: "must not grant access in its own namespace"},
+		{name: "target not allowed", mutate: func(p *Profile) { p.TargetNamespace = "kube-system" }, wantErr: "outside this manager's allowed namespace set"},
+		{name: "invalid role", mutate: func(p *Profile) { p.RoleRef.Kind = "Role" }, wantErr: "curated ClusterRole"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := validProfile()
+			tc.mutate(&profile)
+			assertErr(t, placement.AdmitProfile(profile), tc.wantErr)
+		})
 	}
 }

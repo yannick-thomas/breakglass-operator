@@ -24,8 +24,9 @@ self-service profile. They never create the RBAC grant itself.
 | `BreakGlassSession` | Controller-created, concrete, temporary grant | Accept free role, namespace, or subject choices |
 | Audit, events, metrics | Evidence and operations | Become a second decision or grant channel |
 
-Profiles are cluster-scoped platform policy. Every current `v1alpha1` grant
-remains a namespaced `RoleBinding`; `ClusterRoleBinding` is outside this API.
+Profiles are platform policy in a control namespace (ADR-004). Every current
+`v1alpha1` grant remains a namespaced `RoleBinding` in the profile's target
+namespace; `ClusterRoleBinding` is outside this API.
 
 ## Required grant modes
 
@@ -120,9 +121,9 @@ the session's actual lifecycle for an “access active” indication.
 | Grant controller | Read request/approval, write request status, create sourced sessions, manage bindings only in allowed namespaces |
 | UI | No manager credential, no `bind`, no RoleBinding/Session writes; user-bound request/approval calls only |
 
-Cluster-scoped requests cannot be filtered by `spec.requester` using native
-Kubernetes RBAC. Therefore requesters must not receive broad `list`/`watch`
-access. “My requests” requires a separately reviewed, OIDC-bound read facade
+Requests cannot be filtered by `spec.requester` using native Kubernetes RBAC,
+not even inside their control namespace. Therefore requesters must not receive
+broad `list`/`watch` access. “My requests” requires a separately reviewed, OIDC-bound read facade
 or a redesigned visibility API; it is not a simple UI feature.
 
 ## Deliberate non-goals

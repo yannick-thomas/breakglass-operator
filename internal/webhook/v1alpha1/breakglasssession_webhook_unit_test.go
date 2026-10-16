@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 )
 
@@ -214,9 +215,9 @@ func TestValidatorRejectsProfileOutsideAllowedNamespaces(t *testing.T) {
 	profile := testAccessProfile()
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(profile).Build()
 	validator := &BreakGlassSessionValidator{
-		ProfileReader:           reader,
-		Reviewer:                fakeReviewer{allowed: true},
-		AllowedTargetNamespaces: map[string]struct{}{"staging": {}},
+		ProfileReader: reader,
+		Reviewer:      fakeReviewer{allowed: true},
+		Placement:     access.Placement{Target: access.NamespaceScope{"staging": {}}},
 	}
 
 	_, err := validator.ValidateCreate(requestContext("engineer@example.com"), testSessionRequest())
@@ -272,7 +273,7 @@ func TestValidatorAcceptsOnlyTheReservedControllerSourcedSession(t *testing.T) {
 
 	newSession := func() *accessv1alpha1.BreakGlassSession {
 		return &accessv1alpha1.BreakGlassSession{
-			ObjectMeta: metav1.ObjectMeta{Name: request.Status.SessionRef.Name},
+			ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: request.Status.SessionRef.Name},
 			Spec: accessv1alpha1.BreakGlassSessionSpec{
 				AccessProfile:    request.Spec.AccessProfile,
 				AccessProfileUID: request.Spec.AccessProfileUID,
@@ -452,7 +453,10 @@ func assertAdmissionDecisions(t *testing.T, recorder *recordingAdmissionRecorder
 	}
 }
 
-func (f fakeReviewer) CanUse(_ context.Context, _ authenticationv1.UserInfo, _ string) (bool, error) {
+func (f fakeReviewer) CanUse(_ context.Context, _ authenticationv1.UserInfo, namespace, _ string) (bool, error) {
+	if namespace != testControlNamespace {
+		return false, errors.New("reviewed unexpected namespace " + namespace)
+	}
 	return f.allowed, f.err
 }
 
@@ -462,7 +466,10 @@ type fakeRevocationReviewer struct {
 	wantUser string
 }
 
-func (f fakeRevocationReviewer) CanRevoke(_ context.Context, user authenticationv1.UserInfo, profile string) (bool, error) {
+func (f fakeRevocationReviewer) CanRevoke(_ context.Context, user authenticationv1.UserInfo, namespace, profile string) (bool, error) {
+	if namespace != testControlNamespace {
+		return false, errors.New("reviewed unexpected namespace " + namespace)
+	}
 	if f.wantUser != "" && user.Username != f.wantUser {
 		return false, errors.New("reviewed unexpected user " + user.Username)
 	}
@@ -478,9 +485,12 @@ func requestContext(username string) context.Context {
 	})
 }
 
+// testControlNamespace holds every access object in these tests (ADR-004).
+const testControlNamespace = "breakglass-access"
+
 func testAccessProfile() *accessv1alpha1.AccessProfile {
 	return &accessv1alpha1.AccessProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "production-pod-observer", UID: types.UID("profile-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: "production-pod-observer", UID: types.UID("profile-uid")},
 		Spec: accessv1alpha1.AccessProfileSpec{
 			RoleRef:         accessv1alpha1.RoleReference{Kind: "ClusterRole", Name: "breakglass-pod-observer"},
 			TargetNamespace: "production",
@@ -491,6 +501,7 @@ func testAccessProfile() *accessv1alpha1.AccessProfile {
 
 func testSessionRequest() *accessv1alpha1.BreakGlassSession {
 	return &accessv1alpha1.BreakGlassSession{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace},
 		Spec: accessv1alpha1.BreakGlassSessionSpec{
 			AccessProfile:    "production-pod-observer",
 			AccessProfileUID: "profile-uid",

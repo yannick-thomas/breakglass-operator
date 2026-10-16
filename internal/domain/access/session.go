@@ -123,9 +123,11 @@ type SessionStatus struct {
 	Conditions  []Condition
 }
 
-// Session is a time-bounded grant of one profile to one person.
+// Session is a time-bounded grant of one profile to one person. It lives in
+// the control namespace of its profile.
 type Session struct {
 	Name         string
+	Namespace    string
 	UID          string
 	Generation   int64
 	Deleting     bool
@@ -178,9 +180,9 @@ func ValidateSessionSpec(spec SessionSpec, maxDuration time.Duration) (time.Dura
 }
 
 // CheckProfileForSession decides whether a profile authorizes the session
-// with the requested duration within the manager's scope. It returns a denial
-// reason, never an infrastructure error.
-func CheckProfileForSession(spec SessionSpec, duration time.Duration, profile Profile, scope NamespaceScope) error {
+// with the requested duration within the manager's placement. It returns a
+// denial reason, never an infrastructure error.
+func CheckProfileForSession(spec SessionSpec, duration time.Duration, profile Profile, placement Placement) error {
 	if profile.UID == "" || profile.UID != spec.AccessProfileUID {
 		return fmt.Errorf("AccessProfile %q no longer matches the authorized profile UID", spec.AccessProfile)
 	}
@@ -197,10 +199,7 @@ func CheckProfileForSession(spec SessionSpec, duration time.Duration, profile Pr
 	if duration > maxDuration {
 		return fmt.Errorf("duration %s exceeds AccessProfile maximum of %s", duration, maxDuration)
 	}
-	if !scope.Allows(profile.TargetNamespace) {
-		return fmt.Errorf("AccessProfile %q targets namespace %q outside this manager's allowed namespace set", profile.Name, profile.TargetNamespace)
-	}
-	return nil
+	return placement.CheckProfile(profile)
 }
 
 // RequeueAfter bounds how long an active session stays unchecked: the next

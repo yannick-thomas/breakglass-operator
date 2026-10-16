@@ -75,8 +75,8 @@ release gates and the longer-term product direction are documented in the
 ### Helm installation
 
 The [Helm chart](charts/breakglass-operator/README.md) provides the same
-fail-closed grant path with namespace-restricted manager/guard RBAC and two
-manager replicas by default. Configure explicit target namespaces, curated role
+fail-closed grant path with namespace-restricted manager, admission and guard
+RBAC and two manager and two admission replicas by default. Configure explicit target namespaces, curated role
 names and a gated image digest; cert-manager and the application namespaces must
 already exist. Profiles and human group bindings remain separate GitOps policy.
 
@@ -92,16 +92,23 @@ updates, safe removal, OCI release packaging, and `make verify-helm` /
 
 ### Kustomize installation
 
-The default deployment includes the admission webhooks and cert-manager
-resources. Install cert-manager in the cluster first, then deploy the operator:
+The operator runs as two Deployments from one image (ADR-005): the manager
+(`breakglass-operator-controller-manager`, `/manager`) runs the reconcilers and
+holds the only identity that may bind curated roles; the admission server
+(`breakglass-operator-admission`, `/admission`) serves every webhook under its
+own ServiceAccount, which may only read access objects and Namespaces and
+create SubjectAccessReviews. The default deployment includes both, the
+admission webhooks and the cert-manager resources. Install cert-manager in the
+cluster first, then deploy the operator:
 
 ```bash
 make deploy IMG=<your-registry>/breakglass-operator:<tag>
 ```
 
 For a multi-node production cluster, use the production availability overlay
-instead. It retains the same secure default and adds two controller replicas,
-leader election, hostname spreading, and a PodDisruptionBudget:
+instead. It retains the same secure default and adds two manager replicas with
+leader election and two admission replicas, each with hostname spreading and
+its own PodDisruptionBudget:
 
 ```bash
 kubectl apply -k config/overlays/production
@@ -115,14 +122,19 @@ for a single-node environment.
 For a high-assurance installation with profiles that target only known
 namespaces, start from the single-namespace
 [namespaced production overlay](config/overlays/production-namespaced). It
-removes the manager's global RoleBinding CRUD and aligns its cache, admission,
-controller policy, and namespaced RBAC to the approved namespace set.
+removes the manager's global RoleBinding CRUD, limits admission's reads of
+access objects to the control namespace, and aligns both Deployments' flags,
+the manager's cache, and namespaced RBAC to the approved namespace set.
 
 Do not expose `BreakGlassSession` self-service access through a CRD-only or
 `make run` installation: the admission configuration is part of the security
-boundary. The manager always registers its webhooks; the default Kustomize
-configuration mounts a cert-manager-issued serving certificate and injects its
-CA into both webhook configurations.
+boundary. Only the admission Deployment registers webhooks; the default
+Kustomize configuration mounts a cert-manager-issued serving certificate into
+it and injects its CA into both webhook configurations. An admission outage
+fails closed (no new request, approval or session is admitted); a manager
+outage only delays provisioning and cleanup. `make run` starts only the
+manager; `make run-admission` starts the admission server, which needs a
+serving certificate.
 
 The generated manager role has `bind` only for the sample curated role
 `breakglass-pod-observer`. When introducing another profile role, extend the
@@ -134,7 +146,8 @@ Do not replace this with unrestricted `bind`.
 Every successful gated CI run on `main` publishes a GitHub Actions artifact named
 `breakglass-operator-install-<commit>`. It contains the fully rendered,
 single-file installers `install.yaml`, `install-production.yaml`, and
-`install-production-namespaced.yaml`. Their manager image is pinned by digest,
+`install-production-namespaced.yaml`. Their operator image (manager, admission
+and expiry guard) is pinned by digest,
 so the reviewed manifest and the executed image cannot drift apart. The image
 bundle supports both `linux/amd64` and `linux/arm64` clusters.
 
@@ -166,6 +179,15 @@ The installer intentionally does **not** include generic Kubebuilder
 requester permissions explicitly; a broad profile-editor role could otherwise
 delete and recreate a profile name with a different policy.
 
+### Upgrade from cluster-scoped access objects (ADR-004)
+
+The access CRDs changed from cluster-scoped to namespaced. Kubernetes rejects
+changing a CRD's scope in place, so an existing installation cannot be
+upgraded with `kubectl apply` or `helm upgrade`, not even after every session
+is drained. The upgrade deletes the CRDs and every access object and installs
+the new release from scratch; follow the
+[destructive upgrade procedure](docs/production-operations.md#upgrading-from-cluster-scoped-access-objects-adr-004-destructive).
+
 ### Upgrade from the original free-form API
 
 This `v1alpha1` revision is intentionally incompatible with the original
@@ -175,8 +197,9 @@ profile for an old active grant. Before upgrading a live cluster:
 1. Inventory active sessions and let them expire or revoke them explicitly.
 2. Back up the existing custom resources and record the installed controller
    image/configuration.
-3. Install the CRDs, cert-manager resources, webhook service, and webhook
-   configurations together; verify the webhooks are ready before granting
+3. Install the CRDs, cert-manager resources, admission Deployment, webhook
+   service, and webhook configurations together; verify the webhooks are
+   ready before granting
    anyone `create` on `breakglasssessions`.
 4. Apply curated roles, profiles, and profile-scoped `use` RBAC, then run a
    harmless namespaced request as a rollout check.
@@ -329,7 +352,8 @@ The requester supplies neither `requester`, `accessProfileUID` nor
 `requestTTL`; the approver supplies neither request UID nor `approver`. The
 webhooks derive those values from the authenticated Kubernetes identity and
 server state. Do not grant requesters broad `list` or `watch` access to the
-cluster-scoped request resource: it can reveal other incidents. See the
+request resource, even in its control namespace: it can reveal other
+incidents. See the
 [request workflow design](docs/breakglass-request-design.md) and
 [ADR-001](docs/adr-001-single-grant-path.md) for the full trust boundary.
 

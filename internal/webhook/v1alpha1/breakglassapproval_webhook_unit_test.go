@@ -24,8 +24,11 @@ import (
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
@@ -36,7 +39,7 @@ func TestApprovalDefaulterStampsTheOnlyDecisionSlotAndApprover(t *testing.T) {
 	request := testPendingApprovalRequest(now)
 	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(request).Build()
 	approval := &accessv1alpha1.BreakGlassApproval{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "attacker-"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, GenerateName: "attacker-"},
 		Spec: accessv1alpha1.BreakGlassApprovalSpec{
 			RequestRef: accessv1alpha1.BreakGlassRequestReference{Name: request.Name, UID: "forged"},
 			Decision:   accessv1alpha1.ApprovalDecisionApproved,
@@ -146,8 +149,10 @@ func TestApprovalValidatorRejectsExpiredOrNonDeterministicDecisionSlots(t *testi
 }
 
 func TestApprovalIsAppendOnly(t *testing.T) {
-	approval := testApprovalForRequest(testPendingApprovalRequest(time.Now()))
-	validator := &BreakGlassApprovalValidator{}
+	request := testPendingApprovalRequest(time.Now())
+	approval := testApprovalForRequest(request)
+	reader := fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).WithObjects(request).Build()
+	validator := &BreakGlassApprovalValidator{RequestReader: reader}
 	if _, err := validator.ValidateUpdate(context.Background(), approval, approval.DeepCopy()); err != nil {
 		t.Fatalf("ValidateUpdate() error = %v", err)
 	}
@@ -156,9 +161,39 @@ func TestApprovalIsAppendOnly(t *testing.T) {
 	if _, err := validator.ValidateUpdate(context.Background(), approval, updated); err == nil {
 		t.Fatal("ValidateUpdate() allowed decision mutation")
 	}
-	if _, err := validator.ValidateDelete(context.Background(), approval); err == nil {
-		t.Fatal("ValidateDelete() allowed deletion")
+	namespaceReader := func(objs ...client.Object) client.Reader {
+		return fake.NewClientBuilder().WithScheme(approvalNamespaceTestScheme(t)).WithObjects(objs...).Build()
 	}
+	active := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testControlNamespace}}
+	terminatingPhase := active.DeepCopy()
+	terminatingPhase.Status.Phase = corev1.NamespaceTerminating
+	deleting := active.DeepCopy()
+	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	deleting.Finalizers = []string{"kubernetes"}
+
+	validator.NamespaceReader = namespaceReader(active)
+	if _, err := validator.ValidateDelete(context.Background(), approval); err == nil {
+		t.Fatal("ValidateDelete() allowed deletion while the request exists")
+	}
+	validator.RequestReader = fake.NewClientBuilder().WithScheme(webhookTestScheme(t)).Build()
+	if _, err := validator.ValidateDelete(context.Background(), approval); err == nil {
+		t.Fatal("ValidateDelete() allowed erasing the approval after its request was deleted")
+	}
+	validator.NamespaceReader = namespaceReader()
+	if _, err := validator.ValidateDelete(context.Background(), approval); err == nil {
+		t.Fatal("ValidateDelete() allowed deletion although the namespace could not be read")
+	}
+	validator.NamespaceReader = nil
+	if _, err := validator.ValidateDelete(context.Background(), approval); err == nil {
+		t.Fatal("ValidateDelete() allowed deletion without a namespace reader")
+	}
+	for name, namespace := range map[string]*corev1.Namespace{"deletionTimestamp": deleting, "Terminating phase": terminatingPhase} {
+		validator.NamespaceReader = namespaceReader(namespace)
+		if _, err := validator.ValidateDelete(context.Background(), approval); err != nil {
+			t.Fatalf("ValidateDelete() error = %v, want deletion with a namespace marked by %s", err, name)
+		}
+	}
+
 }
 
 type fakeApprovalReviewer struct {
@@ -166,13 +201,17 @@ type fakeApprovalReviewer struct {
 	err     error
 }
 
-func (f fakeApprovalReviewer) CanApprove(_ context.Context, _ authenticationv1.UserInfo, _ string) (bool, error) {
+func (f fakeApprovalReviewer) CanApprove(_ context.Context, _ authenticationv1.UserInfo, namespace, _ string) (bool, error) {
+	if namespace != testControlNamespace {
+		return false, errors.New("reviewed unexpected namespace " + namespace)
+	}
 	return f.allowed, f.err
 }
 
 func testPendingApprovalRequest(now time.Time) *accessv1alpha1.BreakGlassRequest {
 	return &accessv1alpha1.BreakGlassRequest{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testControlNamespace,
 			Name:              "request-incident",
 			UID:               types.UID("request-uid"),
 			CreationTimestamp: metav1.NewTime(now),
@@ -191,11 +230,20 @@ func testPendingApprovalRequest(now time.Time) *accessv1alpha1.BreakGlassRequest
 
 func testApprovalForRequest(request *accessv1alpha1.BreakGlassRequest) *accessv1alpha1.BreakGlassApproval {
 	return &accessv1alpha1.BreakGlassApproval{
-		ObjectMeta: metav1.ObjectMeta{Name: accessv1alpha1.ApprovalNameForRequestUID(string(request.UID))},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace, Name: accessv1alpha1.ApprovalNameForRequestUID(string(request.UID))},
 		Spec: accessv1alpha1.BreakGlassApprovalSpec{
 			RequestRef: accessv1alpha1.BreakGlassRequestReference{Name: request.Name, UID: string(request.UID)},
 			Decision:   accessv1alpha1.ApprovalDecisionApproved,
 			Approver:   accessv1alpha1.SubjectReference{Kind: accessv1alpha1.SubjectKindUser, Name: "approver@example.com"},
 		},
 	}
+}
+
+func approvalNamespaceTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := webhookTestScheme(t)
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
+	return scheme
 }

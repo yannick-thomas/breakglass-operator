@@ -43,11 +43,21 @@ const serviceAccountName = "breakglass-operator-controller-manager"
 // metricsServiceName is the name of the metrics service of the project
 const metricsServiceName = "breakglass-operator-controller-manager-metrics-service"
 
+// admissionPodSelector selects the admission pods, which serve every webhook
+// (ADR-005).
+const admissionPodSelector = "app.kubernetes.io/component=admission"
+
+// admissionMetricsServiceName exposes the admission metrics.
+const admissionMetricsServiceName = "breakglass-operator-admission-metrics-service"
+
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "breakglass-operator-metrics-binding"
 
 const (
-	targetNamespace           = "production"
+	targetNamespace = "production"
+	// controlNamespace holds every access object; authorization is granted by
+	// RoleBindings there, never cluster-wide (ADR-004).
+	controlNamespace          = "breakglass-access"
 	e2eDeniedCreatorRole      = "breakglass-e2e-denied-creator"
 	e2eDeniedCreatorBinding   = "breakglass-e2e-denied-creator-binding"
 	e2eDeniedCreatorUser      = "e2e-denied-creator"
@@ -91,23 +101,32 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
-		By("creating the target namespace and curated profile")
+		By("creating the target and control namespaces and the curated profile")
 		cmd = exec.Command("kubectl", "create", "namespace", targetNamespace)
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create target namespace")
+		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace "+targetNamespace)
+		// The sample control namespace carries the opt-in label of the drain
+		// check, as the default profile selects control namespaces by label.
+		cmd = exec.Command("kubectl", "apply", "-f", "config/samples/namespace_breakglass_access.yaml")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace "+controlNamespace)
+		// Profiles pass admission (ADR-004), which fails closed: retry until
+		// the webhook Service routes to the just-started admission pods.
 		for _, path := range []string{
 			"config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
 			"config/samples/access_v1alpha1_accessprofile.yaml",
 		} {
-			cmd = exec.Command("kubectl", "apply", "-f", path)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to apply curated access policy")
+			Eventually(func() error {
+				_, applyErr := utils.Run(exec.Command("kubectl", "apply", "-f", path))
+				return applyErr
+			}, 2*time.Minute, 2*time.Second).Should(Succeed(), "Failed to apply curated access policy")
 		}
 		_, err = applyManifest(`
 apiVersion: access.breakglass.io/v1alpha1
 kind: AccessProfile
 metadata:
   name: production-pod-observer-approval
+  namespace: breakglass-access
 spec:
   roleRef:
     kind: ClusterRole
@@ -137,9 +156,10 @@ rules:
     verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: breakglass-e2e-requester-binding
+  namespace: breakglass-access
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -163,9 +183,10 @@ rules:
     verbs: ["approve"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: breakglass-e2e-approver-binding
+  namespace: breakglass-access
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -185,9 +206,10 @@ rules:
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: breakglass-e2e-denied-creator-binding
+  namespace: breakglass-access
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -204,27 +226,28 @@ subjects:
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up breakglass e2e policy")
-		cmd := exec.Command("kubectl", "delete", "breakglasssession", e2eSessionName, "--ignore-not-found")
+		// Every session must be gone before the labelled control namespace
+		// can be deleted (drain check, ADR-004).
+		cmd := exec.Command("kubectl", "delete", "breakglasssessions", "--all", "-n", controlNamespace,
+			"--ignore-not-found", "--timeout=2m")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName, "-n", controlNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eRequesterRoleBinding, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eApproverRoleBinding, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", e2eDeniedCreatorBinding, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "rolebinding", "-n", controlNamespace,
+			e2eRequesterRoleBinding, e2eApproverRoleBinding, e2eDeniedCreatorBinding, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "clusterrole", e2eRequesterRole, e2eApproverRole, e2eDeniedCreatorRole, "breakglass-pod-observer", "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "accessprofile", productionObserverProfile, e2eApprovalProfile, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "accessprofile", productionObserverProfile, e2eApprovalProfile, "-n", controlNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "delete", "namespace", targetNamespace, "--ignore-not-found")
+		cmd = exec.Command("kubectl", "delete", "namespace", targetNamespace, controlNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		By("cleaning up the curl pod for metrics")
-		cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
+		By("cleaning up the curl pods for metrics")
+		cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "curl-admission-metrics",
+			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -254,6 +277,16 @@ subjects:
 				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
 			}
 
+			By("Fetching admission pod logs")
+			cmd = exec.Command("kubectl", "logs", "-l", admissionPodSelector, "-n", namespace,
+				"--all-containers", "--prefix", "--tail=-1")
+			admissionLogs, err := utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Admission logs:\n %s", admissionLogs)
+			} else {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get admission logs: %s", err)
+			}
+
 			By("Fetching Kubernetes events")
 			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
 			eventsOutput, err := utils.Run(cmd)
@@ -279,6 +312,15 @@ subjects:
 				fmt.Println("Pod description:\n", podDescription)
 			} else {
 				fmt.Println("Failed to describe controller pod")
+			}
+
+			By("Fetching admission pod descriptions")
+			cmd = exec.Command("kubectl", "describe", "pod", "-l", admissionPodSelector, "-n", namespace)
+			admissionDescription, err := utils.Run(cmd)
+			if err == nil {
+				fmt.Println("Admission pod description:\n", admissionDescription)
+			} else {
+				fmt.Println("Failed to describe admission pods")
 			}
 		}
 	})
@@ -317,6 +359,25 @@ subjects:
 				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
 			}
 			Eventually(verifyControllerUp).Should(Succeed())
+
+			By("validating that the admission pod is ready and separate from the manager")
+			verifyAdmissionUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", admissionPodSelector, "-n", namespace,
+					"-o", "go-template={{ range .items }}{{ if not .metadata.deletionTimestamp }}"+
+						"{{ .metadata.name }},{{ .spec.serviceAccountName }},"+
+						"{{ range .status.conditions }}{{ if eq .type \"Ready\" }}{{ .status }}{{ end }}{{ end }}"+
+						"{{ \"\\n\" }}{{ end }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve admission pod information")
+				pods := utils.GetNonEmptyLines(output)
+				g.Expect(pods).To(HaveLen(1), "expected 1 admission pod running")
+				fields := strings.Split(pods[0], ",")
+				g.Expect(fields).To(HaveLen(3))
+				g.Expect(fields[0]).To(ContainSubstring("breakglass-operator-admission"))
+				g.Expect(fields[1]).To(Equal("breakglass-operator-admission"), "admission must use its own identity")
+				g.Expect(fields[2]).To(Equal("True"), "admission pod not ready")
+			}
+			Eventually(verifyAdmissionUp, 3*time.Minute, time.Second).Should(Succeed())
 		})
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
@@ -366,6 +427,18 @@ subjects:
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Webhook endpoints should exist")
 				g.Expect(output).ShouldNot(BeEmpty(), "Webhook endpoints not yet ready")
+
+				cmd = exec.Command("kubectl", "get", "endpointslices.discovery.k8s.io", "-n", namespace,
+					"-l", "kubernetes.io/service-name=breakglass-operator-webhook-service",
+					"-o", "jsonpath={range .items[*]}{range .endpoints[*]}{.targetRef.name}{\"\\n\"}{end}{end}")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				targets := utils.GetNonEmptyLines(output)
+				g.Expect(targets).NotTo(BeEmpty())
+				for _, target := range targets {
+					g.Expect(target).To(HavePrefix("breakglass-operator-admission-"),
+						"webhook Service must route only to admission pods")
+				}
 			}
 			Eventually(verifyWebhookEndpointsReady, 3*time.Minute, time.Second).Should(Succeed())
 
@@ -397,35 +470,7 @@ subjects:
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
-			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
-				"--namespace", namespace,
-				"--image=curlimages/curl:latest",
-				"--overrides",
-				fmt.Sprintf(`{
-					"spec": {
-						"containers": [{
-							"name": "curl",
-							"image": "curlimages/curl:latest",
-							"command": ["/bin/sh", "-c"],
-							"args": [
-								"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
-							],
-							"securityContext": {
-								"readOnlyRootFilesystem": true,
-								"allowPrivilegeEscalation": false,
-								"capabilities": {
-									"drop": ["ALL"]
-								},
-								"runAsNonRoot": true,
-								"runAsUser": 1000,
-								"seccompProfile": {
-									"type": "RuntimeDefault"
-								}
-							}
-						}],
-						"serviceAccountName": "%s"
-					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
+			cmd = curlMetricsPod("curl-metrics", metricsServiceName, token)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
 
@@ -495,13 +540,14 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
   name: e2e-profile-use-denied
+  namespace: breakglass-access
 spec:
   accessProfile: production-pod-observer
   duration: "10s"
   reason: "E2E verification that create alone cannot grant a profile"
 `)
 			Expect(err).To(HaveOccurred(), "Admission must reject a request without profile use permission")
-			cmd := exec.Command("kubectl", "get", "breakglasssession", "e2e-profile-use-denied")
+			cmd := exec.Command("kubectl", "get", "breakglasssession", "e2e-profile-use-denied", "-n", controlNamespace)
 			_, err = utils.Run(cmd)
 			Expect(err).To(HaveOccurred(), "Denied request must not persist a BreakGlassSession")
 
@@ -511,6 +557,7 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
   name: e2e-short-lived-session
+  namespace: breakglass-access
 spec:
   accessProfile: production-pod-observer
   duration: "10s"
@@ -520,7 +567,7 @@ spec:
 
 			var bindingName string
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "--as="+e2eRequesterUser, "get", "breakglasssession", e2eSessionName,
+				cmd := exec.Command("kubectl", "--as="+e2eRequesterUser, "get", "breakglasssession", e2eSessionName, "-n", controlNamespace,
 					"-o", "jsonpath={.status.phase},{.spec.subject.kind},{.spec.subject.name},{.status.bindingRef.name}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -540,7 +587,7 @@ spec:
 
 			By("waiting for TTL cleanup to revoke the binding")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "breakglasssession", e2eSessionName, "-o", "jsonpath={.status.phase}")
+				cmd := exec.Command("kubectl", "get", "breakglasssession", e2eSessionName, "-n", controlNamespace, "-o", "jsonpath={.status.phase}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("Expired"))
@@ -557,6 +604,7 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
   name: e2e-approval-bypass-attempt
+  namespace: breakglass-access
 spec:
   accessProfile: production-pod-observer-approval
   duration: "30s"
@@ -570,6 +618,7 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassRequest
 metadata:
   name: e2e-approved-request
+  namespace: breakglass-access
 spec:
   accessProfile: production-pod-observer-approval
   duration: "30s"
@@ -579,7 +628,7 @@ spec:
 
 			By("waiting for the request controller to persist Pending state")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "--as="+e2eRequesterUser, "get", "breakglassrequest", e2eApprovalRequestName,
+				cmd := exec.Command("kubectl", "--as="+e2eRequesterUser, "get", "breakglassrequest", e2eApprovalRequestName, "-n", controlNamespace,
 					"-o", "jsonpath={.status.phase},{.spec.requester.kind},{.spec.requester.name}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -592,6 +641,7 @@ apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassApproval
 metadata:
   generateName: e2e-approval-
+  namespace: breakglass-access
 spec:
   requestRef:
     name: e2e-approved-request
@@ -603,7 +653,7 @@ spec:
 			var sessionName, bindingName string
 			By("waiting for exactly one controller-sourced session to become active")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "breakglassrequest", e2eApprovalRequestName,
+				cmd := exec.Command("kubectl", "get", "breakglassrequest", e2eApprovalRequestName, "-n", controlNamespace,
 					"-o", "jsonpath={.status.phase},{.status.sessionRef.name},{.status.sessionRef.uid}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -614,7 +664,7 @@ spec:
 				g.Expect(parts[2]).NotTo(BeEmpty())
 				sessionName = parts[1]
 
-				cmd = exec.Command("kubectl", "get", "breakglasssession", sessionName,
+				cmd = exec.Command("kubectl", "get", "breakglasssession", sessionName, "-n", controlNamespace,
 					"-o", "jsonpath={.status.phase},{.spec.subject.kind},{.spec.subject.name},{.status.bindingRef.name}")
 				output, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -633,11 +683,11 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			By("deleting the source request and requiring fail-closed suspension")
-			cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName)
+			cmd = exec.Command("kubectl", "delete", "breakglassrequest", e2eApprovalRequestName, "-n", controlNamespace)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "breakglasssession", sessionName,
+				cmd := exec.Command("kubectl", "get", "breakglasssession", sessionName, "-n", controlNamespace,
 					"-o", "jsonpath={.status.phase},{.status.conditions[?(@.type=='RequestSourceValid')].reason}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -646,6 +696,58 @@ spec:
 				_, err = utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}).Should(Succeed())
+		})
+
+		It("should export admission decisions from the admission pods", func() {
+			By("scraping the admission metrics endpoint")
+			token, err := serviceAccountToken()
+			Expect(err).NotTo(HaveOccurred())
+			cmd := curlMetricsPod("curl-admission-metrics", admissionMetricsServiceName, token)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-admission-metrics pod")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "curl-admission-metrics",
+					"-o", "jsonpath={.status.phase}", "-n", namespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
+			}, 5*time.Minute).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "logs", "curl-admission-metrics", "-n", namespace)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("< HTTP/1.1 200 OK"))
+			Expect(output).To(ContainSubstring("breakglass_admission_requests_total"),
+				"admission decisions must be exported by the admission pods")
+		})
+
+		It("enforces placement for profiles and draining for control namespaces", func() {
+			By("rejecting a profile that would grant in its own namespace")
+			_, err := applyManifest(`
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  name: e2e-profile-in-target
+  namespace: production
+spec:
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m
+`)
+			Expect(err).To(HaveOccurred(), "admission must reject a profile outside its placement")
+			Expect(err.Error()).To(ContainSubstring("must not grant access in its own namespace"))
+
+			By("denying deletion of the labelled control namespace while it holds a session")
+			cmd := exec.Command("kubectl", "get", "breakglasssessions", "-n", controlNamespace, "-o", "name")
+			sessions, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(sessions)).NotTo(BeEmpty(), "the approval scenario must leave a session behind")
+			cmd = exec.Command("kubectl", "delete", "namespace", controlNamespace, "--wait=false")
+			output, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "the drain check must deny deleting a control namespace with sessions")
+			Expect(output + err.Error()).To(ContainSubstring("still holds"))
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
@@ -734,4 +836,38 @@ type tokenRequest struct {
 	Status struct {
 		Token string `json:"token"`
 	} `json:"status"`
+}
+
+// curlMetricsPod returns the command that starts a restricted curl pod which
+// scrapes the authenticated HTTPS metrics endpoint behind service.
+func curlMetricsPod(name, service, token string) *exec.Cmd {
+	return exec.Command("kubectl", "run", name, "--restart=Never",
+		"--namespace", namespace,
+		"--image=curlimages/curl:latest",
+		"--overrides",
+		fmt.Sprintf(`{
+			"spec": {
+				"containers": [{
+					"name": "curl",
+					"image": "curlimages/curl:latest",
+					"command": ["/bin/sh", "-c"],
+					"args": [
+						"for i in $(seq 1 30); do curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics && exit 0 || sleep 2; done; exit 1"
+					],
+					"securityContext": {
+						"readOnlyRootFilesystem": true,
+						"allowPrivilegeEscalation": false,
+						"capabilities": {
+							"drop": ["ALL"]
+						},
+						"runAsNonRoot": true,
+						"runAsUser": 1000,
+						"seccompProfile": {
+							"type": "RuntimeDefault"
+						}
+					}
+				}],
+				"serviceAccountName": "%s"
+			}
+		}`, token, service, namespace, serviceAccountName))
 }

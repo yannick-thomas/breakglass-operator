@@ -39,7 +39,7 @@ describe('MyAccess', () => {
 
     await user.click(within(dialog).getByRole('button', { name: 'Zugriff beenden' }));
 
-    expect(api.revokeSession).toHaveBeenCalledWith('breakglass-request-1a2b');
+    expect(api.revokeSession).toHaveBeenCalledWith('breakglass-access', 'breakglass-request-1a2b');
     expect(access.reload).toHaveBeenCalled();
   });
 

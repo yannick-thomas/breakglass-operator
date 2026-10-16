@@ -10,10 +10,17 @@ imagePullSecrets: []
 # Application namespaces must already exist. Never grants global RoleBinding CRUD.
 allowedTargetNamespaces:
   - production
+# Namespaces that hold AccessProfiles, requests, approvals, and sessions
+# (ADR-004). They must already exist and must not be target namespaces.
+# Bind requester, approver, and auditor roles here, not cluster-wide.
+controlNamespaces:
+  - breakglass-access
 # Curated roles and AccessProfiles are managed separately through GitOps.
 curatedClusterRoles:
   - breakglass-pod-observer
 
+# Replicas, availability, resources and scheduling apply to the manager and the
+# separate admission Deployment alike (ADR-005); each gets its own PDB.
 # Two schedulable hosts are required with the default topology policy.
 replicaCount: 2
 availability:

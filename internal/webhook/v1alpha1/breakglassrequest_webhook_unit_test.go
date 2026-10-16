@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	accessv1alpha1 "github.com/yannick-thomas/breakglass-operator/api/v1alpha1"
+	"github.com/yannick-thomas/breakglass-operator/internal/domain/access"
 	breakglassmetrics "github.com/yannick-thomas/breakglass-operator/internal/metrics"
 )
 
@@ -59,7 +61,7 @@ func TestRequestValidatorEnforcesTheSessionProfileBoundary(t *testing.T) {
 		name     string
 		mutate   func(*accessv1alpha1.BreakGlassRequest)
 		reviewer fakeReviewer
-		allowed  map[string]struct{}
+		allowed  access.NamespaceScope
 		wantErr  string
 	}{
 		{
@@ -107,10 +109,10 @@ func TestRequestValidatorEnforcesTheSessionProfileBoundary(t *testing.T) {
 				test.mutate(request)
 			}
 			validator := &BreakGlassRequestValidator{
-				ProfileReader:           reader,
-				Reviewer:                test.reviewer,
-				AllowedTargetNamespaces: test.allowed,
-				RequestTTL:              15 * time.Minute,
+				ProfileReader: reader,
+				Reviewer:      test.reviewer,
+				Placement:     access.Placement{Target: test.allowed},
+				RequestTTL:    15 * time.Minute,
 			}
 			_, err := validator.ValidateCreate(requestContext("engineer@example.com"), request)
 			if test.wantErr == "" && err != nil {
@@ -190,6 +192,7 @@ func TestRequestDefaulterFailsClosedForAWorkloadIdentity(t *testing.T) {
 
 func testBreakGlassRequest() *accessv1alpha1.BreakGlassRequest {
 	return &accessv1alpha1.BreakGlassRequest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testControlNamespace},
 		Spec: accessv1alpha1.BreakGlassRequestSpec{
 			AccessProfile:    "production-pod-observer",
 			AccessProfileUID: "profile-uid",

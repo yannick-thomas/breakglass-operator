@@ -13,6 +13,21 @@ spec:
   ports:
     - {name: https, port: 8443, targetPort: https, protocol: TCP}
 ---
+# Admission records breakglass_admission_requests_total (ADR-005).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-admission-metrics-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  selector:
+    {{- include "breakglass.admissionSelector" . | nindent 4 }}
+  ports:
+    - {name: https, port: 8443, targetPort: https, protocol: TCP}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -23,31 +38,37 @@ rules:
   - nonResourceURLs: [/metrics]
     verbs: [get]
 {{- if .Values.metrics.serviceMonitor.enabled }}
+{{- /* monitor name, Service name, Service selector */ -}}
+{{- $monitors := list
+  (list "metrics" "controller-manager-metrics-service" (include "breakglass.managerSelector" .))
+  (list "admission-metrics" "admission-metrics-service" (include "breakglass.admissionSelector" .)) }}
+{{- range $monitor := $monitors }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ $name }}-metrics
-  namespace: {{ .Release.Namespace }}
+  name: {{ $name }}-{{ index $monitor 0 }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- mustMergeOverwrite (dict) .Values.metrics.serviceMonitor.labels (include "breakglass.labels" . | fromYaml) | toYaml | nindent 4 }}
+    {{- mustMergeOverwrite (dict) $.Values.metrics.serviceMonitor.labels (include "breakglass.labels" $ | fromYaml) | toYaml | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "breakglass.managerSelector" . | nindent 6 }}
+      {{- index $monitor 2 | nindent 6 }}
   endpoints:
     - port: https
       path: /metrics
       scheme: https
-      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      interval: {{ $.Values.metrics.serviceMonitor.interval }}
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
         insecureSkipVerify: false
-        serverName: {{ $name }}-controller-manager-metrics-service.{{ .Release.Namespace }}.svc
+        serverName: {{ $name }}-{{ index $monitor 1 }}.{{ $.Release.Namespace }}.svc
         ca:
           secret:
-            name: {{ required "metrics.serviceMonitor.caSecretName is required for CA validation" .Values.metrics.serviceMonitor.caSecretName }}
-            key: {{ .Values.metrics.serviceMonitor.caSecretKey }}
+            name: {{ required "metrics.serviceMonitor.caSecretName is required for CA validation" $.Values.metrics.serviceMonitor.caSecretName }}
+            key: {{ $.Values.metrics.serviceMonitor.caSecretKey }}
+{{- end }}
 {{- end }}
 {{- if .Values.metrics.prometheusRule.enabled }}
 ---
