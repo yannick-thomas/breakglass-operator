@@ -16,14 +16,20 @@ limitations under the License.
 
 // Package expiryguard adapts the expiry sweep use case to the Kubernetes API.
 // The expiry-guard command runs it as a CronJob with its own ServiceAccount.
+//
+// Sessions and bindings are listed one namespace at a time. Besides session
+// reads and RoleBinding get/list/delete, the guard needs get on its target and
+// control Namespaces from a ClusterRole: that permission survives the deletion
+// of any of them and lets the sweep tell a deleted namespace (Namespace
+// NotFound) from one it may merely not read.
 package expiryguard
 
 import (
 	"context"
-	"maps"
-	"slices"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,43 +40,31 @@ import (
 )
 
 // New wires a sweeper to a Kubernetes client. The client must read directly
-// from the API server: the guard must not act on a stale cache. Sessions are
-// listed in the control namespaces, or cluster-wide when none are named, so
-// the sweeper's Control always matches what it can see.
+// from the API server: the guard must not act on a stale cache, and a
+// namespace's absence must be observed, not remembered. The sweeper lists
+// sessions in the control namespaces, or cluster-wide when none are named.
 func New(c client.Client, control access.NamespaceScope) *expirysweep.Sweeper {
 	return &expirysweep.Sweeper{
-		Sessions: sessionSource{Reader: c, Namespaces: slices.Sorted(maps.Keys(control))},
-		Control:  control,
-		Bindings: bindingGateway{Client: c},
-		Grace:    expirysweep.DefaultGrace,
+		Sessions:   sessionSource{Reader: c},
+		Control:    control,
+		Bindings:   bindingGateway{Client: c},
+		Namespaces: namespaceObserver{Reader: c},
+		Grace:      expirysweep.DefaultGrace,
 	}
 }
 
 type sessionSource struct {
 	Reader client.Reader
-	// Namespaces lists the control namespaces; empty lists all namespaces.
-	Namespaces []string
 }
 
-func (s sessionSource) List(ctx context.Context) ([]access.Session, error) {
-	if len(s.Namespaces) == 0 {
-		return s.list(ctx)
-	}
-	var sessions []access.Session
-	for _, namespace := range s.Namespaces {
-		found, err := s.list(ctx, client.InNamespace(namespace))
-		if err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, found...)
-	}
-	return sessions, nil
-}
-
-func (s sessionSource) list(ctx context.Context, options ...client.ListOption) ([]access.Session, error) {
+func (s sessionSource) List(ctx context.Context, namespace string) ([]access.Session, error) {
 	var list accessv1alpha1.BreakGlassSessionList
+	var options []client.ListOption
+	if namespace != "" {
+		options = append(options, client.InNamespace(namespace))
+	}
 	if err := s.Reader.List(ctx, &list, options...); err != nil {
-		return nil, err
+		return nil, apiconv.Classify(err)
 	}
 	sessions := make([]access.Session, len(list.Items))
 	for i := range list.Items {
@@ -115,4 +109,16 @@ func (g bindingGateway) Delete(ctx context.Context, binding access.Binding) erro
 	obj := &rbacv1.RoleBinding{}
 	obj.Namespace, obj.Name = binding.Namespace, binding.Name
 	return apiconv.Classify(g.Client.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &version}))
+}
+
+type namespaceObserver struct {
+	Reader client.Reader
+}
+
+// NamespaceAbsent needs only get on the named namespace. Only a direct
+// NotFound counts: Forbidden or any other error is not evidence of absence,
+// and a terminating namespace still exists.
+func (o namespaceObserver) NamespaceAbsent(ctx context.Context, namespace string) bool {
+	err := o.Reader.Get(ctx, client.ObjectKey{Name: namespace}, &corev1.Namespace{})
+	return apierrors.IsNotFound(err)
 }

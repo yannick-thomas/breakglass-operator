@@ -167,6 +167,18 @@ workflow deliberately fails instead of falling back to mutable image tags.
 The UI uses one replica and `Recreate` because sessions live in memory. Upgrades
 may require users to log in again; UI removal does not revoke existing grants.
 
+### Retiring a control namespace
+
+The chart installs a validating webhook on Namespace `DELETE`
+(`vcontrolnamespace-v1.kb.io`) whose `namespaceSelector` matches exactly
+`controlNamespaces`. It denies deleting a control namespace while it still holds
+a BreakGlassSession, because the manager's rights on those sessions are the
+Roles in that namespace (ADR-004). It fails closed: during a total manager outage
+the deletion is denied; no other namespace is affected. To retire one, revoke or
+delete its sessions, wait until they are gone, delete the namespace, and only
+then remove it from `controlNamespaces`. See
+[Production operations](../../docs/production-operations.md#retiring-a-control-namespace).
+
 ## CRDs, upgrades and removal
 
 The four files in `crds/` are byte-identical copies of `config/crd/bases/`.

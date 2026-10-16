@@ -27,6 +27,7 @@ const (
 	expiryGuardRoleName       = "breakglass-operator-expiry-guard-role"
 	expiryGuardNamespacedRole = "breakglass-operator-expiry-guard-rolebindings"
 	expiryGuardSessionsRole   = "breakglass-operator-expiry-guard-sessions"
+	expiryGuardNamespacesRole = "breakglass-operator-expiry-guard-namespaces"
 
 	verbGet    = "get"
 	verbList   = "list"
@@ -35,8 +36,10 @@ const (
 
 // verifyExpiryGuard checks that the independent expiry guard (SR-06) is
 // installed with its own identity, restricted pod security, and nothing but
-// read access to sessions plus get/list/delete on RoleBindings. Listing finds
-// bindings whose session no longer exists (ADR-004).
+// read access to sessions, get/list/delete on RoleBindings, and get on
+// Namespaces. Listing finds bindings whose session no longer exists; the
+// Namespace get, through a ClusterRole that outlives the namespaces, confirms
+// that a deleted namespace is absent (ADR-004).
 func verifyExpiryGuard(objects []unstructured.Unstructured, namespaced bool) error {
 	cronJob, err := requiredObjectInNamespace(objects, "CronJob", expiryGuardName, managerNamespace)
 	if err != nil {
@@ -51,6 +54,10 @@ func verifyExpiryGuard(objects []unstructured.Unstructured, namespaced bool) err
 	}
 	if err := verifyRestrictedPod(podSpec, "expiry-guard"); err != nil {
 		return fmt.Errorf("expiry guard: %w", err)
+	}
+
+	if err := verifyExpiryGuardNamespaces(objects, namespaced); err != nil {
+		return err
 	}
 
 	sessionReads := guardRule{"access.breakglass.io", "breakglasssessions", []string{verbGet, verbList}}
@@ -145,4 +152,40 @@ func verifyRestrictedPod(podSpec map[string]any, containerName string) error {
 		return nil
 	}
 	return fmt.Errorf("container %q is missing", containerName)
+}
+
+// verifyExpiryGuardNamespaces requires the guard's Namespace get: cluster-wide
+// in the all-namespaces profiles, and exactly the target and control
+// namespaces in the namespaced profile.
+func verifyExpiryGuardNamespaces(objects []unstructured.Unstructured, namespaced bool) error {
+	role, err := requiredObject(objects, "ClusterRole", expiryGuardNamespacesRole)
+	if err != nil {
+		return err
+	}
+	if namespaced {
+		if len(nestedRules(role)) != 1 || !roleHasExactNamespaceObservation(role) {
+			return fmt.Errorf("expiry guard may get only the production and %s namespaces", controlNamespace)
+		}
+	} else if !rulesAreExactly(role, []guardRule{{"", namespaceRule, []string{verbGet}}}) {
+		return fmt.Errorf("expiry guard namespace ClusterRole must grant only get on namespaces")
+	}
+	binding, err := requiredObject(objects, "ClusterRoleBinding", expiryGuardNamespacesRole)
+	if err != nil {
+		return err
+	}
+	roleRefKind, _, _ := unstructured.NestedString(binding.Object, "roleRef", "kind")
+	roleRefName, _, _ := unstructured.NestedString(binding.Object, "roleRef", "name")
+	if roleRefKind != "ClusterRole" || roleRefName != expiryGuardNamespacesRole {
+		return fmt.Errorf("expiry guard namespace ClusterRoleBinding must reference its ClusterRole")
+	}
+	subjects, _, _ := unstructured.NestedSlice(binding.Object, "subjects")
+	if len(subjects) != 1 {
+		return fmt.Errorf("expiry guard namespace ClusterRoleBinding must have exactly one subject")
+	}
+	subject, ok := subjects[0].(map[string]any)
+	if !ok || subject["kind"] != "ServiceAccount" || subject["name"] != expiryGuardName ||
+		subject["namespace"] != managerNamespace {
+		return fmt.Errorf("expiry guard namespace ClusterRoleBinding must bind the expiry guard ServiceAccount")
+	}
+	return nil
 }

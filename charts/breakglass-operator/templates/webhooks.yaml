@@ -51,4 +51,37 @@ webhooks:
         # silently exempt every one of them from admission.
         scope: Namespaced
   {{- end }}
+  {{- if eq $mode "validate" }}
+  # Drain check for control namespaces (ADR-004): a control namespace may be
+  # deleted only after its sessions are gone, because the manager's rights on
+  # them are the Roles in that namespace. It fails closed, so the selector
+  # limits it to exactly the control namespaces; no other namespace deletion
+  # depends on the manager.
+  - name: vcontrolnamespace-v1.kb.io
+    admissionReviewVersions: [v1]
+    clientConfig:
+      service:
+        name: {{ $name }}-webhook-service
+        namespace: {{ $.Release.Namespace }}
+        path: /validate-core-v1-namespace
+        port: 443
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    sideEffects: None
+    timeoutSeconds: 5
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            {{- range $.Values.controlNamespaces }}
+            - {{ . | quote }}
+            {{- end }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [DELETE]
+        resources: [namespaces]
+        scope: Cluster
+  {{- end }}
 {{- end }}

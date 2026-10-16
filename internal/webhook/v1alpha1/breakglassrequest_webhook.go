@@ -41,7 +41,8 @@ func SetupBreakGlassRequestWebhookWithManager(
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-access-breakglass-io-v1alpha1-breakglassrequest,mutating=true,failurePolicy=fail,sideEffects=None,groups=access.breakglass.io,resources=breakglassrequests,verbs=create,versions=v1alpha1,name=mbreakglassrequest-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-access-breakglass-io-v1alpha1-breakglassrequest,mutating=true,failurePolicy=fail,sideEffects=None,timeoutSeconds=5,groups=access.breakglass.io,resources=breakglassrequests,verbs=create,versions=v1alpha1,name=mbreakglassrequest-v1alpha1.kb.io,admissionReviewVersions=v1
+
 type BreakGlassRequestDefaulter struct {
 	ProfileReader client.Reader
 	Metrics       breakglassmetrics.AdmissionRecorder
@@ -91,7 +92,8 @@ func (d *BreakGlassRequestDefaulter) Default(ctx context.Context, obj *accessv1a
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-access-breakglass-io-v1alpha1-breakglassrequest,mutating=false,failurePolicy=fail,sideEffects=None,groups=access.breakglass.io,resources=breakglassrequests,verbs=create;update,versions=v1alpha1,name=vbreakglassrequest-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-access-breakglass-io-v1alpha1-breakglassrequest,mutating=false,failurePolicy=fail,sideEffects=None,timeoutSeconds=5,groups=access.breakglass.io,resources=breakglassrequests,verbs=create;update,versions=v1alpha1,name=vbreakglassrequest-v1alpha1.kb.io,admissionReviewVersions=v1
+
 type BreakGlassRequestValidator struct {
 	ProfileReader client.Reader
 	Reviewer      SubjectAccessReviewer

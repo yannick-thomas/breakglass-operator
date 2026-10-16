@@ -88,6 +88,40 @@ is cheapest now.
   and denies the deletion on any read error. The manager therefore needs
   `get` on its control namespaces as well as its target namespaces; the
   namespace-restricted Kustomize overlay and the Helm chart name both sets.
+- **A control namespace must be drained before it is deleted.** In a
+  namespace-restricted installation (Helm, the namespaced Kustomize overlay)
+  the manager's rights on access objects are Roles in that control namespace.
+  If the namespace were deleted while sessions remain, namespace cleanup could
+  remove those Roles first; the sessions' finalizers would then hold the
+  namespace forever, because the manager could no longer read or update them.
+  A validating webhook on Namespace `DELETE` therefore denies deleting a
+  control namespace that still holds any BreakGlassSession, including one that
+  is already being deleted (its finalizer still needs the manager). The
+  sessions are listed from the API server, not a cache, and any read error
+  denies. The webhook uses `failurePolicy: Fail`: while no manager is
+  available, the deletion is denied rather than risked. Its
+  `namespaceSelector` keeps that outage behaviour away from every other
+  namespace: Helm and the namespaced overlay select exactly the control
+  namespaces by `kubernetes.io/metadata.name`; the all-namespaces Kustomize
+  profiles (default, production), which have no fixed list, select only
+  namespaces labelled `access.breakglass.io/control-namespace=true`. That
+  label is opt-in, so an unlabelled namespace with access objects is not
+  protected in those profiles. A namespace that is already terminating is not
+  blocked again. One race remains: a session created after the webhook's list
+  but before the namespace becomes `Terminating` is not seen. Kubernetes
+  rejects creation in a terminating namespace, so the window is a single
+  admission round-trip; a session created in it is stranded in the same way
+  and needs manual recovery (restore the manager's Role in the namespace).
+- The expiry guard lists sessions per control namespace and bindings per
+  target namespace. Its namespaced Roles disappear with their namespace, so a
+  deleted namespace makes listing Forbidden. The guard therefore also has
+  `get` on exactly its target and control Namespaces through a ClusterRole
+  that outlives them. It treats a namespace as empty only when that read
+  returns NotFound. Forbidden, any other error, or a terminating namespace is
+  reported as unreadable, the run exits 2, and the other namespaces are still
+  swept. A binding claiming a session in an unreadable control namespace is
+  refused, never deleted as an orphan. Without explicit namespaces the guard
+  lists cluster-wide, and a failed list ends the run (exit 1).
 - A binding event whose labels were removed still reaches its session through
   an index on the binding location recorded in the session status, so drift
   is detected at once rather than at the next periodic check.

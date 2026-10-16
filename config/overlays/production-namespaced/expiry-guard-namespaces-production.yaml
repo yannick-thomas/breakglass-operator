@@ -1,0 +1,16 @@
+# Strategic-merge patch: the expiry guard may get only the `production` target
+# namespace and the `breakglass-access` control namespace. The rule list is
+# replaced as a whole. Unlike the namespaced Roles, this ClusterRole survives
+# the deletion of either namespace, so the guard can confirm a deletion
+# (Namespace NotFound) and keep sweeping the other namespace. Keep the names
+# in sync with the guard's --allowed-target-namespaces and
+# --control-namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: breakglass-operator-expiry-guard-namespaces
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["production", "breakglass-access"]
+    verbs: ["get"]

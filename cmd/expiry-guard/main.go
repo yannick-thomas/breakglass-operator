@@ -18,8 +18,17 @@ limitations under the License.
 // meant to run as a CronJob with its own ServiceAccount, so expired access is
 // removed even while the controller manager is unavailable.
 //
-// Exit codes: 0 sweep completed, 1 sweep could not complete, 2 sweep completed
-// but at least one expired binding needs a human (see the logs).
+// Sessions and bindings are listed per configured namespace. A namespace that
+// was deleted counts as empty; any other namespace that cannot be listed is
+// skipped and reported, and the sweep goes on in the others.
+//
+// Exit codes:
+//   - 0: the sweep completed in every configured namespace.
+//   - 1: the sweep could not complete at all (invalid flags, no client, a
+//     failed cluster-wide list, an unexpected API error, or the timeout).
+//   - 2: the sweep completed, but at least one binding was refused or at
+//     least one configured namespace could not be read and was not swept. It
+//     needs a human (see the logs).
 package main
 
 import (
@@ -44,8 +53,8 @@ import (
 )
 
 const (
-	exitError    = 1
-	exitRefusals = 2
+	exitError      = 1
+	exitNeedsHuman = 2
 )
 
 func main() {
@@ -110,12 +119,12 @@ func main() {
 	guard.Grace, guard.Scope, guard.DryRun, guard.Log = grace, scope, dryRun, log
 	report, err := guard.Sweep(ctx)
 	log.Info("Finished expiry sweep", "removed", len(report.Removed), "refused", len(report.Refused),
-		"ignored", len(report.Ignored), "dryRun", dryRun)
+		"ignored", len(report.Ignored), "unreadableNamespaces", len(report.Unreadable), "dryRun", dryRun)
 	if err != nil {
 		log.Error(err, "Could not complete expiry sweep")
 		os.Exit(exitError)
 	}
 	if report.Failed() {
-		os.Exit(exitRefusals)
+		os.Exit(exitNeedsHuman)
 	}
 }

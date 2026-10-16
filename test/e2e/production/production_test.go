@@ -41,6 +41,9 @@ const (
 	// controlNamespace holds the access objects (ADR-004); it matches the
 	// production overlay and the chart default.
 	controlNamespace = "breakglass-access"
+	// teardownNamespace is a second control namespace, installed only through
+	// Helm, that the drain-check spec deletes (ADR-004).
+	teardownNamespace = "breakglass-teardown"
 
 	requesterName        = "production-e2e-requester"
 	requesterRole        = "breakglass-production-e2e-requester"
@@ -59,6 +62,7 @@ const (
 	rollingRestartRecoverySession  = "production-rolling-restart-recovery-session"
 	namespaceDeletionSessionName   = "production-namespace-deletion-session"
 	expiryGuardSessionName         = "production-expiry-guard-session"
+	teardownSessionName            = "production-teardown-session"
 
 	expiryGuardName = "breakglass-operator-expiry-guard"
 )
@@ -76,7 +80,8 @@ func helmInstallCommand(upgrade bool) *exec.Cmd {
 	}
 	args := []string{"upgrade", "--install", "breakglass-operator", "charts/breakglass-operator",
 		"--namespace", managerNamespace, "--create-namespace", "--wait", "--timeout", "5m",
-		"--set", "image.repository=example.com/breakglass-operator", "--set", "image.tag=v0.0.1"}
+		"--set", "image.repository=example.com/breakglass-operator", "--set", "image.tag=v0.0.1",
+		"--set", "controlNamespaces={" + controlNamespace + "," + teardownNamespace + "}"}
 	if upgrade {
 		args = append(args, "--set", "resources.requests.cpu=15m")
 	}
@@ -121,6 +126,9 @@ var _ = Describe("Production installation", Ordered, func() {
 		_, err = utils.Run(exec.Command("kubectl", "create", "namespace", controlNamespace))
 		Expect(err).NotTo(HaveOccurred())
 		if usesHelm() {
+			By("creating a second control namespace that the drain-check spec retires")
+			_, err = utils.Run(exec.Command("kubectl", "create", "namespace", teardownNamespace))
+			Expect(err).NotTo(HaveOccurred())
 			By("installing the chart with CRDs and namespace-restricted high-availability RBAC")
 			_, err = utils.Run(helmInstallCommand(false))
 			Expect(err).NotTo(HaveOccurred())
@@ -161,12 +169,22 @@ var _ = Describe("Production installation", Ordered, func() {
 				"kubectl", "-n", controlNamespace, "delete", "breakglasssession", session, "--ignore-not-found", "--wait=false",
 			))
 		}
+		_, _ = utils.Run(exec.Command(
+			"kubectl", "-n", teardownNamespace, "delete", "breakglasssession", teardownSessionName,
+			"--ignore-not-found", "--wait=false",
+		))
+		// Control namespaces may be deleted only after their sessions are gone
+		// (ADR-004); give the restored manager time to release the finalizers.
+		for _, namespace := range []string{controlNamespace, teardownNamespace} {
+			waitForNoSessions(namespace)
+		}
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "rolebinding", requesterRoleBinding, "-n", controlNamespace, "--ignore-not-found"))
 		_, _ = utils.Run(exec.Command(
 			"kubectl", "delete", "clusterrole", requesterRole, curatedRoleName, "--ignore-not-found",
 		))
 		_, _ = utils.Run(exec.Command("kubectl", "-n", controlNamespace, "delete", "accessprofile", accessProfileName, "--ignore-not-found"))
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, controlNamespace, "--ignore-not-found"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "namespace", targetNamespace, controlNamespace,
+			teardownNamespace, "--ignore-not-found"))
 		if usesHelm() {
 			helm := os.Getenv("HELM")
 			if helm == "" {
@@ -380,6 +398,75 @@ var _ = Describe("Production installation", Ordered, func() {
 		}, 2*time.Minute, time.Second).Should(Succeed())
 	})
 
+	It("denies retiring a control namespace until its sessions are drained, also during a manager outage", func() {
+		if !usesHelm() {
+			Skip("the second control namespace is configured only by the Helm installation")
+		}
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("creating a profile, requester access and an active session in a second control namespace")
+		_, err := applyManifest(teardownAccess)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(createSessionIn(teardownNamespace, teardownSessionName, "10m")).To(Succeed())
+		Eventually(sessionIsActiveIn(teardownNamespace, teardownSessionName), 2*time.Minute, time.Second).
+			Should(Succeed())
+		bindingName, err := utils.Run(exec.Command(
+			"kubectl", "-n", teardownNamespace, "get", "breakglasssession", teardownSessionName,
+			"-o", "jsonpath={.status.bindingRef.name}",
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(bindingName).NotTo(BeEmpty())
+
+		By("stopping every manager")
+		_, err = utils.Run(exec.Command(
+			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=0",
+		))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(restoreProductionManager)
+		Eventually(managerIsStopped, 2*time.Minute, time.Second).Should(Succeed())
+
+		By("proving that the fail-closed drain check denies the deletion while no manager is available")
+		output, err := utils.Run(exec.Command("kubectl", "delete", "namespace", teardownNamespace, "--wait=false"))
+		Expect(err).To(HaveOccurred(), "namespace deletion was admitted during the manager outage: %s", output)
+		Expect(err.Error()).To(ContainSubstring("vcontrolnamespace-v1.kb.io"))
+		Expect(namespacePhase(teardownNamespace)).To(Equal("Active"))
+		_, err = utils.Run(exec.Command("kubectl", "-n", teardownNamespace, "get", "breakglasssession", teardownSessionName))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("restoring the managers")
+		_, err = utils.Run(exec.Command(
+			"kubectl", "scale", "deployment", managerName, "-n", managerNamespace, "--replicas=2",
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(assertProductionReady, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("proving that the running manager still denies the deletion while a session exists")
+		Eventually(func(g Gomega) {
+			_, deleteErr := utils.Run(exec.Command("kubectl", "delete", "namespace", teardownNamespace, "--wait=false"))
+			g.Expect(deleteErr).To(HaveOccurred())
+			g.Expect(deleteErr.Error()).To(ContainSubstring(
+				"still holds 1 BreakGlassSession(s) (" + teardownSessionName + ")"))
+		}, time.Minute, time.Second).Should(Succeed())
+		Expect(namespacePhase(teardownNamespace)).To(Equal("Active"))
+
+		By("draining the session and waiting until the manager removed its RoleBinding")
+		_, err = utils.Run(exec.Command(
+			"kubectl", "-n", teardownNamespace, "delete", "breakglasssession", teardownSessionName, "--wait=false",
+		))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			_, getErr := utils.Run(exec.Command(
+				"kubectl", "-n", teardownNamespace, "get", "breakglasssession", teardownSessionName))
+			g.Expect(getErr).To(HaveOccurred())
+		}, 2*time.Minute, time.Second).Should(Succeed())
+		Eventually(bindingIsDeleted(bindingName), 2*time.Minute, time.Second).Should(Succeed())
+
+		By("deleting the drained control namespace")
+		_, err = utils.Run(exec.Command("kubectl", "delete", "namespace", teardownNamespace, "--wait=false"))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(namespaceIsDeleted(teardownNamespace), 2*time.Minute, time.Second).Should(Succeed())
+	})
+
 	It("releases the session finalizer when its target namespace disappears", func() {
 		By("creating a final active grant before deleting its target namespace")
 		Expect(createSessionWithDuration(namespaceDeletionSessionName, "5m")).To(Succeed())
@@ -567,24 +654,32 @@ func createSession(name string) error {
 }
 
 func createSessionWithDuration(name, duration string) error {
+	return createSessionIn(controlNamespace, name, duration)
+}
+
+func createSessionIn(namespace, name, duration string) error {
 	_, err := applyManifestAs(requesterName, fmt.Sprintf(`
 apiVersion: access.breakglass.io/v1alpha1
 kind: BreakGlassSession
 metadata:
   name: %s
-  namespace: breakglass-access
+  namespace: %s
 spec:
   accessProfile: %s
   duration: %q
   reason: "Production HA and fail-closed admission verification"
-`, name, accessProfileName, duration))
+`, name, namespace, accessProfileName, duration))
 	return err
 }
 
 func sessionIsActive(name string) func(Gomega) {
+	return sessionIsActiveIn(controlNamespace, name)
+}
+
+func sessionIsActiveIn(namespace, name string) func(Gomega) {
 	return func(g Gomega) {
 		output, err := utils.Run(exec.Command(
-			"kubectl", "--as="+requesterName, "-n", controlNamespace, "get", "breakglasssession", name,
+			"kubectl", "--as="+requesterName, "-n", namespace, "get", "breakglasssession", name,
 			"-o", "jsonpath={.status.phase},{.spec.subject.name},{.status.bindingRef.name}",
 		))
 		g.Expect(err).NotTo(HaveOccurred())
@@ -687,6 +782,28 @@ func namespaceIsDeleted(name string) func(Gomega) {
 	}
 }
 
+func namespacePhase(name string) string {
+	output, err := utils.Run(exec.Command("kubectl", "get", "namespace", name, "-o", "jsonpath={.status.phase}"))
+	Expect(err).NotTo(HaveOccurred())
+	return output
+}
+
+// waitForNoSessions waits, best effort, until a control namespace holds no
+// sessions, so that teardown can delete it through the drain check.
+func waitForNoSessions(namespace string) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		output, err := utils.Run(exec.Command(
+			"kubectl", "-n", namespace, "get", "breakglasssessions", "-o", "name", "--ignore-not-found",
+		))
+		if err != nil || strings.TrimSpace(output) == "" {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "warning: sessions remain in %s; its deletion will be denied\n", namespace)
+}
+
 func resetCuratedRole() {
 	_, err := utils.Run(exec.Command(
 		"kubectl", "apply", "-f", "config/samples/rbac_breakglass_pod_observer_clusterrole.yaml",
@@ -737,6 +854,37 @@ kind: RoleBinding
 metadata:
   name: breakglass-production-e2e-requester-binding
   namespace: breakglass-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: breakglass-production-e2e-requester
+subjects:
+  - kind: User
+    name: production-e2e-requester
+    apiGroup: rbac.authorization.k8s.io
+`
+
+// teardownAccess is the profile and requester binding in the second control
+// namespace. The requester ClusterRole already permits use of a profile with
+// this name.
+const teardownAccess = `
+apiVersion: access.breakglass.io/v1alpha1
+kind: AccessProfile
+metadata:
+  name: production-pod-observer
+  namespace: breakglass-teardown
+spec:
+  roleRef:
+    kind: ClusterRole
+    name: breakglass-pod-observer
+  targetNamespace: production
+  maxDuration: 30m
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: breakglass-production-e2e-requester-binding
+  namespace: breakglass-teardown
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

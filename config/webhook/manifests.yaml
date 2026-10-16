@@ -134,3 +134,23 @@ webhooks:
     - breakglasssessions
   sideEffects: None
   timeoutSeconds: 5
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-core-v1-namespace
+  failurePolicy: Fail
+  name: vcontrolnamespace-v1.kb.io
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - DELETE
+    resources:
+    - namespaces
+  sideEffects: None
+  timeoutSeconds: 5

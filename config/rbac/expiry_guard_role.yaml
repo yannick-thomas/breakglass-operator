@@ -3,6 +3,11 @@
 # no longer exists (ADR-004). No create, update, patch, escalate, bind, or
 # session writes. The namespaced production overlay replaces the cluster-wide
 # RoleBinding rule (index 1) with a Role in each allowed target namespace.
+#
+# The separate namespaces ClusterRole lets the guard confirm that a namespace
+# it may no longer list was deleted (Namespace NotFound) and keep sweeping the
+# others. It is cluster-wide here (development); the namespaced production
+# overlay restricts it to the target and control namespaces by name.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -31,6 +36,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: expiry-guard-role
+subjects:
+- kind: ServiceAccount
+  name: expiry-guard
+  namespace: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+  name: expiry-guard-namespaces
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: breakglass-operator
+    app.kubernetes.io/component: expiry-guard
+    app.kubernetes.io/managed-by: kustomize
+  name: expiry-guard-namespaces
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: expiry-guard-namespaces
 subjects:
 - kind: ServiceAccount
   name: expiry-guard

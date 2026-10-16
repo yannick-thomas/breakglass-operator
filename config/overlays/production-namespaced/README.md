@@ -30,3 +30,8 @@ The overlay still grants the manager cluster-wide read/watch access to the
 access objects, plus named-role `bind`; its cache and admission limit it to the
 control namespace. Restricting those rights to the control namespace follows
 with per-tenant RBAC. It does not enable cluster-wide RBAC grants.
+
+The control-namespace drain check (ADR-004) selects exactly `breakglass-access`
+by `kubernetes.io/metadata.name`. When adding or renaming a control namespace,
+change `--control-namespaces`, the manager's and the guard's Namespace
+`resourceNames`, and this webhook selector in the same change.

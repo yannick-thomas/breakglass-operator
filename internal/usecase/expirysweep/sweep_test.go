@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -31,22 +32,56 @@ import (
 
 var now = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 
+func forbidden(namespace string) error {
+	return port.Mark(port.ErrForbidden, fmt.Errorf("forbidden in namespace %s", namespace))
+}
+
 type fakeSessions struct {
 	sessions []access.Session
 	err      error
+	// forbidden lists namespaces whose sessions may not be listed.
+	forbidden map[string]bool
+	listed    []string
 }
 
-func (f *fakeSessions) List(context.Context) ([]access.Session, error) { return f.sessions, f.err }
+func (f *fakeSessions) List(_ context.Context, namespace string) ([]access.Session, error) {
+	f.listed = append(f.listed, namespace)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.forbidden[namespace] {
+		return nil, forbidden(namespace)
+	}
+	var found []access.Session
+	for _, session := range f.sessions {
+		if namespace == "" || session.Namespace == namespace {
+			found = append(found, session)
+		}
+	}
+	return found, nil
+}
+
+// fakeNamespaces reports the named namespaces as confirmed absent.
+type fakeNamespaces map[string]bool
+
+func (f fakeNamespaces) NamespaceAbsent(_ context.Context, namespace string) bool {
+	return f[namespace]
+}
 
 type fakeBindings struct {
 	objects   map[string]access.Binding
 	deleteErr error
 	deleted   []string
+	// forbidden lists namespaces in which bindings may not be read.
+	forbidden map[string]bool
 	// afterList runs after ListManaged took its snapshot.
 	afterList func()
 }
 
 func (f *fakeBindings) Get(_ context.Context, namespace, name string) (access.Binding, error) {
+	if f.forbidden[namespace] {
+		return access.Binding{}, forbidden(namespace)
+	}
 	if b, ok := f.objects[namespace+"/"+name]; ok {
 		return b, nil
 	}
@@ -54,6 +89,9 @@ func (f *fakeBindings) Get(_ context.Context, namespace, name string) (access.Bi
 }
 
 func (f *fakeBindings) ListManaged(_ context.Context, namespace string) ([]access.Binding, error) {
+	if f.forbidden[namespace] {
+		return nil, forbidden(namespace)
+	}
 	var managed []access.Binding
 	for _, b := range f.objects {
 		if b.Labels[access.ManagedByLabelKey] == access.ManagedByLabelValue && (namespace == "" || b.Namespace == namespace) {
@@ -291,5 +329,176 @@ func TestSweepDryRunKeepsOrphans(t *testing.T) {
 
 	if report := sweep(t, sw); len(report.Removed) != 1 || len(bindings.deleted) != 0 {
 		t.Fatalf("report = %#v, deleted = %v, want planned removal only", report, bindings.deleted)
+	}
+}
+
+// add stores bindings in the fake and returns it.
+func (f *fakeBindings) add(bindings ...access.Binding) *fakeBindings {
+	if f.objects == nil {
+		f.objects = map[string]access.Binding{}
+	}
+	for _, b := range bindings {
+		f.objects[b.Namespace+"/"+b.Name] = b
+	}
+	return f
+}
+
+// has reports whether the named binding still exists in production.
+func (f *fakeBindings) has(name string) bool {
+	_, ok := f.objects["production/"+name]
+	return ok
+}
+
+func TestSweepTreatsDeletedTargetNamespaceAsEmpty(t *testing.T) {
+	// The namespace and with it the guard's RoleBinding-read Role are gone:
+	// listing there is Forbidden, the Namespace read is NotFound.
+	expiredInDeleted := expired("in-deleted", time.Hour)
+	expiredInDeleted.Status.BindingRef.Namespace = "staging"
+	orphan := managedBinding(access.Session{Name: "gone", Namespace: "breakglass-access", UID: "gone-uid"}, "production", "rb-gone")
+	due := expired("due", time.Hour)
+	bindings := (&fakeBindings{forbidden: map[string]bool{"staging": true}}).add(orphan, bindingOf(due))
+	sw := sweeper([]access.Session{expiredInDeleted, due}, bindings)
+	sw.Scope = access.NamespaceScope{"production": {}, "staging": {}}
+	sw.Namespaces = fakeNamespaces{"staging": true}
+
+	report := sweep(t, sw)
+	if report.Failed() || len(report.Unreadable) != 0 || len(report.Removed) != 2 {
+		t.Fatalf("report = %#v, want the deleted namespace treated as empty and production swept", report)
+	}
+	if bindings.has("rb-gone") || bindings.has("rb-due") {
+		t.Fatalf("remaining bindings = %v, want production swept", bindings.objects)
+	}
+}
+
+func TestSweepTreatsDeletedControlNamespaceAsEmpty(t *testing.T) {
+	live := access.Session{Name: "live", Namespace: "team-a", UID: "live-uid"}
+	inDeleted := access.Session{Name: "s", Namespace: "team-b", UID: "s-uid"}
+	goneInLive := access.Session{Name: "gone", Namespace: "team-a", UID: "gone-uid"}
+	bindings := (&fakeBindings{}).add(
+		managedBinding(live, "production", "rb-live"),
+		managedBinding(inDeleted, "production", "rb-deleted-ns"),
+		managedBinding(goneInLive, "production", "rb-gone"),
+	)
+	sw := sweeper(nil, bindings)
+	sw.Sessions = &fakeSessions{sessions: []access.Session{live}, forbidden: map[string]bool{"team-b": true}}
+	sw.Control = access.NamespaceScope{"team-a": {}, "team-b": {}}
+	sw.Namespaces = fakeNamespaces{"team-b": true}
+
+	report := sweep(t, sw)
+	if report.Failed() || len(report.Removed) != 2 {
+		t.Fatalf("report = %#v, want both orphans removed and no failure", report)
+	}
+	if !bindings.has("rb-live") || len(bindings.objects) != 1 {
+		t.Fatalf("remaining bindings = %v, want only the live session's binding", bindings.objects)
+	}
+}
+
+func TestSweepReportsForbiddenNamespaceThatStillExists(t *testing.T) {
+	// Forbidden alone, for example while a namespace is terminating, is not
+	// evidence of absence: team-b may still hold live sessions.
+	live := access.Session{Name: "live", Namespace: "team-a", UID: "live-uid"}
+	unseen := access.Session{Name: "unseen", Namespace: "team-b", UID: "unseen-uid"}
+	goneInLive := access.Session{Name: "gone", Namespace: "team-a", UID: "gone-uid"}
+	due := expired("due", time.Hour)
+	due.Namespace = "team-a"
+	unreadableTarget := expired("unreadable-target", time.Hour)
+	unreadableTarget.Namespace = "team-a"
+	unreadableTarget.Status.BindingRef.Namespace = "staging"
+	bindings := (&fakeBindings{forbidden: map[string]bool{"staging": true}}).add(
+		managedBinding(live, "production", "rb-live"),
+		managedBinding(unseen, "production", "rb-unseen"),
+		managedBinding(goneInLive, "production", "rb-gone"),
+		bindingOf(due),
+	)
+	sw := sweeper(nil, bindings)
+	sw.Sessions = &fakeSessions{sessions: []access.Session{live, due, unreadableTarget}, forbidden: map[string]bool{"team-b": true}}
+	sw.Control = access.NamespaceScope{"team-a": {}, "team-b": {}}
+	sw.Scope = access.NamespaceScope{"production": {}, "staging": {}}
+	sw.Namespaces = fakeNamespaces{}
+
+	report := sweep(t, sw)
+	if !report.Failed() || len(report.Unreadable) != 2 {
+		t.Fatalf("report = %#v, want both forbidden namespaces reported unreadable", report)
+	}
+	if !bindings.has("rb-unseen") || !bindings.has("rb-live") {
+		t.Fatalf("remaining bindings = %v, want the binding claiming the unreadable namespace kept", bindings.objects)
+	}
+	if bindings.has("rb-gone") || bindings.has("rb-due") {
+		t.Fatalf("remaining bindings = %v, want the readable namespaces still swept", bindings.objects)
+	}
+	refused := map[string]string{}
+	for _, finding := range report.Refused {
+		refused[finding.Binding] = finding.Reason
+	}
+	if refused["rb-unseen"] != "session namespace could not be read" ||
+		refused["rb-unreadable-target"] != "binding could not be read" || len(refused) != 2 {
+		t.Fatalf("refused = %v, want the unseen session's binding and the unreadable binding refused", refused)
+	}
+}
+
+func TestSweepNeverAssumesAbsenceWithoutObserver(t *testing.T) {
+	orphan := managedBinding(access.Session{Name: "s", Namespace: "team-b", UID: "s-uid"}, "production", "rb-s")
+	bindings := (&fakeBindings{}).add(orphan)
+	sw := sweeper(nil, bindings)
+	sw.Sessions = &fakeSessions{forbidden: map[string]bool{"team-b": true}}
+	sw.Control = access.NamespaceScope{"team-b": {}}
+
+	report := sweep(t, sw)
+	if !report.Failed() || len(report.Unreadable) != 1 || len(bindings.deleted) != 0 {
+		t.Fatalf("report = %#v, deleted = %v, want an unreadable namespace and no deletion", report, bindings.deleted)
+	}
+}
+
+func TestSweepFailsWhenClusterWideListIsForbidden(t *testing.T) {
+	// Without explicit namespaces absence cannot be established.
+	sw := sweeper(nil, &fakeBindings{forbidden: map[string]bool{"": true}})
+	sw.Namespaces = fakeNamespaces{"": true}
+	if _, err := sw.Sweep(context.Background()); err == nil {
+		t.Fatal("Sweep() error = nil, want error")
+	}
+	sw = sweeper(nil, &fakeBindings{})
+	sw.Sessions = &fakeSessions{forbidden: map[string]bool{"": true}}
+	sw.Namespaces = fakeNamespaces{"": true}
+	if _, err := sw.Sweep(context.Background()); err == nil {
+		t.Fatal("Sweep() error = nil, want error")
+	}
+}
+
+func TestSweepStopsWhenContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sw := sweeper(nil, &fakeBindings{})
+	sw.Sessions = &fakeSessions{err: context.Canceled}
+	sw.Control = access.NamespaceScope{"team-a": {}}
+	if _, err := sw.Sweep(ctx); err == nil {
+		t.Fatal("Sweep() error = nil, want error after the context ended")
+	}
+}
+
+// recordingSessions records each session list in a shared order.
+type recordingSessions struct {
+	order *[]string
+}
+
+func (r recordingSessions) List(_ context.Context, namespace string) ([]access.Session, error) {
+	*r.order = append(*r.order, "sessions:"+namespace)
+	return nil, nil
+}
+
+func TestSweepListsAllTargetNamespacesBeforeSessions(t *testing.T) {
+	var order []string
+	bindings := &fakeBindings{forbidden: map[string]bool{"staging": true}}
+	// afterList does not run for the forbidden namespace.
+	bindings.afterList = func() { order = append(order, "bindings") }
+	sw := sweeper(nil, bindings)
+	sw.Sessions = recordingSessions{order: &order}
+	sw.Scope = access.NamespaceScope{"production": {}, "staging": {}, "zeta": {}}
+	sw.Control = access.NamespaceScope{"team-a": {}, "team-b": {}}
+	sw.Namespaces = fakeNamespaces{"staging": true}
+
+	sweep(t, sw)
+	want := []string{"bindings", "bindings", "sessions:team-a", "sessions:team-b"}
+	if !slices.Equal(order, want) {
+		t.Fatalf("list order = %q, want %q", order, want)
 	}
 }

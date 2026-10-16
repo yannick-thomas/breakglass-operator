@@ -292,6 +292,10 @@ func main() {
 		setupLog.Error(err, "unable to create BreakGlassApproval webhook")
 		os.Exit(1)
 	}
+	if err := webhookv1alpha1.SetupControlNamespaceWebhookWithManager(mgr, placement); err != nil {
+		setupLog.Error(err, "Failed to create webhook", "webhook", "ControlNamespace")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

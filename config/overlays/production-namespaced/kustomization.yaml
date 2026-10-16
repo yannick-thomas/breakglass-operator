@@ -63,6 +63,24 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/args/-
         value: --control-namespaces=breakglass-access
+  # The fail-closed control-namespace drain check (ADR-004) matches exactly the
+  # control namespace, instead of the opt-in label of the default profile, so
+  # it never blocks the deletion of another namespace. Keep the list equal to
+  # --control-namespaces.
+  - target:
+      kind: ValidatingWebhookConfiguration
+      name: breakglass-operator-validating-webhook-configuration
+    patch: |-
+      - op: test
+        path: /webhooks/3/name
+        value: vcontrolnamespace-v1.kb.io
+      - op: replace
+        path: /webhooks/3/namespaceSelector
+        value:
+          matchExpressions:
+            - key: kubernetes.io/metadata.name
+              operator: In
+              values: ["breakglass-access"]
   # The expiry guard gets the same namespace restriction as the manager.
   - target:
       kind: ClusterRole
@@ -73,6 +91,10 @@ patches:
         value: rolebindings
       - op: remove
         path: /rules/1
+  # The expiry guard may get only the target and control namespaces. This
+  # ClusterRole outlives both, so a deleted namespace is confirmed absent
+  # (NotFound) and the guard keeps sweeping the others.
+  - path: expiry-guard-namespaces-production.yaml
   - target:
       kind: CronJob
       name: breakglass-operator-expiry-guard

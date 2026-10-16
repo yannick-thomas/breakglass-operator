@@ -19,10 +19,12 @@ package expiryguard
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -371,5 +373,133 @@ func TestSweepListsSessionsOnlyInControlNamespaces(t *testing.T) {
 
 	if len(namespaces) != 2 || namespaces[0] != controlNamespace || namespaces[1] != "team-b" {
 		t.Fatalf("listed sessions in %q, want exactly the control namespaces", namespaces)
+	}
+}
+
+// forbidLists makes listing the given kind Forbidden in the given namespaces,
+// as when the guard's namespaced Role went with its namespace.
+func forbidLists[L client.ObjectList](c client.WithWatch, namespaces ...string) client.WithWatch {
+	return interceptor.NewClient(c, interceptor.Funcs{
+		List: func(ctx context.Context, next client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			options := &client.ListOptions{}
+			options.ApplyOptions(opts)
+			if _, ok := list.(L); ok && slices.Contains(namespaces, options.Namespace) {
+				return apierrors.NewForbidden(rbacv1.Resource("rolebindings"), "", errors.New("no permission"))
+			}
+			return next.List(ctx, list, opts...)
+		},
+	})
+}
+
+func namespace(name string) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+func terminating(name string) *corev1.Namespace {
+	ns := namespace(name)
+	ns.Finalizers = []string{"kubernetes"}
+	ns.DeletionTimestamp = &metav1.Time{Time: now}
+	return ns
+}
+
+func orphanIn(sessionNamespace, name string) *rbacv1.RoleBinding {
+	session, binding := expiredSession(name, now.Add(time.Hour))
+	session.Namespace = sessionNamespace
+	binding.Name, binding.UID = "rb-"+name, types.UID("uid-"+name)
+	binding.Labels = apiconv.ToDomainSession(session).ManagedLabels()
+	return binding
+}
+
+func exists(t *testing.T, c client.Client, obj client.Object) bool {
+	t.Helper()
+	err := c.Get(context.Background(), client.ObjectKeyFromObject(obj), &rbacv1.RoleBinding{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
+func TestSweepTreatsDeletedTargetNamespaceAsEmpty(t *testing.T) {
+	t.Parallel()
+	orphan := orphanIn(controlNamespace, "gone")
+	// staging was deleted: no Namespace, and listing there is Forbidden.
+	c := forbidLists[*rbacv1.RoleBindingList](newClient(t, namespace(testNamespace), namespace(controlNamespace), orphan), "staging")
+
+	report := sweep(t, withScope(New(c, access.NamespaceScope{controlNamespace: {}}),
+		access.NamespaceScope{testNamespace: {}, "staging": {}}))
+
+	if report.Failed() || len(report.Removed) != 1 {
+		t.Fatalf("report = %#v, want the deleted namespace treated as empty and production swept", report)
+	}
+	if exists(t, c, orphan) {
+		t.Fatal("orphaned binding in production still present")
+	}
+}
+
+func TestSweepTreatsDeletedControlNamespaceAsEmpty(t *testing.T) {
+	t.Parallel()
+	live, liveBinding := expiredSession("live", now.Add(time.Hour))
+	inDeleted := orphanIn("team-b", "in-deleted")
+	goneInLive := orphanIn(controlNamespace, "gone")
+	c := forbidLists[*accessv1alpha1.BreakGlassSessionList](
+		newClient(t, namespace(testNamespace), namespace(controlNamespace), live, liveBinding, inDeleted, goneInLive), "team-b")
+
+	report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}, "team-b": {}}))
+
+	if report.Failed() || len(report.Removed) != 2 {
+		t.Fatalf("report = %#v, want both orphans removed and no failure", report)
+	}
+	if exists(t, c, inDeleted) || exists(t, c, goneInLive) || !exists(t, c, liveBinding) {
+		t.Fatal("want only the live session's binding kept")
+	}
+}
+
+func TestSweepReportsForbiddenNamespaceThatStillExists(t *testing.T) {
+	t.Parallel()
+	unseen := orphanIn("team-b", "unseen")
+	goneInLive := orphanIn(controlNamespace, "gone")
+	// team-b is terminating: its Role is gone, but sessions may still exist.
+	c := forbidLists[*accessv1alpha1.BreakGlassSessionList](
+		newClient(t, namespace(testNamespace), namespace(controlNamespace), terminating("team-b"), unseen, goneInLive), "team-b")
+
+	report := sweep(t, New(c, access.NamespaceScope{controlNamespace: {}, "team-b": {}}))
+
+	if !report.Failed() || len(report.Unreadable) != 1 || report.Unreadable[0].Namespace != "team-b" {
+		t.Fatalf("report = %#v, want team-b reported unreadable", report)
+	}
+	if len(report.Refused) != 1 || report.Refused[0].Binding != unseen.Name {
+		t.Fatalf("report = %#v, want the binding claiming team-b refused", report)
+	}
+	if !exists(t, c, unseen) {
+		t.Fatal("binding claiming a session in an unreadable control namespace was deleted")
+	}
+	if exists(t, c, goneInLive) {
+		t.Fatal("readable control namespace was not swept")
+	}
+}
+
+func TestNamespaceAbsentOnlyOnNotFound(t *testing.T) {
+	t.Parallel()
+	failGet := func(err error) client.WithWatch {
+		return interceptor.NewClient(newClient(t), interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return err
+			},
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		reader client.Reader
+		absent bool
+	}{
+		{"not found", newClient(t), true},
+		{"exists", newClient(t, namespace("team-b")), false},
+		{"terminating", newClient(t, terminating("team-b")), false},
+		{"forbidden", failGet(apierrors.NewForbidden(corev1.Resource("namespaces"), "team-b", errors.New("no permission"))), false},
+		{"unavailable", failGet(errors.New("unavailable")), false},
+	} {
+		if got := (namespaceObserver{Reader: tc.reader}).NamespaceAbsent(context.Background(), "team-b"); got != tc.absent {
+			t.Errorf("%s: NamespaceAbsent() = %t, want %t", tc.name, got, tc.absent)
+		}
 	}
 }

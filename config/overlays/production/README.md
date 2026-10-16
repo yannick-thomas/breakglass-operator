@@ -25,3 +25,9 @@ uses `insecureSkipVerify` until a cluster-specific, CA-validating scraper
 configuration is supplied. It also does not add a network policy because the
 allowed Prometheus and API-server source topology must be verified for each
 cluster, including probe traffic.
+
+Like the default, this overlay accepts access objects in every namespace, so
+the fail-closed control-namespace drain check (ADR-004) guards only namespaces
+labelled `access.breakglass.io/control-namespace=true`. Label each namespace
+that holds access objects; see "Retiring a control namespace" in
+`docs/production-operations.md`.

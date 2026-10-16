@@ -71,6 +71,7 @@ func SetupBreakGlassApprovalWebhookWithManager(mgr ctrl.Manager, placement acces
 }
 
 // +kubebuilder:webhook:path=/mutate-access-breakglass-io-v1alpha1-breakglassapproval,mutating=true,failurePolicy=fail,sideEffects=None,timeoutSeconds=5,groups=access.breakglass.io,resources=breakglassapprovals,verbs=create,versions=v1alpha1,name=mbreakglassapproval-v1alpha1.kb.io,admissionReviewVersions=v1
+
 type BreakGlassApprovalDefaulter struct {
 	RequestReader client.Reader
 	Metrics       breakglassmetrics.AdmissionRecorder
@@ -123,6 +124,7 @@ func (d *BreakGlassApprovalDefaulter) Default(ctx context.Context, obj *accessv1
 }
 
 // +kubebuilder:webhook:path=/validate-access-breakglass-io-v1alpha1-breakglassapproval,mutating=false,failurePolicy=fail,sideEffects=None,timeoutSeconds=5,groups=access.breakglass.io,resources=breakglassapprovals,verbs=create;update;delete,versions=v1alpha1,name=vbreakglassapproval-v1alpha1.kb.io,admissionReviewVersions=v1
+
 type BreakGlassApprovalValidator struct {
 	RequestReader client.Reader
 	ProfileReader client.Reader

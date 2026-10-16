@@ -36,6 +36,7 @@ const (
 	managerNamespace = "breakglass-operator-system"
 	managerRoleName  = "breakglass-operator-manager-role"
 	roleBindingRule  = "rolebindings"
+	namespaceRule    = "namespaces"
 )
 
 func main() {
@@ -57,6 +58,9 @@ func validateProfile(profile string, input io.Reader) error {
 		return err
 	}
 	if err := verifyWebhookSecurity(objects); err != nil {
+		return err
+	}
+	if err := verifyWebhookSelectors(objects, profile); err != nil {
 		return err
 	}
 	if err := verifyRequiredCRDs(objects); err != nil {
@@ -129,7 +133,7 @@ func verifyWebhookSecurity(objects []unstructured.Unstructured) error {
 		name string
 	}{
 		{kind: "MutatingWebhookConfiguration", name: "breakglass-operator-mutating-webhook-configuration"},
-		{kind: "ValidatingWebhookConfiguration", name: "breakglass-operator-validating-webhook-configuration"},
+		{kind: validatingWebhookKind, name: validatingWebhookConfiguration},
 	} {
 		webhook, err := requiredObject(objects, configuration.kind, configuration.name)
 		if err != nil {
@@ -323,7 +327,7 @@ func roleHasExactNamespaceObservation(role unstructured.Unstructured) bool {
 		verbs, _, _ := unstructured.NestedStringSlice(rule, "verbs")
 		names, _, _ := unstructured.NestedStringSlice(rule, "resourceNames")
 		names = slices.Sorted(slices.Values(names))
-		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{"namespaces"}) ||
+		if found || !slices.Equal(groups, []string{""}) || !slices.Equal(resources, []string{namespaceRule}) ||
 			!slices.Equal(verbs, []string{verbGet}) || !slices.Equal(names, []string{controlNamespace, "production"}) {
 			return false
 		}

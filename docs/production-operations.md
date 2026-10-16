@@ -91,6 +91,50 @@ but no control namespaces. Custom overlays must change both flags on both
 workloads together. Never manually force namespace finalization while
 relying on normal namespace garbage-collection guarantees.
 
+The expiry guard has its own Namespace `get`: the
+`<release>-expiry-guard-namespaces` ClusterRole (Kustomize:
+`breakglass-operator-expiry-guard-namespaces`) grants `get` on the target and
+control namespaces by name. Because it outlives those namespaces, the guard can
+confirm that a deleted namespace is gone (NotFound) and keep sweeping the
+others. In the namespaced Kustomize overlay the names are set in
+`expiry-guard-namespaces-production.yaml`, which must stay in sync with the
+guard's `--allowed-target-namespaces` and `--control-namespaces`.
+
+### Retiring a control namespace
+
+A control namespace can be deleted only after it holds no BreakGlassSession
+(ADR-004). The validating webhook `vcontrolnamespace-v1.kb.io` denies the
+deletion otherwise, naming the remaining sessions. Retire a control namespace
+while the manager runs:
+
+1. Remove requester permissions in the namespace so no new session is created.
+2. Revoke or delete every session in it and wait until they are gone; each
+   finalizer is removed only after the manager deleted the session's
+   RoleBinding:
+
+   ```bash
+   kubectl -n breakglass-access delete breakglasssessions --all --wait=false
+   kubectl -n breakglass-access get breakglasssessions   # repeat until empty
+   ```
+
+3. Verify that every recorded `status.bindingRef` is gone from its target
+   namespace, then delete the namespace.
+4. Remove it from `controlNamespaces` (Helm) or `--control-namespaces` and the
+   webhook selector (Kustomize) only afterwards. Removing it first drops the
+   manager's Roles there and the drain check, recreating the stranded-session
+   risk.
+
+The webhook fails closed. While no manager Pod is available, every deletion of
+a selected control namespace is denied (`failed calling webhook
+"vcontrolnamespace-v1.kb.io"`); restore the manager and retry. Other namespaces
+are unaffected: Helm and the namespaced overlay select only the control
+namespaces by name. The default and production Kustomize profiles accept access
+objects in every namespace and therefore guard only namespaces labelled
+`access.breakglass.io/control-namespace=true`; label every namespace that holds
+access objects there. Never bypass the check by deleting the webhook
+configuration: a namespace deleted with live sessions loses the manager's Roles
+and stays `Terminating` until the Roles are restored by hand.
+
 ## Upgrade and rollback
 
 1. Record the image digest, rendered manifest, current CRDs, active sessions,
@@ -140,6 +184,16 @@ the Kubernetes CronJob controller, not on the manager. Check that it runs:
 kubectl get cronjob,jobs -n breakglass-operator-system -l app.kubernetes.io/component=expiry-guard
 kubectl logs -n breakglass-operator-system -l app.kubernetes.io/component=expiry-guard --tail=50
 ```
+
+Guard exit codes:
+
+- `0`: the run completed in every namespace.
+- `1`: the run could not complete at all (flags, client, cluster-wide list,
+  unexpected API error, timeout).
+- `2`: the run completed but needs a human: a binding was refused, or a
+  configured namespace could not be read. Check the `unreadableNamespaces`
+  count in the log; typical causes are a missing guard Role or RoleBinding, or
+  a namespace stuck in `Terminating`.
 
 A failed guard Job means an expired binding could not be proven to be the
 recorded one (for example a replacement with another UID). The guard leaves it

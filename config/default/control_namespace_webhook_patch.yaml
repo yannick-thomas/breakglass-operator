@@ -1,0 +1,23 @@
+# The control-namespace drain check (ADR-004) fails closed: while the manager
+# is unavailable, every namespace deletion it matches is denied. It must
+# therefore match only control namespaces.
+#
+# This default profile accepts access objects in every namespace, so no
+# namespace name can be listed here. The check is opt-in instead: label each
+# namespace that holds access objects with
+#   access.breakglass.io/control-namespace=true
+# An unlabelled namespace is not protected; deleting it while it holds
+# sessions can strand them (see docs/production-operations.md).
+# Overlays with explicit --control-namespaces replace this selector with the
+# exact namespace names.
+- op: test
+  path: /webhooks/3/name
+  value: vcontrolnamespace-v1.kb.io
+- op: add
+  path: /webhooks/3/namespaceSelector
+  value:
+    matchLabels:
+      access.breakglass.io/control-namespace: "true"
+- op: add
+  path: /webhooks/3/rules/0/scope
+  value: Cluster

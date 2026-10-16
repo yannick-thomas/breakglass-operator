@@ -8,6 +8,33 @@ metadata:
     {{- include "breakglass.labels" . | nindent 4 }}
     app.kubernetes.io/component: expiry-guard
 ---
+# Get on exactly the target and control namespaces. Namespaced Roles below go
+# with their namespace; this ClusterRole does not, so the guard can confirm
+# that a namespace whose listing became Forbidden was deleted (NotFound) and
+# keep sweeping the others. Forbidden or terminating is never absence.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-expiry-guard-namespaces
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expiry-guard
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: {{ concat .Values.allowedTargetNamespaces .Values.controlNamespaces | uniq | toJson }}
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-expiry-guard-namespaces
+  labels:
+    {{- include "breakglass.labels" . | nindent 4 }}
+    app.kubernetes.io/component: expiry-guard
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }}-expiry-guard-namespaces}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}-expiry-guard, namespace: {{ .Release.Namespace }}}
 {{- range .Values.controlNamespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

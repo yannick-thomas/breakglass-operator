@@ -137,7 +137,9 @@ func TestRenderedSecurityBoundary(t *testing.T) {
 			objects := render(t, tc.release, tc.namespace, tc.flags...)
 			verifyRoleBoundary(t, objects, tc.release, tc.namespace, tc.targets, tc.controls, tc.roles)
 			verifyControlBoundary(t, objects, tc.release, tc.namespace, tc.controls)
-			verifyAdmission(t, objects, tc.release, tc.namespace)
+			verifyGuardNamespaceObservation(t, objects, tc.release, tc.namespace,
+				observedNamespaces(tc.targets, tc.controls))
+			verifyAdmission(t, objects, tc.release, tc.namespace, tc.controls)
 			verifySourceParity(t, objects, tc.release, tc.controls, tc.targets, tc.roles)
 			manager := object(t, objects, "Deployment", tc.release+"-controller-manager", tc.namespace)
 			managerPod := field(t, manager, "spec", "template", "spec").(map[string]any)
@@ -258,7 +260,9 @@ func verifyControlBoundary(
 	t *testing.T, objects []unstructured.Unstructured, release, namespace string, controls []string,
 ) {
 	t.Helper()
-	for _, name := range []string{release + "-manager-role", release + "-expiry-guard-role"} {
+	for _, name := range []string{
+		release + "-manager-role", release + "-expiry-guard-role", release + "-expiry-guard-namespaces",
+	} {
 		for _, item := range objects {
 			if item.GetKind() != "ClusterRole" || item.GetName() != name {
 				continue
@@ -301,10 +305,41 @@ func verifyControlBoundary(
 	}
 }
 
-func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release, namespace string) {
+// verifyGuardNamespaceObservation requires the expiry guard's Namespace get
+// to name exactly the target and control namespaces, through a ClusterRole
+// that outlives them.
+func verifyGuardNamespaceObservation(
+	t *testing.T, objects []unstructured.Unstructured, release, namespace string, observed []string,
+) {
 	t.Helper()
-	for _, mode := range []struct{ kind, suffix string }{
-		{"MutatingWebhookConfiguration", "mutating"}, {"ValidatingWebhookConfiguration", "validating"},
+	name := release + "-expiry-guard-namespaces"
+	role := object(t, objects, "ClusterRole", name, "")
+	want := []any{map[string]any{
+		"apiGroups": []any{""}, "resources": []any{"namespaces"},
+		"resourceNames": stringItems(observed), "verbs": []any{"get"},
+	}}
+	if !reflect.DeepEqual(field(t, role, "rules"), want) {
+		t.Fatalf("expiry guard may get only its target and control namespaces, got %v", field(t, role, "rules"))
+	}
+	binding := object(t, objects, "ClusterRoleBinding", name, "")
+	subjects := field(t, binding, "subjects").([]any)
+	subject := map[string]any{"kind": "ServiceAccount", "name": release + "-expiry-guard", "namespace": namespace}
+	if len(subjects) != 1 || !reflect.DeepEqual(subjects[0], subject) ||
+		field(t, binding, "roleRef", "kind") != "ClusterRole" || field(t, binding, "roleRef", "name") != name {
+		t.Fatal("expiry guard namespace get is bound to the wrong identity or role")
+	}
+}
+
+// controlNamespaceWebhook is the drain check for control namespaces (ADR-004).
+const controlNamespaceWebhook = "vcontrolnamespace-v1.kb.io"
+
+func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release, namespace string, controls []string) {
+	t.Helper()
+	for _, mode := range []struct {
+		kind, suffix  string
+		drainWebhooks int
+	}{
+		{"MutatingWebhookConfiguration", "mutating", 0}, {"ValidatingWebhookConfiguration", "validating", 1},
 	} {
 		config := object(t, objects, mode.kind, release+"-"+mode.suffix+"-webhook-configuration", "")
 		annotations, _, _ := unstructured.NestedStringMap(config, "metadata", "annotations")
@@ -312,31 +347,65 @@ func verifyAdmission(t *testing.T, objects []unstructured.Unstructured, release,
 			t.Fatal("webhook CA injection must reference the rendered certificate")
 		}
 		webhooks := field(t, config, "webhooks").([]any)
-		if len(webhooks) != 3 {
-			t.Fatal("all three admission resources must be protected")
-		}
+		accessWebhooks, drainWebhooks := 0, 0
 		for _, raw := range webhooks {
 			webhook := raw.(map[string]any)
 			if webhook["failurePolicy"] != "Fail" || webhook["sideEffects"] != "None" ||
 				webhook["timeoutSeconds"] != float64(5) {
 				t.Fatal("webhooks must fail closed with a bounded timeout")
 			}
-			if _, exists := webhook["namespaceSelector"]; exists {
-				t.Fatal("namespace selector may bypass admission")
+			service := field(t, webhook, "clientConfig", "service").(map[string]any)
+			if service["name"] != release+"-webhook-service" || service["namespace"] != namespace {
+				t.Fatal("webhook points at the wrong Service")
 			}
 			if _, exists := webhook["objectSelector"]; exists {
 				t.Fatal("object selector may bypass admission")
+			}
+			if webhook["name"] == controlNamespaceWebhook {
+				drainWebhooks++
+				verifyControlNamespaceWebhook(t, webhook, controls)
+				continue
+			}
+			accessWebhooks++
+			if _, exists := webhook["namespaceSelector"]; exists {
+				t.Fatal("namespace selector may bypass admission")
 			}
 			for _, rule := range field(t, webhook, "rules").([]any) {
 				if rule.(map[string]any)["scope"] != "Namespaced" {
 					t.Fatal("admission must match the namespaced access objects")
 				}
 			}
-			service := field(t, webhook, "clientConfig", "service").(map[string]any)
-			if service["name"] != release+"-webhook-service" || service["namespace"] != namespace {
-				t.Fatal("webhook points at the wrong Service")
-			}
 		}
+		if accessWebhooks != 3 {
+			t.Fatal("all three admission resources must be protected")
+		}
+		if drainWebhooks != mode.drainWebhooks {
+			t.Fatal("exactly one validating drain check must guard control-namespace deletion")
+		}
+	}
+}
+
+// verifyControlNamespaceWebhook requires the drain check to match only the
+// deletion of exactly the control namespaces. It fails closed, so a wider
+// selector would make unrelated namespace deletions depend on the manager.
+func verifyControlNamespaceWebhook(t *testing.T, webhook map[string]any, controls []string) {
+	t.Helper()
+	rules := field(t, webhook, "rules").([]any)
+	want := []any{map[string]any{
+		"apiGroups": []any{""}, "apiVersions": []any{"v1"}, "operations": []any{"DELETE"},
+		"resources": []any{"namespaces"}, "scope": "Cluster",
+	}}
+	if !reflect.DeepEqual(rules, want) {
+		t.Fatalf("drain check must match only Namespace DELETE, got %v", rules)
+	}
+	wantSelector := map[string]any{"matchExpressions": []any{map[string]any{
+		"key": "kubernetes.io/metadata.name", "operator": "In", "values": stringItems(controls),
+	}}}
+	if !reflect.DeepEqual(webhook["namespaceSelector"], wantSelector) {
+		t.Fatalf("drain check must select exactly the control namespaces, got %v", webhook["namespaceSelector"])
+	}
+	if field(t, webhook, "clientConfig", "service", "path") != "/validate-core-v1-namespace" {
+		t.Fatal("drain check points at the wrong handler")
 	}
 }
 
@@ -461,8 +530,14 @@ func verifySourceParity(
 			sourceWebhook := raw.(map[string]any)
 			chartWebhook := actual[i].(map[string]any)
 			rules := field(t, sourceWebhook, "rules").([]any)
+			// Access objects are namespaced; Namespace objects are cluster-scoped.
 			for _, rule := range rules {
-				rule.(map[string]any)["scope"] = "Namespaced"
+				rule := rule.(map[string]any)
+				rule["scope"] = "Namespaced"
+				resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+				if slices.Equal(resources, []string{"namespaces"}) {
+					rule["scope"] = "Cluster"
+				}
 			}
 			if !reflect.DeepEqual(field(t, chartWebhook, "rules"), rules) ||
 				field(t, sourceWebhook, "clientConfig", "service", "path") !=
